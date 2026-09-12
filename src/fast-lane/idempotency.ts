@@ -39,6 +39,12 @@ export interface IdempotencyStore {
    * Zero rows → someone already used it → abort, do not purchase.
    */
   consumeMandate(mandateId: string): Promise<boolean>;
+  /**
+   * Drop a VERIFIED record once its recovery has been handed back. The purchase
+   * is finished; a later shortfall of the same size in the same task is a new
+   * need and must be able to buy again. Never call this for SUBMITTED/UNKNOWN.
+   */
+  forget(key: string): Promise<void>;
 }
 
 /** `purchase:{taskId}:{sha256(provider|resource|amount)}` — one purchase per shortfall. */
@@ -78,5 +84,9 @@ export class InMemoryIdempotencyStore implements IdempotencyStore {
     if (this.consumed.has(mandateId)) return false;
     this.consumed.add(mandateId);
     return true;
+  }
+
+  async forget(key: string): Promise<void> {
+    if (this.records.get(key)?.status === "VERIFIED") this.records.delete(key);
   }
 }

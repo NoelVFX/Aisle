@@ -34,7 +34,7 @@ import type {
   ProfileMount,
   ProfileReadiness,
 } from "./browser.js";
-import { SteelComputerControl } from "./steel-computer.js";
+import { SteelComputerControl, SteelCursor } from "./steel-computer.js";
 
 /** steel.md §11 — captcha solves take tens of seconds inside a payment flow. */
 export const CHECKOUT_TIMEOUT_MS = 90_000;
@@ -99,6 +99,13 @@ export interface SteelProviderOptions {
    *   "playwright": Playwright mouse/keyboard over CDP.
    */
   controlSurface?: "steel-computer" | "playwright";
+
+  /**
+   * Route deterministic clicks through Steel's `sessions.computer` so the real
+   * OS cursor visibly glides and clicks in the live viewer. Default true. Falls
+   * back to a Playwright click if the element has no box or the API fails.
+   */
+  visibleCursor?: boolean;
 
   /**
    * Escape hatch: raw sessions.create params, merged under the named options.
@@ -260,7 +267,34 @@ type RoleArg = Parameters<Page["getByRole"]>[0];
 class PlaywrightPage implements PageLike {
   private cdp: CDPSession | undefined;
 
-  constructor(private readonly page: Page) {}
+  constructor(
+    private readonly page: Page,
+    private readonly cursor?: SteelCursor,
+  ) {}
+
+  /** Click a viewport point with the visible cursor, else through Playwright. */
+  private async pointClick(x: number, y: number): Promise<void> {
+    if (this.cursor) {
+      try {
+        await this.cursor.click(x, y);
+        return;
+      } catch {
+        // fall through to an invisible but reliable CDP click
+      }
+    }
+    await this.page.mouse.click(x, y);
+  }
+
+  private async clickLocator(loc: ReturnType<Page["locator"]>): Promise<void> {
+    if (this.cursor) {
+      await loc.scrollIntoViewIfNeeded().catch(() => {});
+      const box = await loc.boundingBox().catch(() => null);
+      if (box && box.width > 0 && box.height > 0) {
+        return this.pointClick(box.x + box.width / 2, box.y + box.height / 2);
+      }
+    }
+    await loc.click();
+  }
 
   private async cdpSession(): Promise<CDPSession> {
     if (!this.cdp) {
@@ -331,12 +365,12 @@ class PlaywrightPage implements PageLike {
 
   async clickCandidate(candidate: ActionCandidate): Promise<void> {
     const { x, y } = await this.centerOf(candidate);
-    await this.page.mouse.click(x, y);
+    await this.pointClick(x, y);
   }
 
   async fillCandidate(candidate: ActionCandidate, value: string): Promise<void> {
     const { x, y } = await this.centerOf(candidate);
-    await this.page.mouse.click(x, y);
+    await this.pointClick(x, y);
     await this.page.keyboard.press("Control+A"); // Steel browsers run on Linux
     await this.page.keyboard.type(value);
   }
@@ -344,7 +378,7 @@ class PlaywrightPage implements PageLike {
   async clickByRole(role: string, name: string | RegExp): Promise<boolean> {
     const loc = this.page.getByRole(role as RoleArg, { name, exact: typeof name === "string" }).first();
     if ((await loc.count()) === 0) return false;
-    await loc.click();
+    await this.clickLocator(loc);
     return true;
   }
 
@@ -367,7 +401,7 @@ class PlaywrightPage implements PageLike {
     await this.page.goto(url, { waitUntil: "domcontentloaded" });
   }
   async clickByText(text: string): Promise<void> {
-    await this.page.getByText(text, { exact: false }).first().click();
+    await this.clickLocator(this.page.getByText(text, { exact: false }).first());
   }
   async clickBySelector(selector: string): Promise<void> {
     await this.page.click(selector);
@@ -392,7 +426,7 @@ class PlaywrightPage implements PageLike {
     if ((await loc.count()) === 0) return false;
     // The element exists; use the page default (90s) so a mid-click captcha
     // solve doesn't fail the step and tempt a retry into a half-submitted checkout.
-    await loc.click();
+    await this.clickLocator(loc);
     return true;
   }
 }
@@ -501,7 +535,12 @@ export class SteelBrowserProvider implements BrowserProvider {
       return new SteelBrowserSession(
         session.id,
         opts.provider,
-        new PlaywrightPage(page),
+        new PlaywrightPage(
+          page,
+          o.visibleCursor === false
+            ? undefined
+            : new SteelCursor(client, session.id, page, process.env["AISLE_DEBUG_CURSOR"] === "1" ? { debug: (m) => console.error(`[steel] ${m}`) } : {}),
+        ),
         control,
         session.sessionViewerUrl,
         profile,

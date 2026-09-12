@@ -67,7 +67,8 @@ const PROCESS_TASK = `task_${randomUUID()}`;
 // The viewer is read-only unless AISLE_STEEL_INTERACTIVE=1 (steel.md §16.2).
 const steelProvider: SteelProviderOptions = {
   ...(process.env["AISLE_STEEL_PROXY_CAPTCHA"] === "1" ? {} : { useProxy: false, solveCaptcha: false }),
-  sessionOptions: { debugConfig: { interactive: process.env["AISLE_STEEL_INTERACTIVE"] === "1" } },
+  // systemCursor draws the OS cursor in the live viewer, which SteelCursor moves.
+  sessionOptions: { debugConfig: { interactive: process.env["AISLE_STEEL_INTERACTIVE"] === "1", systemCursor: true } },
 };
 
 const realPurchaseProviders = new Set(

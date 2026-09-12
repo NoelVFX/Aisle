@@ -21,7 +21,8 @@ import { FileAdapterRegistry } from "../slow-lane/adapters/recorded-adapter.js";
 import { createOpenRouterPicker } from "../slow-lane/resolver/picker.js";
 import { createOpenRouterComputerUseAgent } from "../slow-lane/computer-use.js";
 import { SubmitWithheldError } from "../errors.js";
-import type { IdempotencyStore } from "../fast-lane/idempotency.js";
+import { purchaseKeyFor, type IdempotencyStore } from "../fast-lane/idempotency.js";
+import { resolveRequirement } from "../core/outcome.js";
 import type { SteelPurchaser } from "./recovery.js";
 
 export interface SteelPurchaserOptions {
@@ -94,6 +95,11 @@ export function createSteelPurchaser(options: SteelPurchaserOptions): SteelPurch
             },
           },
         );
+        // This recovery is finished and verified. Release its record so the next
+        // wall of the same size in this session can buy again instead of being
+        // mistaken for a retry of this purchase.
+        const request = { checkpoint: job.checkpoint, quote: job.quote, mandate: job.mandate };
+        await options.store.forget(purchaseKeyFor(job.mandate, resolveRequirement(request)));
         return { outcome: "verified", result };
       } catch (err) {
         if (err instanceof SubmitWithheldError) return { outcome: "withheld", staged: err.staged };
