@@ -37,3 +37,29 @@
     "@anthropic-ai/sdk": "^0.32.1"
   }
 }
+  "version": "1.0.0",
+  "description": "Event-driven wake-up logic for Aisle agent recovery",
+  "type": "module",
+  "main": "dist/src/index.js",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "dev": "tsx",
+    "test": "node --test"
+  },
+  "keywords": [
+    "agent",
+    "mcp",
+    "web-agent",
+    "recovery",
+    "payment",
+    "aisle"
+  ],
+  "author": "markxiamo",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}
