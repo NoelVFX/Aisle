@@ -1,550 +1,130 @@
 # top-up-agent
 
-Transaction recovery for coding agents. When a tool call hits a paywall
-(`402 / insufficient_credits / quota_exceeded`), this module recovers the task,
-verifies the entitlement, and hands back a **resume token** so the host agent
-replays the failed call exactly where it stopped.
+The Aisle recovery engine, as a TypeScript library. When an agent's tool call
+hits a paywall, Aisle classifies it, freezes a checkpoint, buys the minimum,
+verifies the entitlement, and replays the exact call.
 
-It runs *inside* a host coding agent (Hermes / Claude / Codex); the host owns
-the task, the quote engine, and the approval UX.
+**North star:** the specs in [`docs/`](docs/) —
+[`aisle-pipeline.md`](docs/aisle-pipeline.md) (system) ·
+[`steel.md`](docs/steel.md) (browser) ·
+[`web-path.md`](docs/web-path.md) (browsing) ·
+[`build-checklist.md`](docs/build-checklist.md) (order) ·
+`aisle-scaffold.zip` (reference monorepo). Where this README and the docs
+disagree, the docs win.
 
-Two lanes, one converged outcome:
-
-- **Fast lane** — the vendor exposes **WebMCP** purchase tools; buy directly, no
-  browser.
-- **Slow lane** — no WebMCP; drive the vendor's real checkout with **Steel Cloud
-  + Playwright over CDP**, with a host-injected **computer-use** fallback for
-  dynamic pages, and Steel **profile** persistence for authenticated sessions.
-
-Both lanes return the same `RecoveryResult` (`{ lane, verifiedEntitlement,
-resumeToken }`), so the host doesn't care which path recovered the task.
-
-```ts
-import { runFastLane, runSlowLane, NoFastLaneError } from "top-up-agent";
-
-try {
-  return await runFastLane(request, { session });        // WebMCP path
-} catch (err) {
-  if (err instanceof NoFastLaneError) {
-    return await runSlowLane(request, { provider, adapter, profiles, agent });
-  }
-  throw err;
-}
-```
-
-## The workflow this implements
+## The pipeline this implements
 
 ```
-         (tool call hits 402, host produces Quote + signed Mandate, user approves)
-                                     │
-                                     ▼
-                    ┌────────────────────────────────┐
-                    │ 1. Detect WebMCP                │  does the vendor expose
-                    │    detectWebMcp(session)        │  purchase + balance tools?
-                    └────────────────────────────────┘
-                          │ yes                 │ no
-                          ▼                     ▼
-                 2. Guard (origin lock,    throw NoFastLaneError
-                    amount ≤ max,          → host falls back to SLOW LANE
-                    signature, expiry)        (Steel + Playwright)
-                          │
-                          ▼
-                 3. Purchase via the vendor's WebMCP tool
-                    (args derived ONLY from quote/mandate)
-                          │
-                          ▼
-                 4. Verify entitlement (balance delta re-read)
-                          │
-                          ▼
-                 5. Issue resume token  ──────────►  HERMES replays the
-                                                      original failed call
+tool call → 402
+  → classifyFailure()            429 + Retry-After < 60 is a rate limit, never a wall
+  → WakeUpManager                one recovery per (task, requirementHash); infra key never recovered
+  → freezeCheckpoint()           args + argumentsHash + origin locked FROM CONFIG
+  → buildQuote()                 ALREADY_COVERED | NO_VIABLE_OFFER | smallest one-time package
+  → gate()                       origin lock, $50/$100/$250 ceilings, circuit breaker
+  → signMandate()                HMAC, 10-min expiry, cap = price × 1.25, one-time, no auto-renew
+  → ONE HUMAN TAP                (approval UI not in this package)
+  → runFastLane() | runSlowLane()
+  → verify by balance delta      checkout success is not entitlement success
+  → resumeToken.resumeAction     the gateway replays the same tool with the same arguments
 ```
-
-## Usage (from the host agent)
-
-```ts
-import { runFastLane, NoFastLaneError } from "top-up-agent";
-
-try {
-  const { verifiedEntitlement, resumeToken } = await runFastLane(
-    { checkpoint, quote, mandate },   // produced upstream + approved
-    { session, emit: onEvent },       // session = host's live WebMCP connection
-  );
-  // Host activates the resume token: replay resumeToken.resumeAction verbatim.
-} catch (err) {
-  if (err instanceof NoFastLaneError) {
-    // Hand off to the slow lane (Steel + Playwright).
-  } else {
-    throw err; // MandateRejected / PurchaseFailed / PurchaseVerification
-  }
-}
-```
-
-The host supplies a `WebMcpSession` — a live connection to **one** vendor's
-WebMCP surface (`origin`, `provider`, `listTools()`, `callTool()`). This module
-never opens connections itself, which keeps it testable: the mock vendor
-implements the same interface.
-
-## Safety properties
-
-- **Origin lock** — the WebMCP session's origin must equal the mandate's
-  task-configured origin. A vendor may *describe* a purchase; only task
-  configuration *authorizes* the origin.
-- **Spend ceiling** — a quoted price above `mandate.maximumAmount` is rejected
-  before any tool is called.
-- **Single-use / idempotent** — one purchase per `(task, requirement)`; a
-  crashed-and-retried run re-reads balance instead of buying again.
-- **Verify ≠ checkout** — a resume token is issued only after the balance is
-  confirmed to cover the need.
-- **Verbatim replay** — the resume token carries the *original* failed tool
-  call; the host does not regenerate the request.
-
-## Slow lane — Steel + Playwright + CDP
-
-```
-  no WebMCP  →  create Steel session (resume saved profile)
-                     │  chromium.connectOverCDP(session.connectUrl)
-                     ▼
-              open mandate.origin ──► ORIGIN LOCK (redirect away ⇒ reject)
-                     ▼
-              discover offers ──► bind to the approved product (ceiling re-checked)
-                     ▼
-              stage checkout  ──► re-check observed total vs mandate
-                     ▼
-              confirm (transactional) ──► if result lost: PURCHASE_RESULT_UNKNOWN,
-                     │                     re-read balance, never re-click
-                     ▼
-              verify entitlement ──► balance ≥ requirement
-                     ▼
-              save profile  →  resume token  →  HERMES
-```
-
-- **Browser behind a port.** The worker and adapters talk to `PageLike` /
-  `ControlSurface`, never Playwright directly. `SteelBrowserProvider` implements
-  them with a live remote browser; `MockBrowserProvider` implements them in
-  memory so tests and `npm run demo:slow` need no Steel key and no browser.
-- **Deterministic first, model second.** Each vendor has a small
-  `VendorPurchaseAdapter` (scripted Playwright). When a step can't complete it
-  throws `DeterministicStepError`; the worker hands that sub-goal to a
-  host-injected `ComputerUseAgent` and retries once. Two reference agents ship:
-  - `createOpenRouterComputerUseAgent({ apiKey })` — OpenAI-compatible vision +
-    a JSON action protocol, works with **free OpenRouter vision models**
-    (`OPENROUTER_API_KEY`). No Anthropic key needed. Free models are weak at
-    pixel-precise clicking — fine as a best-effort last resort.
-  - `createAnthropicComputerUseAgent(client)` — Anthropic computer-use loop over
-    an injected client (`ANTHROPIC_API_KEY`).
-
-  **The core demo needs no model at all** — the deterministic path + mock
-  vendors complete the full MVP loop. A model is only the slow-lane fallback for
-  dynamic real pages.
-- **Profiles.** After authenticating, the session context (cookies/localStorage)
-  is saved via a `ProfileStore` (`InMemory` / `File`) and resumed next time.
-
-### One adapter for most vendors
-
-`GenericVendorAdapter` is the default: no per-vendor class. It guesses the
-pricing/billing paths, reads prices and unit counts out of the page text, clicks
-buy/confirm by common labels, and reads the balance back — and the instant a
-step is ambiguous it throws `DeterministicStepError`, so the worker hands that
-sub-goal to the computer-use agent. Easy sites go fast; hard ones (canvas,
-closed shadow DOM, unusual layouts) fall through to the model. Tune a vendor with
-config, not code.
 
 ```ts
 import {
-  SteelBrowserProvider, GenericVendorAdapter,
-  FileProfileStore, createAnthropicComputerUseAgent,
+  classifyFailure, freezeCheckpoint, lockOrigin, buildQuote, gate, loadLimits,
+  signMandate, runFastLane, runSlowLane, NoFastLaneError,
 } from "top-up-agent";
 
-const provider = new SteelBrowserProvider({
-  useProxy: true,                 // residential proxy pool
-  solveCaptcha: true,             // Steel's CAPTCHA sidecar
-  stealth: { humanizeInteractions: true },
-  credentials: { autoSubmit: true, blurFields: true },  // enable injection (see below)
+const classified = classifyFailure(toolError, { provider: "mockvendor" });
+const checkpoint = freezeCheckpoint({
+  taskId, toolCallId, tool, arguments: args,
+  origin: lockOrigin("mockvendor", upstreams.mockvendor),   // never from the error body
+  blocker: classified.blocker,
 });
-const adapter  = new GenericVendorAdapter({ provider: "acme", origin: "https://acme.example" });
-const profiles = new FileProfileStore("./.profiles");
-const agent    = createAnthropicComputerUseAgent(anthropicClient);
-
-await runSlowLane(request, { provider, adapter, profiles, agent });
+const q = buildQuote({ checkpoint, current, offers, perPurchaseCeiling: loadLimits().perPurchase });
+if (q.kind !== "QUOTE") { /* ALREADY_COVERED → replay; NO_VIABLE_OFFER → refuse */ }
+const verdict = gate(q.quote, checkpoint, spend);            // refusal carries cumulative spend
+const mandate = signMandate(q.quote, { taskId, recoveryJobId, userId });
+// …user approves…
+try {
+  return await runFastLane({ checkpoint, quote: q.quote, mandate }, { session, store });
+} catch (err) {
+  if (!(err instanceof NoFastLaneError)) throw err;
+  return await runSlowLane({ checkpoint, quote: q.quote, mandate }, { provider, adapter, store, profiles, agent });
+}
 ```
 
-`SteelProviderOptions` surfaces the below-the-protocol features as first-class:
-`useProxy` / `proxyUrl`, `solveCaptcha`, `stealth`, `blockAds`, `region`,
-`dimensions`, `credentials`, `sessionTimeoutMs` (defaults to 15 min so the
-session survives human approval), plus a raw `sessionOptions` escape hatch.
+## Invariants (from the docs — do not violate)
 
-The worker also uses these Steel capabilities:
-
-- **Already-covered check (§8).** Reads the balance *before* buying; if it
-  already clears the requirement, it emits `ALREADY_COVERED` and skips the
-  purchase entirely.
-- **Delta verification (§17 Gate 2).** Confirms `balanceAfter ≥ balanceBefore +
-  unitsGranted` — not merely that the balance now clears the requirement — so a
-  no-op checkout can't pass as success.
-- **HITL takeover (§15.11).** An adapter raises `TakeoverRequiredError` on a
-  3-DS / OTP / bank challenge; the worker emits `TAKEOVER_REQUESTED` with the
-  live viewer URL and awaits your `onTakeover` handler, then re-verifies. No
-  faking, no failing.
-- **Receipt capture (§15.8).** After purchase, session files (invoice / receipt
-  / license) are listed via the Steel Files API and returned on
-  `RecoveryResult.receiptFileIds`; the viewer URL is on `sessionViewerUrl`.
-- **Tier-2 fallback on every step, including confirm.** On a
-  `DeterministicStepError` the injected computer-use agent (e.g. the OpenRouter
-  one) recovers the step and the worker retries once. Confirm is included by
-  default (`allowComputerUseOnConfirm`, default true); set it false for strict
-  deterministic-only submit. Either way Gate 1 (staged-vs-mandate) and Gate 2
-  (delta) still run, so a wrong click never becomes a wrong purchase.
-
-### Credentials injection (the card never touches this agent)
-
-Setting `credentials` on the provider enables Steel to **type stored secrets
-straight into the page** — so the card/login never enters this process or a model
-prompt. That flag carries **no secret**. The value must be stored in Steel
-out-of-band, keyed to the vendor origin, e.g. from your own code:
-
-```ts
-// Run this yourself, once, with the user's consent — NOT inside the agent loop.
-await steel.credentials.create({ origin: "https://acme.example", value: { /* card/login */ } });
-```
-
-This agent deliberately never accepts a plaintext card or types payment
-credentials itself; it only flips the injection switch.
-
-## Commands
-
-```bash
-npm install
-npm run demo         # fast lane: mock WebMCP vendor
-npm run demo:slow    # slow lane: mock vendor website (no Steel key needed)
-npm test             # vitest: both lanes — routing, guards, verify, idempotency, fallback
-npm run typecheck
-
-# Verify the REAL Steel provider end-to-end (needs STEEL_API_KEY in .env):
-npm run smoke:steel  # create session → CDP connect → navigate → screenshot → release
-```
+1. **Origins come from config or an enrollment row.** Never from a tool result, page,
+   error body, or model. The guard anchors on `checkpoint.origin`, and `canonicalize()`
+   handles scheme, host case, default port and trailing slash.
+2. **A model is never where money moves.** The resolver may recover discovery and
+   staging only. A missing confirm control fails with `CONFIRM_NOT_FOUND`; it is never
+   handed to the model.
+3. **Gate 1 before submit.** Staged amount ≤ cap, currency, one-time, no auto-renew
+   (`assertMatchesMandate`). Gate 2 after: `after ≥ before + unitsGranted`.
+4. **After submit, never retry.** A lost response becomes `UNKNOWN` and is decided by
+   re-reading the balance. Any purchase record not `FAILED` blocks a second purchase for
+   the same requirement.
+5. **Mandates are single use** (`consumeMandate`) and HMAC-verified by the worker.
+6. **Aisle's own OpenRouter key is infrastructure.** A 402 on `OPENROUTER_INFRA_KEY`
+   throws `InfraBlockedError` and never opens a recovery job.
 
 ## Layout
 
 ```
 src/
-├── index.ts                  public surface (both lanes)
-├── types.ts                  shared contracts (Quote, Mandate, Entitlement, ResumeToken, Offer, …)
-├── errors.ts                 typed outcomes (NoFastLane / MandateRejected / …)
-├── webmcp/                   fast-lane transport
-│   ├── session.ts            WebMcpSession interface (host-supplied)
-│   └── detector.ts           detect + resolve purchase/balance tools
-├── fast-lane/
-│   ├── executor.ts           detect → guard → purchase → verify → resume
-│   ├── guards.ts             origin lock, ceiling, signature, expiry (SHARED with slow lane)
-│   ├── purchase.ts           call the WebMCP purchase/balance tools
-│   ├── verify.ts             balance-delta verification
-│   └── idempotency.ts        purchase key + store (SHARED with slow lane)
-├── slow-lane/
-│   ├── executor.ts           browser purchase worker + transaction state machine
-│   ├── browser.ts            PageLike / ControlSurface / BrowserProvider ports
-│   ├── steel-provider.ts     Steel Cloud + Playwright-over-CDP implementation
-│   ├── profiles.ts           ProfileStore (InMemory / File) — Steel profile saving
-│   ├── vendor-adapter.ts     VendorPurchaseAdapter interface + chooseMinimumOffer/selectOffer
-│   ├── computer-use.ts       ComputerUseAgent + Scripted + Anthropic reference
-│   └── adapters/
-│       ├── generic-vendor-adapter.ts  ONE adapter for most vendors (heuristics + fallback)
-│       └── mock-vendor-site.ts        in-memory vendor site + adapter + browser
-├── resume/
-│   └── resume-token.ts       build/validate the handoff artifact
-├── mock/
-│   └── mock-vendor.ts        in-memory WebMCP vendor (fast lane)
-├── demo.ts                   fast-lane walkthrough
-└── slow-lane-demo.ts         slow-lane walkthrough
+├── index.ts                  public surface
+├── types.ts                  contracts: Blocker, LockedOrigin, TaskCheckpoint, Quote, PurchaseMandate, …
+├── errors.ts                 NoFastLane / MandateRejected / MandateMismatch / InfraBlocked / …
+├── error-normalizer.ts       one error shape for MCP errors and wire responses
+├── classifier.ts             429 guard → vendor rules → codes → HTTP status → UNKNOWN
+├── interceptor.ts            raw error → FailureEvent → WakeUpManager
+├── wakeup-manager.ts         dedupe on requirementHash, infra-key exclusion
+├── event.ts                  FailureEvent
+├── core/                     checkpoint freeze, canonical hashing + idempotency keys, result helpers
+├── quote/                    quote engine
+├── policy/                   origin canonicalization, gate, spend ledger
+├── mandate/                  sign / verify / Gate 1 comparison
+├── webmcp/                   purchase-tool session + detection
+├── fast-lane/                executor, guards, purchase, verify, idempotency store
+├── slow-lane/                executor, Steel provider, adapters, computer-use resolver, profiles
+├── resume/                   resume record
+├── mock/                     in-memory vendor with purchase tools
+├── demo.ts                   the spine through the fast lane
+└── slow-lane-demo.ts         the slow lane against a mock site
 ```
-# Aisle Agent Wake-up Logic
 
-This module implements the event-driven wake-up layer for Aisle.
+## Commands
 
-Aisle is a recovery agent that activates when an original AI agent encounters
-a recoverable payment-related failure while executing a task.
+```bash
+npm install
+npm run demo          # 402 → classify → checkpoint → quote → gate → mandate → fast lane
+npm run demo:slow     # slow lane against a mock vendor site (no Steel key)
+npm test              # vitest, all suites
+npm run typecheck
+npm run smoke:steel   # real Steel session: create → assert timeout → CDP → navigate → release
+```
 
-The wake-up module does not perform purchases itself. Its responsibility is to:
+Environment variables are listed in [`.env.example`](.env.example).
 
-1. Detect recoverable payment-related failures.
-2. Normalize errors from different providers.
-3. Classify the failure.
-4. Preserve the original task context.
-5. Create a `FailureEvent`.
-6. Trigger a recovery agent.
-7. Prevent duplicate wake-ups for the same failure.
-8. Allow retry if the recovery handler itself fails.
+## Steel usage
 
----
+`SteelBrowserProvider` creates purchase-worker sessions per `steel.md` §4.1:
+`useProxy`, `solveCaptcha`, `blockAds` on, 1280×720, 15-minute `timeout`
+(asserted with `assertTimeoutApplied`), no `inactivityTimeout`, no
+`optimizeBandwidth`. It uses the page Steel already opened and never calls
+`newContext()`, sets 90-second timeouts for captcha solves, and releases the
+session on every path, including a failed CDP connect.
 
-## Architecture
+## Not built yet (in the docs, not in this package)
 
-```text
-                    Original Agent
-                          |
-                          v
-                    MCP Tool Call
-                          |
-                          v
-                  Tool / Provider Error
-                          |
-                          v
-               +-----------------------+
-               |   Error Interceptor   |
-               +-----------+-----------+
-                           |
-                           v
-               +-----------------------+
-               |    Error Normalizer   |
-               +-----------+-----------+
-                           |
-                           v
-               +-----------------------+
-               |   Failure Classifier  |
-               +-----------+-----------+
-                           |
-                           v
-                    FailureEvent
-                           |
-                           v
-               +-----------------------+
-               |    WakeUpManager      |
-               +-----------+-----------+
-                           |
-                    Recoverable?
-                     /           \
-                   YES            NO
-                    |              |
-                    v              v
-              WakeUpHandler      Ignore
-                    |
-                    v
-              Recovery Agent
-                    |
-                    v
-          Purchase / Browser / Resume
-Module Responsibilities
-src/error-normalizer.ts
-Converts different provider error formats into one predictable representation.
-Supported examples include:
-{ status: 402, error: "insufficient_credits" }
-
-{ statusCode: 429, code: "quota_exceeded" }
-
-Error("HTTP 402 Payment Required")
-
-"HTTP 402 Payment Required"
-Output:
-interface NormalizedError {
-  status?: number;
-  code?: string;
-  message?: string;
-  raw: unknown;
-}
-src/classifier.ts
-Determines whether an error is recoverable through a payment-related recovery flow.
-Recoverable failures currently include:
-PAYMENT_REQUIRED
-QUOTA_EXCEEDED
-INSUFFICIENT_CREDITS
-PLAN_REQUIRED
-Failures that do not trigger a purchase recovery include:
-AUTH_REQUIRED
-FORBIDDEN
-NOT_FOUND
-SERVER_ERROR
-UNKNOWN
-The classifier prioritizes:
-Explicit error code
-        |
-        v
-HTTP status
-        |
-        v
-Error message
-        |
-        v
-UNKNOWN
-src/event.ts
-Defines the event passed to the recovery layer.
-interface FailureEvent {
-  taskId: string;
-  provider: string;
-  toolName: string;
-  toolArgs: unknown;
-  errorType: FailureClassification;
-  rawError: unknown;
-  context: AgentContext;
-  timestamp: string;
-}
-The original agent context is preserved so that recovery can resume the
-existing task instead of restarting it from scratch.
-src/interceptor.ts
-Connects the raw provider error to the wake-up system.
-Flow:
-Raw Tool Error
-      |
-      v
-normalize + classify
-      |
-      v
-FailureEvent
-      |
-      v
-WakeUpManager
-The interceptor does not purchase anything.
-src/wakeup-manager.ts
-Controls whether Aisle should wake up.
-It provides:
-interface WakeUpHandler {
-  wake(event: FailureEvent): Promise<void>;
-}
-The WakeUpManager also provides a loop guard.
-For the same:
-taskId
-+
-provider
-+
-toolName
-+
-errorType
-only one successful wake-up is triggered.
-If the recovery handler itself fails, the wake key is removed so another attempt
-can be made.
-Example
-A provider returns:
-{
-  "statusCode": 402,
-  "code": "insufficient_credits",
-  "message": "You do not have enough credits."
-}
-The system converts this into:
-INSUFFICIENT_CREDITS
-recoverable = true
-Then:
-FailureEvent
-     |
-     v
-WakeUpManager
-     |
-     v
-WakeUpHandler
-     |
-     v
-Recovery Agent
-A different error such as:
-{
-  "status": 401,
-  "code": "unauthorized"
-}
-is classified as:
-AUTH_REQUIRED
-recoverable = false
-and does not trigger the recovery agent.
-Testing
-The project contains unit, integration, and end-to-end tests.
-TypeScript validation
-npx tsc --noEmit
-Classifier tests
-node --test --import tsx tests/classifier.test.ts
-Error normalization tests
-node --test --import tsx tests/error-normalizer.test.ts
-Interceptor tests
-node --test --import tsx tests/interceptor.test.ts
-End-to-end tests
-node --test --import tsx tests/end-to-end.test.ts
-Run all tests
-node --test --import tsx tests/*.test.ts
-Current test coverage:
-25 tests
-25 passed
-0 failed
-Integration Contract
-The wake-up module is intentionally independent of the purchase implementation.
-A downstream recovery system only needs to implement:
-const recoveryAgent: WakeUpHandler = {
-  async wake(event) {
-    // Purchase credits
-    // Open pricing page with Steel Browser
-    // Obtain user approval
-    // Resume original task
-  },
-};
-This keeps the wake-up logic separate from:
-Purchase execution
-Browser automation
-Payment credentials
-User approval UI
-Task resumption
-Security Considerations
-The wake-up layer should be integrated with additional safeguards in the
-complete Aisle system.
-Origin Lock
-Purchase destinations should come from trusted configuration or previously
-authorized endpoints rather than arbitrary URLs contained in tool output.
-Approval Boundary
-The recovery agent should request explicit user approval before spending money.
-Spending Limits
-The final recovery system should enforce per-purchase, per-task, and per-day
-spending limits.
-Loop Protection
-WakeUpManager prevents repeated wake-ups for the same task/tool/failure
-combination.
-Current Scope
-This module implements:
-Error Detection
-Error Normalization
-Failure Classification
-FailureEvent Creation
-Wake-up Dispatch
-Duplicate Wake Protection
-Context Preservation
-It does not implement:
-Payment Processing
-Stripe Integration
-Steel Browser Automation
-Pricing Page Navigation
-User Approval UI
-Original Agent Task Resume
-Those components can be connected through the WakeUpHandler interface.
-Project Structure
-Top-up-agent/
-|
-├── src/
-│   ├── event.ts
-│   ├── error-normalizer.ts
-│   ├── classifier.ts
-│   ├── interceptor.ts
-│   └── wakeup-manager.ts
-│
-├── tests/
-│   ├── classifier.test.ts
-│   ├── error-normalizer.test.ts
-│   ├── interceptor.test.ts
-│   └── end-to-end.test.ts
-│
-├── README.md
-├── package.json
-├── package-lock.json
-└── tsconfig.json
-Design Principle
-Aisle does not replace the original agent.
-It wakes up only when the original agent encounters a recoverable
-spending-related failure.
-Original Agent
-      |
-      v
-Normal execution
-      |
-      v
-Recoverable payment failure
-      |
-      v
-Aisle wakes up
-      |
-      v
-Recovery
-      |
-      v
-Original task resumes
-The original task context is preserved throughout the recovery flow.
+- **MCP gateway** (`apps/gateway`): namespacing, the blocking call, `SAFE_BLOCK_MS`,
+  `aisle__wait_for_recovery`, replay.
+- **Control plane** (`apps/api`): recovery jobs, SSE event stream, `/r/:id` approve/reject.
+- **Approval page** (`apps/web`) and the web path (CDP 402 detector, enrollments).
+- **Postgres** (`db/schema.sql`). Stores here are in-memory behind interfaces.
+- **Tier 1 JSON-LD / Browser Tools markdown offers, tier 3 AX-index picker, adapter
+  promotion, `REPLAY_RESOLVER`.**
+- **Steel SDK 0.8 gaps:** no Profiles API (profiles use session context instead),
+  no trace export, no extension attach. Re-check when upgrading `steel-sdk`.

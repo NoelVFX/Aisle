@@ -53,9 +53,9 @@ export function buildQuote(input: BuildQuoteInput): QuoteOutcome {
     return { kind: "NO_VIABLE_OFFER", balance, required, shortfall };
   }
 
-  const what = input.contextNote ? `${input.contextNote} ` : "";
+  const who = input.contextNote ? `${input.contextNote} need` : "This task needs";
   const reason =
-    `${what}needs ${fmt(required)} ${checkpoint.blocker.resource}. Balance ${fmt(balance)}. ` +
+    `${who} ${fmt(required)} ${checkpoint.blocker.resource}. Balance ${fmt(balance)}. ` +
     `Smallest package that clears the ${fmt(shortfall)} shortfall is ${best.label} at $${best.price}.`;
 
   return {

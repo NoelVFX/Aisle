@@ -1,127 +1,102 @@
 import { describe, it, expect } from "vitest";
 import {
+  GenericVendorAdapter,
+  InfraBlockedError,
   createOpenRouterComputerUseAgent,
   parseComputerUseAction,
   runSlowLane,
-  GenericVendorAdapter,
 } from "../src/index.js";
 import type { OpenRouterFetch } from "../src/index.js";
-import {
-  MockBrowserProvider,
-  MockVendorSite,
-} from "../src/slow-lane/adapters/mock-vendor-site.js";
-import type { FastLaneRequest } from "../src/types.js";
+import { MockBrowserProvider, MockVendorSite } from "../src/slow-lane/adapters/mock-vendor-site.js";
+import { makeRequest, SECRET } from "./fixtures.js";
 
 const PROVIDER = "openrouter-vendor";
 const ORIGIN = "https://shop.mock-slow-vendor.test";
 
-/** Fake OpenRouter endpoint that replays a queue of assistant contents. */
-function fakeFetch(contents: string[]): OpenRouterFetch {
+/** Fake OpenRouter endpoint that replays a queue of assistant contents and records bodies. */
+function fakeFetch(contents: string[], bodies: unknown[] = [], status = 200): OpenRouterFetch {
   let i = 0;
-  return async () => {
+  return async (_url, init) => {
+    bodies.push(JSON.parse(init.body));
     const content = contents[Math.min(i, contents.length - 1)] ?? "";
     i++;
     return {
-      ok: true,
-      status: 200,
-      text: async () => JSON.stringify({ choices: [{ message: { content } }] }),
+      ok: status >= 200 && status < 300,
+      status,
+      text: async () => JSON.stringify({ model: "openai/gpt-5", choices: [{ message: { content } }] }),
     };
   };
 }
 
 describe("parseComputerUseAction", () => {
   it("parses a bare JSON action", () => {
-    expect(parseComputerUseAction('{"action":"click","x":10,"y":20}')).toEqual({
-      type: "click",
-      x: 10,
-      y: 20,
-    });
+    expect(parseComputerUseAction('{"action":"click","x":10,"y":20}')).toEqual({ type: "click", x: 10, y: 20 });
   });
   it("tolerates code fences and prose", () => {
-    const out = parseComputerUseAction('Sure:\n```json\n{"action":"done","success":true}\n```');
-    expect(out).toEqual({ type: "done", success: true, note: undefined });
+    expect(parseComputerUseAction('Sure:\n```json\n{"action":"done","success":true}\n```')).toEqual({
+      type: "done",
+      success: true,
+      note: undefined,
+    });
+  });
+  it("rejects clicks without numeric coordinates", () => {
+    expect(parseComputerUseAction('{"action":"click","x":"left"}')).toBeUndefined();
   });
   it("returns undefined on non-JSON", () => {
     expect(parseComputerUseAction("I cannot find it")).toBeUndefined();
   });
 });
 
-describe("OpenRouter agent drives the control surface", () => {
-  it("executes actions until done", async () => {
+describe("OpenRouter resolver", () => {
+  it("drives the control surface with the VISION profile and a models fallback array", async () => {
     const site = new MockVendorSite({ provider: PROVIDER, origin: ORIGIN, failDiscoverUntilAssisted: true });
     const session = await new MockBrowserProvider(site).createSession({ provider: PROVIDER });
+    const bodies: Array<Record<string, unknown>> = [];
+    const used: Array<string | undefined> = [];
     const agent = createOpenRouterComputerUseAgent({
-      apiKey: "test-key",
-      fetchImpl: fakeFetch(['{"action":"click","x":50,"y":60}', '{"action":"done","success":true}']),
+      apiKey: "infra-key",
+      fetchImpl: fakeFetch(['{"action":"click","x":50,"y":60}', '{"action":"done","success":true}'], bodies),
+      onModelCall: (i) => used.push(i.modelUsed),
     });
 
     const outcome = await agent.run(session.control, "reveal pricing");
     expect(outcome.success).toBe(true);
-    expect(site.discoverUnlocked).toBe(true); // a click unlocks discovery in the mock
+    expect(site.discoverUnlocked).toBe(true);
+    expect(bodies[0]?.["model"]).toBe("anthropic/claude-sonnet-4.6");
+    expect(bodies[0]?.["models"]).toEqual(["openai/gpt-5"]);
+    expect(used).toEqual(["openai/gpt-5", "openai/gpt-5"]);
   });
 
-  it("throws without an API key", () => {
-    const prev = process.env["OPENROUTER_API_KEY"];
-    delete process.env["OPENROUTER_API_KEY"];
+  it("fails loud with INFRA_BLOCKED when the resolver key itself 402s (§16.5)", async () => {
+    const site = new MockVendorSite({ provider: PROVIDER, origin: ORIGIN });
+    const session = await new MockBrowserProvider(site).createSession({ provider: PROVIDER });
+    const agent = createOpenRouterComputerUseAgent({ apiKey: "drained", fetchImpl: fakeFetch([""], [], 402) });
+    await expect(agent.run(session.control, "anything")).rejects.toBeInstanceOf(InfraBlockedError);
+  });
+
+  it("requires OPENROUTER_INFRA_KEY, not a vendor key", () => {
+    const prev = process.env["OPENROUTER_INFRA_KEY"];
+    delete process.env["OPENROUTER_INFRA_KEY"];
     try {
-      expect(() => createOpenRouterComputerUseAgent()).toThrow(/OPENROUTER_API_KEY/);
+      expect(() => createOpenRouterComputerUseAgent()).toThrow(/OPENROUTER_INFRA_KEY/);
     } finally {
-      if (prev !== undefined) process.env["OPENROUTER_API_KEY"] = prev;
+      if (prev !== undefined) process.env["OPENROUTER_INFRA_KEY"] = prev;
     }
   });
 });
 
-function makeRequest(): FastLaneRequest {
-  return {
-    checkpoint: {
-      taskId: "task_or",
-      agentId: "hermes",
-      originalGoal: "Generate hero images.",
-      failedToolCall: { id: "call_2", tool: "generate_image", arguments: { prompt: "hero #2" } },
-      origin: { provider: PROVIDER, canonicalOrigin: ORIGIN, source: "task_configuration", lockedAt: new Date().toISOString() },
-      failure: { type: "INSUFFICIENT_CREDITS", rawError: { status: 402 } },
-    },
-    quote: {
-      provider: PROVIDER,
-      purchase: { productId: "gen_5000_20", quantity: 1, credits: 5000, price: 20, currency: "USD" },
-      billing: "one_time",
-      autoRenew: false,
-      reason: "needs credits",
-    },
-    requirement: { resource: "credits", amount: 3200 },
-    mandate: {
-      mandateId: "mnd_or",
-      taskId: "task_or",
-      origin: ORIGIN,
-      provider: PROVIDER,
-      productId: "gen_5000_20",
-      maximumAmount: 50,
-      currency: "USD",
-      billingType: "one_time",
-      autoRenew: false,
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-      nonce: "nonce_or",
-      signature: "sig_ok",
-    },
-  };
-}
-
-describe("slow lane end-to-end with the OpenRouter fallback", () => {
-  it("recovers a stuck discovery step via the OpenRouter agent", async () => {
-    const site = new MockVendorSite({
-      provider: PROVIDER,
-      origin: ORIGIN,
-      startingBalance: 0,
-      failDiscoverUntilAssisted: true,
-    });
+describe("slow lane end-to-end with the OpenRouter resolver", () => {
+  it("recovers a stuck discovery step", async () => {
+    const site = new MockVendorSite({ provider: PROVIDER, origin: ORIGIN, failDiscoverUntilAssisted: true });
     const agent = createOpenRouterComputerUseAgent({
-      apiKey: "test-key",
+      apiKey: "infra-key",
       fetchImpl: fakeFetch(['{"action":"click","x":100,"y":200}', '{"action":"done","success":true}']),
     });
-    const result = await runSlowLane(makeRequest(), {
+    const result = await runSlowLane(makeRequest({ provider: PROVIDER, origin: ORIGIN, productId: "gen_5000_20" }), {
       provider: new MockBrowserProvider(site),
       adapter: new GenericVendorAdapter({ provider: PROVIDER, origin: ORIGIN }),
       agent,
+      mandateSecret: SECRET,
     });
     expect(result.verifiedEntitlement.balance).toBe(5000);
   });

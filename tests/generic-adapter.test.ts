@@ -1,17 +1,17 @@
 import { describe, it, expect } from "vitest";
 import {
   GenericVendorAdapter,
-  parseOffersFromText,
+  detectAutoRenew,
+  detectBillingPeriod,
+  extractBalance,
   extractPrice,
   extractUnits,
+  parseOffersFromText,
   runSlowLane,
 } from "../src/index.js";
-import {
-  MockBrowserProvider,
-  MockVendorSite,
-} from "../src/slow-lane/adapters/mock-vendor-site.js";
+import { MockBrowserProvider, MockVendorSite } from "../src/slow-lane/adapters/mock-vendor-site.js";
 import { ScriptedComputerUseAgent } from "../src/slow-lane/computer-use.js";
-import type { FastLaneRequest } from "../src/types.js";
+import { makeRequest, SECRET } from "./fixtures.js";
 
 const PROVIDER = "generic-vendor";
 const ORIGIN = "https://shop.mock-slow-vendor.test";
@@ -22,85 +22,62 @@ describe("generic parsing heuristics", () => {
     expect(extractUnits("Includes 5,000 credits per month")).toBe(5000);
   });
 
-  it("parses multiple offers from a pricing blob", () => {
-    const text = [
-      "Starter  1,000 credits  $5",
-      "Growth  5,000 credits  $20",
-      "Scale  20,000 credits  $70",
-      "Footer: contact sales", // no price+units → ignored
-    ].join("\n");
+  it("parses offers and flags subscriptions", () => {
+    const text = ["Starter  1,000 credits  $5", "Growth  5,000 credits  $20", "Pro 20,000 credits $70 / month", "Footer"].join("\n");
     const offers = parseOffersFromText(text);
-    expect(offers.map((o) => o.units)).toEqual([1000, 5000, 20000]);
-    expect(offers.map((o) => o.price)).toEqual([5, 20, 70]);
+    expect(offers.map((o) => o.unitsGranted)).toEqual([1000, 5000, 20000]);
     expect(offers[1]?.productId).toBe("gen_5000_20");
+    expect(offers[2]?.billing).toBe("subscription");
+  });
+
+  it("reads the balance from a balance line, not the first credit count on the page", () => {
+    const account = "Plan: Pro — includes 5,000 credits/month\nCredit balance: 0 credits";
+    expect(extractBalance(account)).toBe(0);
+    expect(extractBalance("Plan: Pro — 5,000 credits/month")).toBeUndefined();
+  });
+
+  it("detects billing period and auto-renew on a checkout page", () => {
+    expect(detectBillingPeriod("One-time purchase")).toBe("one_time");
+    expect(detectBillingPeriod("Billed monthly")).toBe("subscription");
+    expect(detectAutoRenew("No auto-renew")).toBe(false);
+    expect(detectAutoRenew("Auto-renew: on")).toBe(true);
   });
 });
 
-function makeRequest(): FastLaneRequest {
-  return {
-    checkpoint: {
-      taskId: "task_g",
-      agentId: "hermes",
-      originalGoal: "Generate hero images.",
-      failedToolCall: { id: "call_2", tool: "generate_image", arguments: { prompt: "hero #2" } },
-      origin: { provider: PROVIDER, canonicalOrigin: ORIGIN, source: "task_configuration", lockedAt: new Date().toISOString() },
-      failure: { type: "INSUFFICIENT_CREDITS", rawError: { status: 402 } },
-    },
-    quote: {
-      provider: PROVIDER,
-      purchase: { productId: "gen_5000_20", quantity: 1, credits: 5000, price: 20, currency: "USD" },
-      billing: "one_time",
-      autoRenew: false,
-      reason: "needs credits",
-    },
-    requirement: { resource: "credits", amount: 3200 },
-    mandate: {
-      mandateId: "mnd_g",
-      taskId: "task_g",
-      origin: ORIGIN,
-      provider: PROVIDER,
-      productId: "gen_5000_20",
-      maximumAmount: 50,
-      currency: "USD",
-      billingType: "one_time",
-      autoRenew: false,
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-      nonce: "nonce_g",
-      signature: "sig_ok",
-    },
-  };
-}
-
 describe("generic adapter — end to end (no vendor-specific code)", () => {
-  it("discovers, buys, verifies, and resumes on the mock site", async () => {
+  const req = () => makeRequest({ provider: PROVIDER, origin: ORIGIN, productId: "gen_5000_20" });
+
+  it("discovers, stages the chosen package, buys, verifies", async () => {
     const site = new MockVendorSite({ provider: PROVIDER, origin: ORIGIN, startingBalance: 0 });
-    const adapter = new GenericVendorAdapter({ provider: PROVIDER, origin: ORIGIN });
-    const result = await runSlowLane(makeRequest(), {
+    const result = await runSlowLane(req(), {
       provider: new MockBrowserProvider(site),
-      adapter,
+      adapter: new GenericVendorAdapter({ provider: PROVIDER, origin: ORIGIN }),
+      mandateSecret: SECRET,
     });
-    expect(result.lane).toBe("slow");
     expect(site.purchaseClicks).toBe(1);
+    expect(site.stagedProductId).toBe("credits_5000");
     expect(result.verifiedEntitlement.balance).toBe(5000);
   });
 
-  it("falls back to computer-use when pricing isn't immediately visible", async () => {
-    const site = new MockVendorSite({
-      provider: PROVIDER,
-      origin: ORIGIN,
-      startingBalance: 0,
-      failDiscoverUntilAssisted: true,
-    });
-    const adapter = new GenericVendorAdapter({ provider: PROVIDER, origin: ORIGIN });
-    const agent = new ScriptedComputerUseAgent([
-      { type: "click", x: 100, y: 200 },
-      { type: "done", success: true },
-    ]);
-    const result = await runSlowLane(makeRequest(), {
+  it("falls back to the resolver when pricing isn't immediately visible", async () => {
+    const site = new MockVendorSite({ provider: PROVIDER, origin: ORIGIN, failDiscoverUntilAssisted: true });
+    const agent = new ScriptedComputerUseAgent([{ type: "click", x: 100, y: 200 }, { type: "done", success: true }]);
+    const result = await runSlowLane(req(), {
       provider: new MockBrowserProvider(site),
-      adapter,
+      adapter: new GenericVendorAdapter({ provider: PROVIDER, origin: ORIGIN }),
       agent,
+      mandateSecret: SECRET,
     });
     expect(result.verifiedEntitlement.balance).toBe(5000);
+  });
+
+  it("does not falsely report ALREADY_COVERED from a plan description", async () => {
+    const site = new MockVendorSite({ provider: PROVIDER, origin: ORIGIN, startingBalance: 0 });
+    const result = await runSlowLane(req(), {
+      provider: new MockBrowserProvider(site),
+      adapter: new GenericVendorAdapter({ provider: PROVIDER, origin: ORIGIN }),
+      mandateSecret: SECRET,
+    });
+    expect(result.alreadyCovered).toBe(false);
   });
 });
