@@ -13,15 +13,16 @@ import { classifyFailure, isRateLimitNotWall, registerVendorRules } from "../cla
 import { normalizeError, type NormalizedError } from "../error-normalizer.js";
 import {
   RecoveryCoordinator,
+  type FastPurchaser,
   type RecoveryJob,
   type SteelPurchaser,
   type SteelRunner,
   type TimelineEvent,
 } from "./recovery.js";
 import {
-  MockImageVendor,
-  mockVendorHttpTool,
   openAiChatTool,
+  openRouterChatTool,
+  studioImageTool,
   type FetchLike,
   type UpstreamResult,
   type Upstreams,
@@ -49,6 +50,47 @@ registerVendorRules("openai", [
   },
 ]);
 
+/**
+ * Higgsfield, per the docs' example (aisle-pipeline.md §6). ⚠ VERIFY the real body
+ * against a drained account and tighten.
+ */
+registerVendorRules("higgsfield", [
+  {
+    test: (e) => e.code === "insufficient_credits" || /insufficient credits|not enough credits/i.test(e.message ?? ""),
+    type: "INSUFFICIENT_CREDITS",
+    resource: "image_credits",
+    required: (e) => {
+      const v = e.body !== null && typeof e.body === "object" ? (e.body as Record<string, unknown>)["required_credits"] : undefined;
+      return typeof v === "number" ? v : undefined;
+    },
+  },
+]);
+
+/**
+ * OpenRouter: 402 { error: { code: 402, message: "Insufficient credits. …" } } on
+ * paid models (API and openrouter.ai/chat alike). ⚠ VERIFY against a drained account.
+ */
+registerVendorRules("openrouter", [
+  {
+    test: (e) => e.status === 402 || /insufficient credits|requires more credits|never purchased credits/i.test(e.message ?? ""),
+    type: "INSUFFICIENT_CREDITS",
+    resource: "usd_balance",
+  },
+]);
+
+/** Studio (Stripe test-mode demo vendor): 402 { error: { code: "insufficient_credits", required_credits } }. */
+registerVendorRules("studio", [
+  {
+    test: (e) => e.code === "insufficient_credits",
+    type: "INSUFFICIENT_CREDITS",
+    resource: "image_credits",
+    required: (e) => {
+      const v = e.body !== null && typeof e.body === "object" ? (e.body as Record<string, unknown>)["required_credits"] : undefined;
+      return typeof v === "number" ? v : undefined;
+    },
+  },
+]);
+
 /** OpenAI rate limits are 429 too. Buying credits does not fix them. */
 const isOpenAiRateLimit = (ns: string, e: NormalizedError): boolean =>
   ns === "openai" && e.status === 429 && e.code === "rate_limit_exceeded";
@@ -57,10 +99,16 @@ export interface GatewayOptions {
   upstreams: Upstreams;
   steel: SteelRunner;
   purchaser?: SteelPurchaser;
+  fastPurchaser?: FastPurchaser;
+  /** Extra vendor tools (tests, future vendors). OpenAI is always registered. */
+  extraTools?: VendorTool[];
+  /** Vendor balance APIs: the entitlement check before the quote, and Gate 2. */
+  balanceReaders?: Readonly<Record<string, () => Promise<number | undefined>>>;
+  /** Where the user approves. The runtime sends CLI recoveries to the browse page. */
+  approveUrlFor?: (recoveryId: string, surface: "cli" | "web") => string;
   realPurchaseProviders?: ReadonlySet<string>;
   env?: NodeJS.ProcessEnv;
   fetchImpl?: FetchLike;
-  mockVendor?: MockImageVendor;
   /** How long a blocked call holds open. Keep it under the MCP client's tool timeout. */
   safeBlockMs?: number;
   pollMs?: number;
@@ -78,25 +126,26 @@ export function createGateway(options: GatewayOptions) {
   const env = options.env ?? process.env;
   const log = options.log ?? ((m: string) => console.error(m));
   const fetchImpl = options.fetchImpl ?? (globalThis.fetch as unknown as FetchLike);
-  const mock = options.mockVendor ?? new MockImageVendor(Number(env["AISLE_MOCK_START_BALANCE"] ?? 0) || 0);
   const safeBlockMs = options.safeBlockMs ?? (Number(env["SAFE_BLOCK_MS"]) || 50_000);
-  const mockToolUrl = options.upstreams["mockvendor"]?.toolUrl;
 
+  const studioUrl = options.upstreams["studio"]?.toolUrl;
   const tools: VendorTool[] = [
     openAiChatTool(env, fetchImpl),
-    mockToolUrl ? mockVendorHttpTool(mockToolUrl, fetchImpl) : mock.tool(),
-  ].filter((t) => options.upstreams[t.namespace] !== undefined);
+    openRouterChatTool(env, fetchImpl),
+    ...(studioUrl ? [studioImageTool(studioUrl, env, fetchImpl)] : []),
+    ...(options.extraTools ?? []),
+  ].filter(
+    (t) => options.upstreams[t.namespace] !== undefined,
+  );
 
   const coordinator = new RecoveryCoordinator({
     upstreams: options.upstreams,
     steel: options.steel,
     publicUrl: options.publicUrl,
-    fakeCredit: (ns, units) => {
-      if (ns !== "mockvendor" || mockToolUrl) return false;
-      mock.credit(units);
-      return true;
-    },
+    ...(options.balanceReaders === undefined ? {} : { balanceReaders: options.balanceReaders }),
+    ...(options.approveUrlFor === undefined ? {} : { approveUrlFor: options.approveUrlFor }),
     ...(options.purchaser === undefined ? {} : { purchaser: options.purchaser }),
+    ...(options.fastPurchaser === undefined ? {} : { fastPurchaser: options.fastPurchaser }),
     ...(options.realPurchaseProviders === undefined ? {} : { realPurchaseProviders: options.realPurchaseProviders }),
     ...(options.mandateSecret === undefined ? {} : { mandateSecret: options.mandateSecret }),
     ...(options.pollMs === undefined ? {} : { pollMs: options.pollMs }),
@@ -197,6 +246,13 @@ export function createGateway(options: GatewayOptions) {
           recovery_id: job.id,
           approve_url: job.approveUrl,
           quote: job.quote?.reason,
+          session: job.session.status,
+          plans: job.plans && {
+            selected: job.selectedPlanId,
+            recommended: job.plans.recommended,
+            alternatives: job.plans.alternatives,
+            how_to_choose: "The user picks a plan and approves on the approval page. Do not choose for them.",
+          },
           next: "Call aisle__wait_for_recovery with this recovery_id. Do NOT re-run the original tool.",
         });
 
@@ -254,6 +310,37 @@ export function createGateway(options: GatewayOptions) {
     return block(job, progress ?? (async () => {}));
   }
 
+  /**
+   * Read-only view of a recovery for the in-chat widget and for agents: the given one,
+   * else this task's newest. Never approves or changes anything.
+   */
+  function recoveryStatus(taskId: string, recoveryId?: string): CallToolResult {
+    const job = recoveryId
+      ? coordinator.get(recoveryId)
+      : coordinator
+          .list()
+          .filter((j) => j.taskId === taskId)
+          .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+    if (!job) return { content: [{ type: "text", text: JSON.stringify({ status: "NO_RECOVERY" }) }], structuredContent: { status: "NO_RECOVERY" } };
+    const view = {
+      recovery_id: job.id,
+      status: job.status,
+      session: job.session.status,
+      vendor: job.namespace,
+      blocked_tool: job.checkpoint.tool,
+      blocker: job.checkpoint.blocker.type,
+      approve_url: job.approveUrl,
+      quote: job.quote ? { reason: job.quote.reason, price: job.quote.price, currency: job.quote.currency } : null,
+      cap: job.mandate?.maximumAmount ?? null,
+      lane: job.lane ?? null,
+      live: job.live ? { debug_url: job.live.debugUrl ?? null, interactive: job.live.interactive === true, takeover_reason: job.live.takeoverReason ?? null } : null,
+      error: job.error ?? null,
+      refusal: job.refusal?.message ?? null,
+      events: job.events.slice(-12).map((e) => ({ at: e.at, type: e.type })),
+    };
+    return { content: [{ type: "text", text: JSON.stringify(view) }], structuredContent: view };
+  }
+
   async function spendReport(taskId: string): Promise<CallToolResult> {
     const spend = await coordinator.spendFor(taskId);
     const jobs = coordinator.list().filter((j) => j.taskId === taskId);
@@ -264,7 +351,7 @@ export function createGateway(options: GatewayOptions) {
     });
   }
 
-  return { tools, coordinator, callTool, waitForRecovery, spendReport, mock };
+  return { tools, coordinator, callTool, waitForRecovery, spendReport, recoveryStatus };
 }
 
 export type Gateway = ReturnType<typeof createGateway>;

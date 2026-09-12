@@ -3,11 +3,12 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createGateway } from "../src/gateway/gateway.js";
-import { loadUpstreams, MockImageVendor, type FetchLike } from "../src/gateway/upstreams.js";
-import type { SteelRunner } from "../src/gateway/recovery.js";
+import { loadUpstreams, type FetchLike } from "../src/gateway/upstreams.js";
+import type { SteelPurchaser, SteelRunner } from "../src/gateway/recovery.js";
+import { FakeImageVendor, VENDOR_ORIGIN, creditingPurchaser, imageVendorEntry, upstreamsWith } from "./helpers/image-vendor.js";
 
 const SECRET = "gw-secret";
-const upstreams = loadUpstreams();
+const upstreams = upstreamsWith(imageVendorEntry());
 
 function fakeSteel(fail?: string) {
   const runs: Array<{ provider: string; billingOrigin: string }> = [];
@@ -31,13 +32,14 @@ function openAiFetch(status: number, body: unknown, headers: Record<string, stri
   });
 }
 
-function gw(opts: { fetchImpl?: FetchLike; steel?: SteelRunner; env?: NodeJS.ProcessEnv } = {}) {
-  const mock = new MockImageVendor(0);
+function gw(opts: { fetchImpl?: FetchLike; steel?: SteelRunner; env?: NodeJS.ProcessEnv; purchase?: (v: FakeImageVendor) => SteelPurchaser } = {}) {
+  const vendor = new FakeImageVendor(0);
   const steel = opts.steel ?? fakeSteel().steel;
   const g = createGateway({
-    upstreams,
+    upstreams: opts.purchase ? upstreamsWith(imageVendorEntry({ purchase: true })) : upstreams,
     steel,
-    mockVendor: mock,
+    extraTools: [vendor.tool()],
+    ...(opts.purchase ? { purchaser: opts.purchase(vendor) } : {}),
     env: opts.env ?? { OPENAI_API_KEY: "sk-test" },
     ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
     safeBlockMs: 30,
@@ -46,7 +48,7 @@ function gw(opts: { fetchImpl?: FetchLike; steel?: SteelRunner; env?: NodeJS.Pro
     mandateSecret: SECRET,
     log: () => {},
   });
-  return { g, mock };
+  return { g, vendor };
 }
 
 const json = (r: { content: Array<{ type: string; text?: string }> }) => JSON.parse(r.content[0]?.text ?? "{}");
@@ -54,7 +56,7 @@ const json = (r: { content: Array<{ type: string; text?: string }> }) => JSON.pa
 describe("gateway intercept", () => {
   it("re-exports namespaced vendor tools", () => {
     const { g } = gw();
-    expect(g.tools.map((t) => t.name).sort()).toEqual(["mockvendor__generate_image", "openai__chat"]);
+    expect(g.tools.map((t) => t.name).sort()).toEqual(["imagevendor__generate_image", "openai__chat", "openrouter__chat"]);
   });
 
   it("a blank OpenAI key (401) passes through untouched and opens no recovery", async () => {
@@ -158,11 +160,11 @@ describe("gateway intercept", () => {
     expect(g.coordinator.list()).toHaveLength(0);
   });
 
-  it("mock vendor 402 → approve → Steel → credited → replays the exact call", async () => {
-    const { steel, runs } = fakeSteel();
-    const { g, mock } = gw({ steel });
+  it("vendor 402 → approve → purchase → credited → replays the exact call", async () => {
+    const seen: Array<{ realMoneyAllowed: boolean; billingOrigin: string }> = [];
+    const { g, vendor } = gw({ purchase: (v) => creditingPurchaser(v, seen) });
     const args = { prompt: "hero image #1" };
-    const first = json((await g.callTool("mockvendor__generate_image", args, { taskId: "t" })) as never);
+    const first = json((await g.callTool("imagevendor__generate_image", args, { taskId: "t" })) as never);
     const job = g.coordinator.get(first.recovery_id)!;
     expect(job.checkpoint.blocker).toMatchObject({ type: "INSUFFICIENT_CREDITS", resource: "image_credits", required: 1067 });
     // 1,000 credits can't clear a 1,067 shortfall, so the smallest viable pack is 5,000.
@@ -170,17 +172,17 @@ describe("gateway intercept", () => {
 
     await g.coordinator.approve(job.id, job.mandate!.signature);
     const replayed = json((await g.waitForRecovery(job.id)) as never);
-    expect(replayed.url).toMatch(/cdn\.mockvendor/);
+    expect(replayed.url).toMatch(/cdn\.vendor\.test/);
     expect(replayed.prompt).toBe("hero image #1");
-    expect(runs[0]?.billingOrigin).toBe("https://example.com");
-    expect(mock.balance).toBe(5000 - 1067);
+    expect(seen).toEqual([{ realMoneyAllowed: true, billingOrigin: VENDOR_ORIGIN }]);
+    expect(vendor.balance).toBe(5000 - 1067);
     expect((await g.coordinator.spendFor("t")).task).toBe(20);
   });
 
   it("the agent retrying the blocked call joins the same recovery", async () => {
     const { g } = gw();
-    const a = json((await g.callTool("mockvendor__generate_image", { prompt: "x" }, { taskId: "t" })) as never);
-    const b = json((await g.callTool("mockvendor__generate_image", { prompt: "x" }, { taskId: "t" })) as never);
+    const a = json((await g.callTool("imagevendor__generate_image", { prompt: "x" }, { taskId: "t" })) as never);
+    const b = json((await g.callTool("imagevendor__generate_image", { prompt: "x" }, { taskId: "t" })) as never);
     expect(b.recovery_id).toBe(a.recovery_id);
     expect(g.coordinator.list()).toHaveLength(1);
   });
@@ -188,7 +190,7 @@ describe("gateway intercept", () => {
   it("approval needs the mandate signature and is idempotent on a double tap", async () => {
     const { steel, runs } = fakeSteel();
     const { g } = gw({ steel });
-    const { recovery_id } = json((await g.callTool("mockvendor__generate_image", { prompt: "x" }, { taskId: "t" })) as never);
+    const { recovery_id } = json((await g.callTool("imagevendor__generate_image", { prompt: "x" }, { taskId: "t" })) as never);
     const job = g.coordinator.get(recovery_id)!;
     expect((await g.coordinator.approve(job.id, "forged")).error).toBe("MANDATE_SIGNATURE_MISMATCH");
     await g.coordinator.approve(job.id, job.mandate!.signature);
@@ -200,7 +202,7 @@ describe("gateway intercept", () => {
   it("reject returns a normal tool result and never opens Steel", async () => {
     const { steel, runs } = fakeSteel();
     const { g } = gw({ steel });
-    const { recovery_id } = json((await g.callTool("mockvendor__generate_image", { prompt: "x" }, { taskId: "t" })) as never);
+    const { recovery_id } = json((await g.callTool("imagevendor__generate_image", { prompt: "x" }, { taskId: "t" })) as never);
     g.coordinator.reject(recovery_id);
     const r = await g.waitForRecovery(recovery_id);
     expect(r.isError).toBe(false);
@@ -210,7 +212,7 @@ describe("gateway intercept", () => {
 
   it("a Steel failure surfaces as RECOVERY_FAILED", async () => {
     const { g } = gw({ steel: fakeSteel("STEEL_API_KEY is required").steel });
-    const { recovery_id } = json((await g.callTool("mockvendor__generate_image", { prompt: "x" }, { taskId: "t" })) as never);
+    const { recovery_id } = json((await g.callTool("imagevendor__generate_image", { prompt: "x" }, { taskId: "t" })) as never);
     const job = g.coordinator.get(recovery_id)!;
     await g.coordinator.approve(job.id, job.mandate!.signature);
     const r = await g.waitForRecovery(job.id);

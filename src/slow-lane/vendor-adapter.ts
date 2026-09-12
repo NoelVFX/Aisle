@@ -30,6 +30,19 @@ export interface VendorPurchaseAdapter {
    */
   ensureLoggedIn?(page: PageLike): Promise<boolean>;
 
+  /**
+   * True while this URL is the vendor's sign-in wall (or an SSO host off the
+   * billing origin). Must not navigate: it is polled while a human signs in
+   * during a takeover (steel.md §16.3).
+   */
+  onLoginWall?(url: string): boolean;
+
+  /**
+   * After a takeover for a checkout challenge (3-D Secure, OTP): true once the
+   * challenge is gone. Reads the page only; never clicks or navigates.
+   */
+  challengeCleared?(page: PageLike): Promise<boolean>;
+
   /** Navigate to pricing and read the purchasable packages. */
   discoverOffers(page: PageLike, requirement: Requirement): Promise<PurchaseOffer[]>;
 

@@ -7,7 +7,7 @@ import {
   runSlowLane,
 } from "../src/index.js";
 import type { OpenRouterFetch } from "../src/index.js";
-import { MockBrowserProvider, MockVendorSite } from "../src/slow-lane/adapters/mock-vendor-site.js";
+import { FakeBrowserProvider, FakeShopSite } from "./helpers/fake-shop.js";
 import { makeRequest, SECRET } from "./fixtures.js";
 
 const PROVIDER = "openrouter-vendor";
@@ -49,8 +49,8 @@ describe("parseComputerUseAction", () => {
 
 describe("OpenRouter resolver", () => {
   it("drives the control surface with Nemotron 3 Nano Omni by default", async () => {
-    const site = new MockVendorSite({ provider: PROVIDER, origin: ORIGIN, failDiscoverUntilAssisted: true });
-    const session = await new MockBrowserProvider(site).createSession({ provider: PROVIDER });
+    const site = new FakeShopSite({ provider: PROVIDER, origin: ORIGIN, failDiscoverUntilAssisted: true });
+    const session = await new FakeBrowserProvider(site).createSession({ provider: PROVIDER });
     const bodies: Array<Record<string, unknown>> = [];
     const used: Array<string | undefined> = [];
     const agent = createOpenRouterComputerUseAgent({
@@ -70,8 +70,8 @@ describe("OpenRouter resolver", () => {
   });
 
   it("sends a models failover array only when one is configured", async () => {
-    const site = new MockVendorSite({ provider: PROVIDER, origin: ORIGIN });
-    const session = await new MockBrowserProvider(site).createSession({ provider: PROVIDER });
+    const site = new FakeShopSite({ provider: PROVIDER, origin: ORIGIN });
+    const session = await new FakeBrowserProvider(site).createSession({ provider: PROVIDER });
     const bodies: Array<Record<string, unknown>> = [];
     const agent = createOpenRouterComputerUseAgent({
       apiKey: "infra-key",
@@ -83,8 +83,8 @@ describe("OpenRouter resolver", () => {
   });
 
   it("fails loud with INFRA_BLOCKED when the resolver key itself 402s (§16.5)", async () => {
-    const site = new MockVendorSite({ provider: PROVIDER, origin: ORIGIN });
-    const session = await new MockBrowserProvider(site).createSession({ provider: PROVIDER });
+    const site = new FakeShopSite({ provider: PROVIDER, origin: ORIGIN });
+    const session = await new FakeBrowserProvider(site).createSession({ provider: PROVIDER });
     const agent = createOpenRouterComputerUseAgent({ apiKey: "drained", fetchImpl: fakeFetch([""], [], 402) });
     await expect(agent.run(session.control, "anything")).rejects.toBeInstanceOf(InfraBlockedError);
   });
@@ -102,13 +102,13 @@ describe("OpenRouter resolver", () => {
 
 describe("slow lane end-to-end with the OpenRouter resolver", () => {
   it("recovers a stuck discovery step", async () => {
-    const site = new MockVendorSite({ provider: PROVIDER, origin: ORIGIN, failDiscoverUntilAssisted: true });
+    const site = new FakeShopSite({ provider: PROVIDER, origin: ORIGIN, failDiscoverUntilAssisted: true });
     const agent = createOpenRouterComputerUseAgent({
       apiKey: "infra-key",
       fetchImpl: fakeFetch(['{"action":"click","x":100,"y":200}', '{"action":"done","success":true}']),
     });
     const result = await runSlowLane(makeRequest({ provider: PROVIDER, origin: ORIGIN, productId: "gen_5000_20" }), {
-      provider: new MockBrowserProvider(site),
+      provider: new FakeBrowserProvider(site),
       adapter: new GenericVendorAdapter({ provider: PROVIDER, origin: ORIGIN }),
       agent,
       mandateSecret: SECRET,

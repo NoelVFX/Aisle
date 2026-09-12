@@ -2,7 +2,7 @@
  * In-memory mock of a vendor website with a pricing → checkout → account flow,
  * plus the matching adapter, browser provider and control surface. Lets the slow
  * lane run end-to-end with no real browser and no money — the analogue of the
- * scaffold's `mock-vendor` site (build-checklist Phase 4).
+ * scaffold demo shop (build-checklist Phase 4). Test fake only; not shipped.
  */
 
 import type {
@@ -13,12 +13,12 @@ import type {
   PageLike,
   ProfileMount,
   ProfileReadiness,
-} from "../browser.js";
-import { DeterministicStepError, type VendorPurchaseAdapter } from "../vendor-adapter.js";
-import { TakeoverRequiredError } from "../../errors.js";
-import type { PurchaseOffer, PurchaseVerification, Requirement, StagedPurchase } from "../../types.js";
+} from "../../src/slow-lane/browser.js";
+import { DeterministicStepError, type VendorPurchaseAdapter } from "../../src/slow-lane/vendor-adapter.js";
+import { TakeoverRequiredError } from "../../src/errors.js";
+import type { PurchaseOffer, PurchaseVerification, Requirement, StagedPurchase } from "../../src/types.js";
 
-export interface MockVendorConfig {
+export interface FakeShopConfig {
   provider?: string;
   origin?: string;
   startingBalance?: number;
@@ -55,12 +55,12 @@ const DEFAULT_OFFERS: PurchaseOffer[] = [
 ];
 
 /** The authoritative in-memory state of the fake vendor. */
-export class MockVendorSite {
+export class FakeShopSite {
   readonly provider: string;
   readonly origin: string;
   readonly accountId: string;
   readonly offers: PurchaseOffer[];
-  readonly cfg: MockVendorConfig;
+  readonly cfg: FakeShopConfig;
   balance: number;
   path = "/";
   url: string;
@@ -72,7 +72,7 @@ export class MockVendorSite {
   purchaseClicks = 0;
   takeoverCleared = false;
 
-  constructor(cfg: MockVendorConfig = {}) {
+  constructor(cfg: FakeShopConfig = {}) {
     this.cfg = cfg;
     this.provider = cfg.provider ?? "mock-slow-vendor";
     this.origin = cfg.origin ?? "https://shop.mock-slow-vendor.test";
@@ -99,7 +99,7 @@ export class MockVendorSite {
 }
 
 class MockPage implements PageLike {
-  constructor(private readonly site: MockVendorSite) {}
+  constructor(private readonly site: FakeShopSite) {}
 
   currentUrl(): string {
     return this.site.url;
@@ -185,7 +185,7 @@ class MockPage implements PageLike {
 
 /** Any click "reveals" pricing — stands in for the resolver completing a sub-goal. */
 class MockControl implements ControlSurface {
-  constructor(private readonly site: MockVendorSite) {}
+  constructor(private readonly site: FakeShopSite) {}
   async screenshot(): Promise<Uint8Array> {
     return new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
   }
@@ -217,7 +217,7 @@ class MockBrowserSession implements BrowserSession {
     readonly sessionId: string,
     readonly provider: string,
     readonly profile: ProfileMount | undefined,
-    site: MockVendorSite,
+    site: FakeShopSite,
   ) {
     this.page = new MockPage(site);
     this.control = new MockControl(site);
@@ -229,13 +229,13 @@ class MockBrowserSession implements BrowserSession {
   }
 }
 
-export interface MockBrowserProviderOptions {
+export interface FakeBrowserProviderOptions {
   /** Dedicated IP to pin newly created profiles to, like STEEL_DEDICATED_IP_ID. */
   dedicatedIpId?: string;
 }
 
 /** Mimics Steel's Profiles API: persistProfile without a profileId creates one. */
-export class MockBrowserProvider implements BrowserProvider {
+export class FakeBrowserProvider implements BrowserProvider {
   lastSession?: MockBrowserSession;
   /** Every createSession call, to assert what the worker asked Steel for. */
   readonly created: CreateSessionOptions[] = [];
@@ -244,8 +244,8 @@ export class MockBrowserProvider implements BrowserProvider {
   private profileSeq = 0;
 
   constructor(
-    private readonly site: MockVendorSite,
-    private readonly options: MockBrowserProviderOptions = {},
+    private readonly site: FakeShopSite,
+    private readonly options: FakeBrowserProviderOptions = {},
   ) {}
 
   async createSession(opts: CreateSessionOptions): Promise<BrowserSession> {
@@ -266,8 +266,8 @@ export class MockBrowserProvider implements BrowserProvider {
 }
 
 /** Deterministic, recorded-style adapter for the mock vendor site (tier 2). */
-export class MockVendorAdapter implements VendorPurchaseAdapter {
-  constructor(private readonly site: MockVendorSite) {}
+export class FakeShopAdapter implements VendorPurchaseAdapter {
+  constructor(private readonly site: FakeShopSite) {}
 
   get provider(): string {
     return this.site.provider;

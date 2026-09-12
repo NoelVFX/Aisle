@@ -7,20 +7,20 @@
  * its OWN catalogue — the client never tells the vendor how many credits to add.
  */
 
-import type { WebMcpSession, WebMcpTool, WebMcpToolResult } from "../webmcp/session.js";
+import type { WebMcpSession, WebMcpTool, WebMcpToolResult } from "../../src/webmcp/session.js";
 
-export interface MockCatalogueItem {
+export interface FakeCatalogueItem {
   productId: string;
   units: number;
   price: number;
 }
 
-export interface MockVendorOptions {
+export interface FakeWebMcpVendorOptions {
   provider?: string;
   origin?: string;
   startingBalance?: number;
   accountId?: string;
-  catalogue?: MockCatalogueItem[];
+  catalogue?: FakeCatalogueItem[];
   /** Expose no purchase tool, to exercise the slow-lane fallback. */
   withoutPurchaseTool?: boolean;
   /** Complete checkout but do NOT credit the account (verification must fail). */
@@ -33,31 +33,31 @@ export interface MockVendorOptions {
   balanceVisibilityDelayReads?: number;
 }
 
-export const MOCK_CATALOGUE: MockCatalogueItem[] = [
+export const FAKE_CATALOGUE: FakeCatalogueItem[] = [
   { productId: "credits_1000", units: 1000, price: 5 },
   { productId: "credits_5000", units: 5000, price: 20 },
   { productId: "credits_20000", units: 20000, price: 70 },
 ];
 
-export class MockWebMcpVendor implements WebMcpSession {
+export class FakeWebMcpVendor implements WebMcpSession {
   readonly provider: string;
   readonly origin: string;
   balance: number;
   private staleBalance: number | undefined;
   private staleReadsRemaining = 0;
   private readonly accountId: string;
-  private readonly opts: MockVendorOptions;
-  private readonly catalogue: MockCatalogueItem[];
+  private readonly opts: FakeWebMcpVendorOptions;
+  private readonly catalogue: FakeCatalogueItem[];
   private readonly seenKeys = new Map<string, string>();
   purchaseCallCount = 0;
   chargeCount = 0;
 
-  constructor(opts: MockVendorOptions = {}) {
+  constructor(opts: FakeWebMcpVendorOptions = {}) {
     this.provider = opts.provider ?? "mock-image-api";
     this.origin = opts.origin ?? "https://api.mock-image-api.test";
     this.balance = opts.startingBalance ?? 0;
     this.accountId = opts.accountId ?? "acct_mock_001";
-    this.catalogue = opts.catalogue ?? MOCK_CATALOGUE;
+    this.catalogue = opts.catalogue ?? FAKE_CATALOGUE;
     this.opts = opts;
   }
 

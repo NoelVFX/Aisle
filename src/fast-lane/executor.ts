@@ -13,7 +13,7 @@ import type { RecoveryRequest, RecoveryResult } from "../types.js";
 import type { WebMcpSession } from "../webmcp/session.js";
 import { detectWebMcp, type FastLaneCapability } from "../webmcp/detector.js";
 import { assertPurchaseAllowed } from "./guards.js";
-import { executePurchase, readBalance } from "./purchase.js";
+import { executePurchase, readBalance, type BalanceReading } from "./purchase.js";
 import { verifyBalanceDelta, type VerifyRetryOptions } from "./verify.js";
 import {
   InMemoryIdempotencyStore,
@@ -81,8 +81,22 @@ export async function runFastLane(request: RecoveryRequest, deps: FastLaneDeps):
 
   const key = purchaseKeyFor(mandate, requirement);
   const purchaseId = `pur_${mandate.mandateId}`;
+  // Vendor-side dedupe key: stable across retries of THIS approved purchase, new
+  // for the next approved mandate. Reusing `key` alone would make a vendor that
+  // dedupes on it silently skip a later, legitimate purchase in the same task.
+  const vendorIdempotencyKey = `${key}:${mandate.mandateId}`;
 
-  const finish = (balance: { balance: number; accountId: string | undefined; resource: string }, pid: string | null, alreadyCovered: boolean) => {
+  /** A balance reported for a different resource must never count toward this task. */
+  const assertResource = (reading: BalanceReading): void => {
+    if (reading.resource !== undefined && reading.resource !== requirement.resource) {
+      throw new PurchaseVerificationError(
+        `Balance tool reports '${reading.resource}', but the task needs '${requirement.resource}'. Refusing to use it.`,
+      );
+    }
+  };
+
+  const finish = (reading: BalanceReading, pid: string | null, alreadyCovered: boolean) => {
+    const balance = { balance: reading.balance, accountId: reading.accountId, resource: reading.resource ?? requirement.resource };
     const entitlement = makeEntitlement(mandate, balance, now());
     const result = makeResult({ lane: "fast", purchaseId: pid, entitlement, request, requirement, alreadyCovered, now: now() });
     emit({ type: "RESUME_TOKEN_CREATED", resumeTokenId: result.resumeToken.id });
@@ -96,6 +110,7 @@ export async function runFastLane(request: RecoveryRequest, deps: FastLaneDeps):
       throw new PurchaseInFlightError(`Purchase for key ${key} is already in progress.`);
     }
     const current = await readBalance(session, capability);
+    assertResource(current);
     if (current.balance < requirement.amount) {
       throw new PurchaseVerificationError(
         `A previous purchase attempt (${existing.status}) exists for this requirement but the balance ` +
@@ -111,6 +126,7 @@ export async function runFastLane(request: RecoveryRequest, deps: FastLaneDeps):
 
   // 3. Entitlement check — the moment Aisle sometimes DOESN'T buy (§8) ----------
   const before = await readBalance(session, capability);
+  assertResource(before);
   emit({ type: "ENTITLEMENT_CHECKED", balance: before.balance, required: requirement.amount });
   if (before.balance >= requirement.amount) {
     emit({ type: "ALREADY_COVERED", balance: before.balance, required: requirement.amount });
@@ -129,7 +145,7 @@ export async function runFastLane(request: RecoveryRequest, deps: FastLaneDeps):
   emit({ type: "PURCHASE_STARTED", lane: "fast", tool: capability.purchaseTool.name });
   emit({ type: "PURCHASE_SUBMITTED" });
   try {
-    const outcome = await executePurchase(session, capability, mandate, key);
+    const outcome = await executePurchase(session, capability, mandate, vendorIdempotencyKey);
     await store.update(key, {
       status: "SUBMITTED",
       ...(outcome.transactionId === undefined ? {} : { transactionId: outcome.transactionId }),

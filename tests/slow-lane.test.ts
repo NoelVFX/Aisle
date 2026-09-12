@@ -1,11 +1,11 @@
 import { describe, it, expect } from "vitest";
 import { runSlowLane } from "../src/slow-lane/executor.js";
 import {
-  MockBrowserProvider,
-  MockVendorAdapter,
-  MockVendorSite,
-  type MockVendorConfig,
-} from "../src/slow-lane/adapters/mock-vendor-site.js";
+  FakeBrowserProvider,
+  FakeShopAdapter,
+  FakeShopSite,
+  type FakeShopConfig,
+} from "./helpers/fake-shop.js";
 import { InMemoryProfileStore } from "../src/slow-lane/profiles.js";
 import { ScriptedComputerUseAgent } from "../src/slow-lane/computer-use.js";
 import { InMemoryIdempotencyStore } from "../src/fast-lane/idempotency.js";
@@ -26,12 +26,12 @@ const USER = "demo-user";
 const ORIGIN = "https://shop.mock-slow-vendor.test";
 const req = () => makeRequest({ provider: PROVIDER, origin: ORIGIN });
 
-function setup(cfg: MockVendorConfig = {}, extra: Partial<SlowLaneDeps> = {}) {
-  const site = new MockVendorSite({ provider: PROVIDER, origin: ORIGIN, startingBalance: 0, ...cfg });
+function setup(cfg: FakeShopConfig = {}, extra: Partial<SlowLaneDeps> = {}) {
+  const site = new FakeShopSite({ provider: PROVIDER, origin: ORIGIN, startingBalance: 0, ...cfg });
   const events: string[] = [];
   const deps: SlowLaneDeps = {
-    provider: new MockBrowserProvider(site),
-    adapter: new MockVendorAdapter(site),
+    provider: new FakeBrowserProvider(site),
+    adapter: new FakeShopAdapter(site),
     mandateSecret: SECRET,
     emit: (e) => events.push(e.type),
     ...extra,
@@ -63,7 +63,7 @@ describe("slow lane — Steel profiles (steel.md §6)", () => {
   it("creates a pinned profile on the first run, then restores the same profile and IP", async () => {
     const profiles = new InMemoryProfileStore();
     const { site, deps, events } = setup({}, { profiles });
-    const provider = new MockBrowserProvider(site, { dedicatedIpId: "fixed:ip1" });
+    const provider = new FakeBrowserProvider(site, { dedicatedIpId: "fixed:ip1" });
     deps.provider = provider;
 
     await runSlowLane(req(), deps);
@@ -82,7 +82,7 @@ describe("slow lane — Steel profiles (steel.md §6)", () => {
     const { deps, events } = setup({}, { profiles: new InMemoryProfileStore() });
     await runSlowLane(req(), deps);
     expect(events.indexOf("SESSION_CLOSED")).toBeLessThan(events.indexOf("PROFILE_READY"));
-    expect((deps.provider as MockBrowserProvider).awaitedProfiles).toEqual(["prof_mock_1"]);
+    expect((deps.provider as FakeBrowserProvider).awaitedProfiles).toEqual(["prof_mock_1"]);
   });
 
   it("binds a new profile on a failed job but never marks it verified or waits on it", async () => {
@@ -114,7 +114,7 @@ describe("slow lane — guards", () => {
 });
 
 describe("slow lane — Gate 1: staged checkout vs mandate (§18)", () => {
-  const cases: Array<[string, MockVendorConfig, string]> = [
+  const cases: Array<[string, FakeShopConfig, string]> = [
     ["amount over the cap", { checkoutSurcharge: 30 }, "AMOUNT_EXCEEDS_MANDATE"],
     ["currency mismatch", { checkoutCurrency: "EUR" }, "CURRENCY_MISMATCH"],
     ["subscription when one-time expected", { checkoutBillingPeriod: "subscription" }, "UNEXPECTED_SUBSCRIPTION"],

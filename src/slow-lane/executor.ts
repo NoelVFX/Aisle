@@ -29,6 +29,7 @@ import {
   MandateRejectedError,
   PurchaseFailedError,
   PurchaseVerificationError,
+  PurchaseInFlightError,
   ResolutionExhaustedError,
   SubmitWithheldError,
   TakeoverRequiredError,
@@ -73,6 +74,12 @@ export interface SlowLaneDeps {
    * explicitly enabled.
    */
   stopBeforeSubmit?: boolean;
+  /**
+   * Web path (web-path.md §2.2): cookies + localStorage captured live from the
+   * user's browsing session. The worker session starts from it instead of a
+   * stored profile, stays isolated, and persists nothing.
+   */
+  sessionContext?: unknown;
 }
 
 export interface TakeoverContext {
@@ -80,6 +87,8 @@ export interface TakeoverContext {
   taskId: string;
   reason: string;
   sessionViewerUrl?: string | undefined;
+  /** true once the human has cleared it. Reads state only; never navigates the page they are using. */
+  cleared: () => Promise<boolean>;
 }
 
 /** Events never carry a profileId: it is credential-tier (steel.md §6). */
@@ -120,9 +129,14 @@ export async function runSlowLane(request: RecoveryRequest, deps: SlowLaneDeps):
   const budget = deps.resolverBudget ?? loadLimits().maxResolverCallsPerJob;
   let callsUsed = 0;
 
-  const stored = deps.profiles ? await deps.profiles.load(mandate.userId, mandate.provider) : undefined;
+  const stored =
+    deps.sessionContext === undefined && deps.profiles ? await deps.profiles.load(mandate.userId, mandate.provider) : undefined;
   const session: BrowserSession = await deps.provider.createSession(
-    stored ? { provider: mandate.provider, profile: stored } : { provider: mandate.provider },
+    deps.sessionContext !== undefined
+      ? { provider: mandate.provider, sessionContext: deps.sessionContext, persistProfile: false }
+      : stored
+        ? { provider: mandate.provider, profile: stored }
+        : { provider: mandate.provider },
   );
   emit({ type: "STEEL_SESSION_CREATED", sessionId: session.sessionId, sessionViewerUrl: session.sessionViewerUrl });
 
@@ -235,7 +249,7 @@ export async function runSlowLane(request: RecoveryRequest, deps: SlowLaneDeps):
     emit({ type: "PURCHASE_GUARDED" });
 
     // 3. Liveness probe BEFORE anything that matters (§15.2).
-    const loggedIn = deps.adapter.ensureLoggedIn ? await deps.adapter.ensureLoggedIn(session.page) : undefined;
+    let loggedIn = deps.adapter.ensureLoggedIn ? await deps.adapter.ensureLoggedIn(session.page) : undefined;
     if (stored || loggedIn !== undefined) {
       emit({
         type: "PROFILE_RESTORED",
@@ -244,6 +258,21 @@ export async function runSlowLane(request: RecoveryRequest, deps: SlowLaneDeps):
         dedicatedIp: session.profile?.dedicatedIpId !== undefined,
         loggedIn,
       });
+    }
+    // steel.md §8, §16.3: an SSO/MFA login the automation can't drive is a scoped
+    // takeover in the same session. The human signs in; Aisle resumes.
+    if (loggedIn === false && deps.onTakeover) {
+      const reason = "LOGIN_REQUIRED";
+      emit({ type: "TAKEOVER_REQUESTED", reason, sessionViewerUrl: session.sessionViewerUrl });
+      await deps.onTakeover({
+        session,
+        taskId: checkpoint.taskId,
+        reason,
+        sessionViewerUrl: session.sessionViewerUrl,
+        cleared: async () => deps.adapter.onLoginWall !== undefined && !deps.adapter.onLoginWall(session.page.currentUrl()),
+      });
+      emit({ type: "TAKEOVER_RESOLVED" });
+      loggedIn = deps.adapter.ensureLoggedIn ? await deps.adapter.ensureLoggedIn(session.page) : undefined;
     }
     if (loggedIn === false) {
       throw new PurchaseFailedError("Not authenticated with the vendor and re-authentication failed.", "NOT_AUTHENTICATED");
@@ -254,6 +283,9 @@ export async function runSlowLane(request: RecoveryRequest, deps: SlowLaneDeps):
 
     const resolveExisting = async (existing: PurchaseRecord): Promise<RecoveryResult> => {
       emit({ type: "PURCHASE_SKIPPED_DUPLICATE", purchaseId: existing.purchaseId, status: existing.status });
+      if (existing.status === "PENDING") {
+        throw new PurchaseInFlightError(`Purchase for key ${key} is already in progress.`);
+      }
       const current = await readBalance();
       if (current.balance === undefined || current.balance < requirement.amount) {
         throw new PurchaseVerificationError(
@@ -377,6 +409,7 @@ export async function runSlowLane(request: RecoveryRequest, deps: SlowLaneDeps):
           taskId: checkpoint.taskId,
           reason: err.message,
           sessionViewerUrl: session.sessionViewerUrl,
+          cleared: async () => (deps.adapter.challengeCleared ? await deps.adapter.challengeCleared(session.page) : true),
         });
         emit({ type: "TAKEOVER_RESOLVED" });
       } else {
@@ -390,12 +423,10 @@ export async function runSlowLane(request: RecoveryRequest, deps: SlowLaneDeps):
       // Record stays SUBMITTED/UNKNOWN, which blocks any re-buy for this requirement.
       throw new PurchaseVerificationError("Could not read the balance after purchase; result unknown. Not retrying.");
     }
-    try {
-      assertBalanceDelta(balanceBefore, after.balance, offer.unitsGranted);
-    } catch (err) {
-      await store.update(key, { status: "FAILED" });
-      throw err;
-    }
+    // An unconfirmed balance keeps the record SUBMITTED/UNKNOWN, blocking a
+    // second purchase even with a new mandate (same rule as the fast lane).
+    // Only an explicit refusal — nothing submitted — may mark it FAILED.
+    assertBalanceDelta(balanceBefore, after.balance, offer.unitsGranted);
     await store.update(key, {
       status: "VERIFIED",
       ...(after.transactionId === undefined ? {} : { transactionId: after.transactionId }),

@@ -183,6 +183,11 @@ export function buildSessionCreateParams(
     // Browser identity: restore the bound profile, or let Steel create one.
     persistProfile: opts.persistProfile ?? true,
   };
+  if (opts.sessionContext !== undefined) {
+    if (opts.profile) throw new Error("A session starts from a profile or from a captured session context, not both.");
+    params.sessionContext = opts.sessionContext as SessionCreateParams["sessionContext"];
+    params.persistProfile = false;
+  }
   if (opts.profile) params.profileId = opts.profile.profileId;
   if (o.stealth !== undefined) params.stealthConfig = o.stealth;
   if (o.region !== undefined) params.region = o.region;

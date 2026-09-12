@@ -75,7 +75,8 @@ configure an explicit secret for deployment. Never log or commit secrets.
 
 Both executors accept `{ checkpoint, quote, mandate }` (plus an optional
 `requirement`). Both return `lane`, `purchaseId`, `verifiedEntitlement`,
-`resumeToken`, `resumeRecord`, and `alreadyCovered`. If the existing balance
+`resumeToken`, and `alreadyCovered`, plus `sessionViewerUrl` and `receiptFileIds`
+from the slow lane when available. If the existing balance
 already covers the requirement, no purchase is made and `purchaseId` is `null`.
 The host replays `resumeToken.resumeAction` verbatim; it must not regenerate the
 failed tool arguments.

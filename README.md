@@ -54,10 +54,10 @@ import {
   signMandate, runFastLane, runSlowLane, NoFastLaneError,
 } from "top-up-agent";
 
-const classified = classifyFailure(toolError, { provider: "mockvendor" });
+const classified = classifyFailure(toolError, { provider: "openrouter" });
 const checkpoint = freezeCheckpoint({
   taskId, toolCallId, tool, arguments: args,
-  origin: lockOrigin("mockvendor", upstreams.mockvendor),   // never from the error body
+  origin: lockOrigin("openrouter", upstreams.openrouter),   // never from the error body
   blocker: classified.blocker,
 });
 const q = buildQuote({ checkpoint, current, offers, perPurchaseCeiling: loadLimits().perPurchase });
@@ -110,17 +110,15 @@ src/
 ├── fast-lane/                executor, guards, purchase, verify, idempotency store
 ├── slow-lane/                executor, Steel provider, adapters, computer-use resolver, profiles
 ├── resume/                   resume record
-├── mock/                     in-memory vendor with purchase tools
-├── demo.ts                   the spine through the fast lane
-└── slow-lane-demo.ts         the slow lane against a mock site
+├── recovery-flow/            plan recommendation, customer selection, recovery session state machine
+├── gateway/                  MCP gateway (stdio + HTTP), recovery coordinator, approval page, Steel purchaser
+└── web/                      web path: browsing session, CDP 402 detector, enrollments
 ```
 
 ## Commands
 
 ```bash
 npm install
-npm run demo          # 402 → classify → checkpoint → quote → gate → mandate → fast lane
-npm run demo:slow     # slow lane against a mock vendor site (no Steel key)
 npm test              # vitest, all suites
 npm run typecheck
 npm run smoke:steel   # real Steel: create on new profile → CDP → navigate → release → READY (timed) → restore
@@ -187,85 +185,149 @@ option; it must accept image input. The resolver never clicks the final submit.
 
 ## MCP gateway (test it from Codex or Claude Code)
 
-`src/gateway/` is a local stdio MCP server. The agent calls vendor tools through
-it; a billing wall blocks the call, opens a recovery, asks for one approval tap,
-runs a Steel session on the locked billing origin, and then replays or reports.
+`src/gateway/` is an MCP server over stdio (`server.ts`) or Streamable HTTP
+(`http-server.ts`). The agent calls vendor tools through it; a billing wall blocks
+the call, opens a recovery, asks for one approval tap, buys through the fast lane
+(vendor MCP purchase tools) or the Steel slow lane, and then replays or reports.
+
+```bash
+npm run gateway:http    # MCP at http://127.0.0.1:8788/mcp, approvals + web browser at :8787
+codex mcp add aisle --url http://127.0.0.1:8788/mcp
+claude mcp add --transport http aisle http://127.0.0.1:8788/mcp
+```
+
+Set `AISLE_MCP_PORT` / `AISLE_APPROVAL_PORT` if those ports are taken.
 
 | Tool | What it does |
 |---|---|
+| `openrouter__chat` | Real OpenRouter chat completion with `OPENROUTER_DEMO_KEY` (a $0 account) |
 | `openai__chat` | Real OpenAI chat completion with `OPENAI_API_KEY` |
-| `mockvendor__generate_image` | In-process mock that returns 402 until credited |
 | `aisle__wait_for_recovery` | Blocks again on a recovery that outlived `SAFE_BLOCK_MS` |
 | `aisle__spend_report` | Spend and recoveries for this session |
 
-```bash
-codex mcp add aisle --env SAFE_BLOCK_MS=240000 -- "$PWD/node_modules/.bin/tsx" "$PWD/src/gateway/server.ts"
-# then in ~/.codex/config.toml under [mcp_servers.aisle]:  tool_timeout_sec = 300
-npm run smoke:gateway   # same flow over stdio without Codex, approves automatically
-```
+Codex needs `tool_timeout_sec = 300` under `[mcp_servers.aisle]` in `~/.codex/config.toml`.
 
-Try these prompts in Codex:
+Try these prompts in Codex or Claude Code:
 
+- *"Use the openrouter chat tool to ask openai/gpt-4o-mini: what is 2+2?"*
 - *"Use the openai chat tool to ask: what is 2+2?"*
-- *"Generate a hero image with the mock vendor."*
 
 What happens depends on the vendor's answer:
 
 | Upstream answer | Aisle's behaviour |
 |---|---|
-| OpenAI with a blank key: 401 | Not a billing wall. Passed through untouched, no recovery |
-| OpenAI with a no-credit key: 429 `insufficient_quota` | Recovery → approval page → Steel opens `platform.openai.com` → `DRY_RUN_COMPLETE`, nothing bought, no replay |
-| OpenAI 429 `rate_limit_exceeded` | Retry once, never buy |
-| Mock vendor: 402 `insufficient_credits` | Recovery → approval → Steel opens `https://example.com` → mock credited → original call replayed and succeeds |
+| OpenRouter 402 `Insufficient credits` | Recovery → approval → Steel buys credits on `openrouter.ai/settings/credits` (sign-in takeover if needed) → balance rises → original call replayed |
+| OpenAI with a no-credit key: 429 `insufficient_quota` | Recovery → approval → Steel stages the top-up and stops at Gate 1 (`STAGED_NOT_SUBMITTED`); the docs rule out real money on OpenAI |
+| Any vendor with a blank key: 401 | Not a billing wall. Passed through untouched, no recovery |
+| 429 `rate_limit_exceeded` / `Retry-After < 60` | Retry once, never buy |
 
-The approval page opens in your browser at `http://127.0.0.1:8787/r/{id}`. After you
-approve, Steel opens the vendor's billing page from `upstreams.json`, such as
-`platform.openai.com/settings/organization/billing/overview`. The live Steel browser
-opens in a new tab and is embedded on the approval page. The session stays open for up
-to 2 minutes, or until you click **End Steel session**. The viewer is read-only unless
-`AISLE_STEEL_INTERACTIVE=1`. The timeline, logs and Steel screenshots go to `.aisle/`. No real money moves: the
-gateway never runs a checkout. Its Steel session skips proxies and captcha
-solving unless `AISLE_STEEL_PROXY_CAPTCHA=1`, since those need a paid Steel balance.
+**Where you watch.** A CLI agent (Hermes, Claude Code or Codex in a terminal) prints one
+link, `http://127.0.0.1:8787/browse`, which also opens by itself. That page follows the
+latest recovery: the approval card on the right, and after your tap the live Steel browser
+on the left with the cursor doing the top-up, plus the timeline. Visual agents (Claude,
+ChatGPT) render the same live view in the chat as an MCP App widget (`ui://aisle/recovery.html`);
+its button opens `/browse`. The widget never approves: the one tap stays on Aisle's page.
+The viewer is read-only except during a takeover. The timeline and logs go
+to `.aisle/`. Steel sessions skip proxies and captcha solving unless
+`AISLE_STEEL_PROXY_CAPTCHA=1`, since those need a paid Steel balance.
+
+### Demo end to end: Studio on Stripe test mode
+
+`studio` is a small real vendor (`src/demo-vendor/`) that sells image credits through Stripe
+Checkout in TEST mode, so the whole flow completes with Stripe's test card 4242 4242 4242 4242
+and no real money.
+
+```bash
+# .env: STRIPE_SECRET_KEY=sk_test_…   (live keys are refused)
+npm run vendor:studio     # site + cloudflared tunnel; saves the login in Steel's credentials vault
+npm run gateway:http      # restart so it picks up .aisle/studio.json
+```
+
+Ask the agent: *"Generate a hero image with the studio tool."* Studio answers 402
+`insufficient_credits`, and Aisle runs the docs' pipeline:
+
+1. **Blocker normalizer → checkpoint freeze** (tool args, origin from config).
+2. **Entitlement check:** Studio's `/v1/credits` (OpenRouter: `/api/v1/credits`). Enough already → retry, no purchase.
+3. **Quote → policy gate → signed mandate → one tap** on `/browse`.
+4. **Slow lane:** Steel signs in with the vaulted login, the cursor picks the pack on `/billing`,
+   Gate 1 checks the Stripe Checkout total against the mandate, and deterministic code pays. Stripe
+   Checkout shows the test card saved on the customer; if it shows empty card fields instead, the
+   public test card is typed, and only on a `cs_test_` session.
+5. **Verify entitlement** by reading `/v1/credits` until the balance rises (not the receipt).
+6. **Replay** the exact call; the agent gets its image.
+
+OpenRouter and OpenAI use the same pipeline with real cards: `AISLE_REAL_PURCHASE_PROVIDERS`
+decides whether Aisle may pay, and Stripe is their only allowed payment origin.
+
+### In your own browser (web path)
+
+Open `http://127.0.0.1:8787/browse`, click **Connect** on `openrouter`, start browsing, and
+sign in to a $0 OpenRouter account (never the `OPENROUTER_INFRA_KEY` account). On
+`openrouter.ai/chat`, send a message to a paid model. The 402 freezes the page, the approval
+card appears beside it, and after the tap a separate Steel browser buys the credits using
+your live sign-in. The page reloads when the balance is verified.
+
+### Plan selection and the recovery session
+
+Every recovery carries MO XIA's recovery session (`src/recovery-flow/`). The quote
+from `aisle-pipeline.md` stays the recommended plan; other one-time packages that
+cover the shortfall and fit the per-purchase ceiling are offered as alternatives.
+
+- The blocked tool result lists `plans.recommended`, `plans.alternatives` and `plans.selected`.
+- The approval card (and the web browser card) has a plan chooser. Picking a plan posts
+  `POST /r/{id}/select {plan_id}`: the plan is re-gated against every ceiling, the quote is
+  rebuilt and the mandate is re-signed, so the tap approves exactly the chosen plan. A plan
+  over a ceiling is refused with nothing changed. No changes after approval.
+- The session moves `PLAN_RECOMMENDED → CUSTOMER_SELECTED → AWAITING_APPROVAL → APPROVED →
+  PURCHASING → PURCHASED → ENTITLEMENT_UPDATED → READY_TO_RESUME`, or ends `PURCHASE_WITHHELD`
+  (real-money submit off), `PURCHASE_UNKNOWN` (bought but unverified — never retried) or
+  `PURCHASE_FAILED`. Each step is a `SESSION_STATUS` event and shows on the approval page.
+
+The rest of `src/recovery-flow/` (approval records, purchase guard, executors, resume
+requests, the standalone orchestrator) is exported as `recoveryFlow` for hosts that run it directly.
 
 ## Buying in the Steel browser: the click ladder
 
 After approval, a vendor with a `purchase` block in `upstreams.json` runs the real
 slow lane in a Steel browser. The steps follow `aisle-pipeline.md` §17 and §18:
 
-1. **Login check.** The Steel profile for that vendor is restored. A login wall stops the job with `npm run steel:login -- <vendor>`.
+1. **Login check.** The Steel profile for that vendor is restored (on the web path, your live browsing session's sign-in). If it lands on the vendor's sign-in page, Aisle requests a **takeover**: the viewer on the approval page becomes interactive, you sign in there, and Aisle continues in the same session once you're past the login wall (5 minutes max, then read-only again). Steel keeps the sign-in for next time. `npm run steel:login -- <vendor>` does the same ahead of time.
 2. **Balance read.** If the balance already covers the task, nothing is bought.
 3. **Tier 1.** Offers come from the page's JSON-LD `Offer` blocks, with no clicking and no model.
 4. **Tier 2.** Recorded steps replay by accessible role and name. A miss falls back to tier 3.
 5. **Tier 3.** The accessibility tree becomes a numbered list, the PICKER model returns one index, and code clicks that node. The steps that reached checkout are saved as a recorded adapter.
 6. **Gate 1.** The staged amount, currency, billing period and auto-renew are compared with the signed mandate.
-7. **Submit.** Deterministic code clicks the confirm button. A model never sees or clicks a control that pays.
+7. **Submit.** Deterministic code clicks the confirm button. A model never sees or clicks a control that pays. If the bank shows 3-D Secure or asks for a code, that is a takeover too: you clear it in the viewer, then Gate 2 decides.
 8. **Gate 2.** The balance must rise by the purchased units, then the original call is replayed.
 
 Real-money vendors stop after Gate 1 with `STAGED_NOT_SUBMITTED` unless they are
 listed in `AISLE_REAL_PURCHASE_PROVIDERS`.
 
+`.env` in this checkout sets `AISLE_REAL_PURCHASE_PROVIDERS=openrouter`. OpenRouter needs a
+card saved on the account: Aisle never types card details.
+
 ```bash
-npm run mock:vendor                 # mock vendor website + cloudflared tunnel; start before Codex
-npm run smoke:purchase              # real Steel purchase on it: cold run (picker), then warm run (recorded)
-npm run steel:login -- openai       # log a Steel profile in to OpenAI once, by hand
+npm run steel:login -- openrouter   # optional: sign the Steel profile in ahead of time
 ```
+
+The tier-3 picker uses `google/gemini-2.5-flash-lite` (fallbacks: llama-3.3-70b, gpt-4.1-nano).
+Model calls abort after 60s and retry within the resolver budget.
 
 Recorded adapters, resolver recordings and profile bindings live in `.aisle/`.
 `REPLAY_RESOLVER=1` replays recorded picker choices instead of calling the model.
 
 ## Not built yet (in the docs, not in this package)
 
-- **Remote HTTP gateway** (`apps/gateway`): the local gateway is stdio, one per agent
-  session.
-- **OpenAI checkout is unverified.** Its billing flow needs a logged-in profile and a
-  saved card, and it has not been recorded. Real submit stays off by default.
+- **The OpenRouter checkout has not been recorded yet.** The first real run goes through
+  the tier-3 picker; its button labels and the credits-page balance read are unverified.
+- **OpenAI stays staged-only.** `docs/SETUP.md` §4 rules it out for real money (Stripe
+  checkout, 3DS, account-security challenges).
+- **Higgsfield sells subscriptions on its public pricing page.** Aisle refuses recurring
+  billing, so it has no offers until a logged-in credit top-up page is inspected.
 - **Receipt upload and trace export** from the Steel session.
 - **Control plane** (`apps/api`): durable recovery jobs and the SSE event stream. The
   gateway keeps jobs in memory and its approval page polls.
-- **Web path** (CDP 402 detector, enrollments).
-- **Postgres** (`db/schema.sql`). Stores here are in-memory behind interfaces.
-- **Tier 1 JSON-LD / Browser Tools markdown offers, tier 3 AX-index picker, adapter
-  promotion, `REPLAY_RESOLVER`.**
+- **Postgres** (`db/schema.sql`). Stores here are in-memory or files behind interfaces.
 - **Steel features the SDK now supports but the code doesn't use yet:** extension
   attach and view-only viewer config. Steel SDK 0.18 has no trace export.
 - **Profile READY latency is unmeasured.** `waitForProfileReady` defaults to 60s;

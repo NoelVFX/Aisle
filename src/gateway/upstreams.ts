@@ -23,8 +23,33 @@ export interface PurchaseConfig {
   loggedInSelector?: string;
   /** Regex (pathname) of the vendor's login wall. */
   loginWallPattern?: string;
+  /**
+   * "catalogue": use `offers` from this file instead of parsing the page — for
+   * typed-amount top-ups. Default "page" (JSON-LD, then page text).
+   */
+  offersFrom?: "page" | "catalogue";
+  /**
+   * Payment-processor origins the checkout may redirect to (e.g. https://checkout.stripe.com).
+   * The origin lock allows exactly these besides the billing origin.
+   */
+  paymentOrigins?: string[];
+  /** Sign in with the login stored in Steel's credentials vault for the billing origin (steel.md §8). */
+  steelCredentials?: boolean;
+  /** Stripe TEST mode vendors only: allow Stripe's public test card on a cs_test_ Checkout Session. */
+  stripeTestCard?: boolean;
   /** Drop this purchase config when the env var is unset. */
   requiresEnv?: string;
+  /**
+   * Vendor MCP endpoint with purchase + balance tools (fast lane, §13–§14).
+   * Must be on the canonical or billing origin. Tried before the Steel browser.
+   */
+  mcpUrl?: string;
+  /**
+   * Where to actually connect for `mcpUrl` when the same server is reachable
+   * locally (e.g. a vendor's MCP server behind a tunnel this machine can't resolve).
+   * Operator config only, loopback only. The origin lock still checks `mcpUrl`.
+   */
+  mcpDialUrl?: string;
 }
 
 export interface UpstreamEntry extends UpstreamConfig {
@@ -35,6 +60,8 @@ export interface UpstreamEntry extends UpstreamConfig {
   authEnv?: string;
   /** Base URL for tool calls when the vendor runs as a separate server. */
   toolUrl?: string;
+  /** Leave this vendor out entirely unless this env var is set (e.g. a demo vendor that isn't running). */
+  enabledByEnv?: string;
   resource: string;
   purchase?: PurchaseConfig;
   offers: PurchaseOffer[];
@@ -66,6 +93,10 @@ export function loadUpstreams(
 ): Upstreams {
   const raw = resolveDeep(JSON.parse(readFileSync(path, "utf8")) as Record<string, UpstreamEntry>, env);
   for (const [ns, up] of Object.entries(raw)) {
+    if (up.enabledByEnv && !env[up.enabledByEnv]) {
+      delete raw[ns];
+      continue;
+    }
     if (ns.includes("__")) throw new Error(`Upstream namespace '${ns}' must not contain '__'.`);
     canonicalize(up.canonicalOrigin);
     const billing = canonicalize(up.billingOrigin);
@@ -74,7 +105,35 @@ export function loadUpstreams(
     }
     if (up.toolUrl === "") delete up.toolUrl;
     if (up.purchase?.requiresEnv && !env[up.purchase.requiresEnv]) delete up.purchase;
+    if (up.purchase && up.purchase.mode !== "slow-lane") {
+      throw new Error(`Upstream '${ns}' purchase.mode must be "slow-lane".`);
+    }
+    for (const o of up.purchase?.paymentOrigins ?? []) {
+      if (!o.startsWith("https://")) throw new Error(`Upstream '${ns}' purchase.paymentOrigins must be https origins.`);
+      canonicalize(o);
+    }
+    if (up.purchase?.stripeTestCard && !(up.purchase.paymentOrigins ?? []).some((o) => canonicalize(o) === canonicalize("https://checkout.stripe.com"))) {
+      throw new Error(`Upstream '${ns}' purchase.stripeTestCard needs https://checkout.stripe.com in paymentOrigins.`);
+    }
+    if (up.purchase?.stripeTestCard && up.purchase.realMoney) {
+      throw new Error(`Upstream '${ns}' cannot use the Stripe test card on a real-money vendor.`);
+    }
     if (up.purchase?.loginWallPattern) new RegExp(up.purchase.loginWallPattern); // validate early
+    if (up.purchase?.mcpDialUrl !== undefined && !/^https?:\/\//.test(up.purchase.mcpDialUrl)) {
+      delete (up.purchase as PurchaseConfig).mcpDialUrl; // env unset
+    }
+    if (up.purchase?.mcpDialUrl) {
+      const host = new URL(up.purchase.mcpDialUrl).hostname;
+      if (host !== "127.0.0.1" && host !== "localhost" && host !== "[::1]") {
+        throw new Error(`Upstream '${ns}' purchase.mcpDialUrl must be a loopback address.`);
+      }
+    }
+    if (up.purchase?.mcpUrl) {
+      const mcpOrigin = canonicalize(up.purchase.mcpUrl);
+      if (mcpOrigin !== billing && mcpOrigin !== canonicalize(up.canonicalOrigin)) {
+        throw new Error(`Upstream '${ns}' purchase.mcpUrl must be on its canonical or billing origin.`);
+      }
+    }
     if (up.purchase) Object.freeze(up.purchase);
     Object.freeze(up.offers);
     Object.freeze(up);
@@ -149,67 +208,55 @@ export function openAiChatTool(env: NodeJS.ProcessEnv, fetchImpl: FetchLike): Ve
   };
 }
 
-const IMAGE_TOOL_DESCRIPTION =
-  "Generate one image from a prompt with the mock image vendor. Each image costs 1,067 credits. Returns the image URL.";
-
-/** mockvendor__generate_image against the mock vendor website (`npm run mock:vendor`). */
-export function mockVendorHttpTool(toolUrl: string, fetchImpl: FetchLike): VendorTool {
+/** openrouter__chat — a real OpenRouter chat completion on the user's (drained) account key. */
+export function openRouterChatTool(env: NodeJS.ProcessEnv, fetchImpl: FetchLike): VendorTool {
   return {
-    name: "mockvendor__generate_image",
-    namespace: "mockvendor",
-    description: IMAGE_TOOL_DESCRIPTION,
+    name: "openrouter__chat",
+    namespace: "openrouter",
+    description:
+      "Send a prompt to a model through OpenRouter and return the reply. Use this whenever the user asks you to ask a model via OpenRouter.",
+    inputShape: {
+      prompt: z.string().describe("The user message to send."),
+      model: z.string().optional().describe("OpenRouter model slug. Defaults to openai/gpt-4o-mini (paid)."),
+    },
+    async call(args) {
+      const res = await fetchImpl("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${env["OPENROUTER_DEMO_KEY"] ?? ""}`,
+          "HTTP-Referer": "https://aisle.dev",
+          "X-OpenRouter-Title": "Aisle",
+        },
+        body: JSON.stringify({
+          model: typeof args["model"] === "string" && args["model"] ? args["model"] : "openai/gpt-4o-mini",
+          messages: [{ role: "user", content: String(args["prompt"] ?? "") }],
+        }),
+      });
+      return toResult(res, (text) => {
+        const body = safeJson(text) as { choices?: Array<{ message?: { content?: unknown } }> };
+        const reply = body?.choices?.[0]?.message?.content;
+        return typeof reply === "string" ? reply : text;
+      });
+    },
+  };
+}
+
+/** studio__generate_image — the Stripe test-mode demo vendor (`npm run vendor:studio`). */
+export function studioImageTool(toolUrl: string, env: NodeJS.ProcessEnv, fetchImpl: FetchLike): VendorTool {
+  return {
+    name: "studio__generate_image",
+    namespace: "studio",
+    description:
+      "Generate one image from a prompt with Studio, an image vendor that bills in credits (400 per image). Returns the image URL.",
     inputShape: { prompt: z.string().describe("What the image should show.") },
     async call(args) {
-      const res = await fetchImpl(`${toolUrl}/tools/generate_image`, {
+      const res = await fetchImpl(`${toolUrl.replace(/\/+$/, "")}/v1/images/generate`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${env["STUDIO_API_KEY"] ?? ""}` },
         body: JSON.stringify({ prompt: String(args["prompt"] ?? "") }),
       });
       return toResult(res);
     },
   };
-}
-
-/** In-process mock image vendor, used when the mock website isn't running. */
-export class MockImageVendor {
-  static readonly COST = 1067;
-  balance: number;
-  generated = 0;
-
-  constructor(startingBalance = 0) {
-    this.balance = startingBalance;
-  }
-
-  credit(units: number): void {
-    this.balance += units;
-  }
-
-  tool(): VendorTool {
-    return {
-      name: "mockvendor__generate_image",
-      namespace: "mockvendor",
-      description: IMAGE_TOOL_DESCRIPTION,
-      inputShape: { prompt: z.string().describe("What the image should show.") },
-      call: async (args) => {
-        if (this.balance < MockImageVendor.COST) {
-          return {
-            ok: false,
-            status: 402,
-            headers: {},
-            body: { code: "insufficient_credits", required_credits: MockImageVendor.COST, balance: this.balance },
-          };
-        }
-        this.balance -= MockImageVendor.COST;
-        this.generated += 1;
-        return {
-          ok: true,
-          text: JSON.stringify({
-            url: `https://cdn.mockvendor.aisle.test/img/${this.generated}.png`,
-            prompt: String(args["prompt"] ?? ""),
-            credits_remaining: this.balance,
-          }),
-        };
-      },
-    };
-  }
 }

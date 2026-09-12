@@ -9,7 +9,7 @@ import {
   parseOffersFromText,
   runSlowLane,
 } from "../src/index.js";
-import { MockBrowserProvider, MockVendorSite } from "../src/slow-lane/adapters/mock-vendor-site.js";
+import { FakeBrowserProvider, FakeShopSite } from "./helpers/fake-shop.js";
 import { ScriptedComputerUseAgent } from "../src/slow-lane/computer-use.js";
 import { makeRequest, SECRET } from "./fixtures.js";
 
@@ -48,9 +48,9 @@ describe("generic adapter — end to end (no vendor-specific code)", () => {
   const req = () => makeRequest({ provider: PROVIDER, origin: ORIGIN, productId: "gen_5000_20" });
 
   it("discovers, stages the chosen package, buys, verifies", async () => {
-    const site = new MockVendorSite({ provider: PROVIDER, origin: ORIGIN, startingBalance: 0 });
+    const site = new FakeShopSite({ provider: PROVIDER, origin: ORIGIN, startingBalance: 0 });
     const result = await runSlowLane(req(), {
-      provider: new MockBrowserProvider(site),
+      provider: new FakeBrowserProvider(site),
       adapter: new GenericVendorAdapter({ provider: PROVIDER, origin: ORIGIN }),
       mandateSecret: SECRET,
     });
@@ -60,10 +60,10 @@ describe("generic adapter — end to end (no vendor-specific code)", () => {
   });
 
   it("falls back to the resolver when pricing isn't immediately visible", async () => {
-    const site = new MockVendorSite({ provider: PROVIDER, origin: ORIGIN, failDiscoverUntilAssisted: true });
+    const site = new FakeShopSite({ provider: PROVIDER, origin: ORIGIN, failDiscoverUntilAssisted: true });
     const agent = new ScriptedComputerUseAgent([{ type: "click", x: 100, y: 200 }, { type: "done", success: true }]);
     const result = await runSlowLane(req(), {
-      provider: new MockBrowserProvider(site),
+      provider: new FakeBrowserProvider(site),
       adapter: new GenericVendorAdapter({ provider: PROVIDER, origin: ORIGIN }),
       agent,
       mandateSecret: SECRET,
@@ -72,9 +72,9 @@ describe("generic adapter — end to end (no vendor-specific code)", () => {
   });
 
   it("does not falsely report ALREADY_COVERED from a plan description", async () => {
-    const site = new MockVendorSite({ provider: PROVIDER, origin: ORIGIN, startingBalance: 0 });
+    const site = new FakeShopSite({ provider: PROVIDER, origin: ORIGIN, startingBalance: 0 });
     const result = await runSlowLane(req(), {
-      provider: new MockBrowserProvider(site),
+      provider: new FakeBrowserProvider(site),
       adapter: new GenericVendorAdapter({ provider: PROVIDER, origin: ORIGIN }),
       mandateSecret: SECRET,
     });

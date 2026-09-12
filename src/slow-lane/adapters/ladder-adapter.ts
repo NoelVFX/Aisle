@@ -12,7 +12,7 @@
 
 import type { ActionCandidate, PageLike } from "../browser.js";
 import { DeterministicStepError, type VendorPurchaseAdapter } from "../vendor-adapter.js";
-import { PurchaseFailedError } from "../../errors.js";
+import { PurchaseFailedError, TakeoverRequiredError } from "../../errors.js";
 import { sameOrigin } from "../../policy/policy.js";
 import type { PurchaseOffer, PurchaseVerification, Requirement, StagedPurchase } from "../../types.js";
 import {
@@ -46,6 +46,20 @@ const CONFIRM_LABELS = [
 
 const FILLABLE = new Set(["textbox", "spinbutton", "searchbox"]);
 
+/** Checkout challenges a human must clear (steel.md §16.3). Never automated. */
+const CHALLENGE_TEXT_RE =
+  /3-?D ?Secure|verify (it'?s|that it'?s) you|authenticate (this|your) (payment|purchase)|one-time (pass)?code|enter the (verification )?code|confirm (this|the) (payment|purchase) in your (bank|banking app)/i;
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * Stripe's PUBLIC test card. Only ever typed into a TEST-mode Stripe Checkout
+ * Session (cs_test_…), where it cannot move money. Real cards are never handled
+ * here: they live on the vendor account or in Steel (aisle-pipeline.md §11).
+ */
+const STRIPE_TEST_CARD = { number: "4242424242424242", expiry: "1234", cvc: "123", name: "Aisle Demo", postalCode: "94103" } as const;
+
+const CHALLENGE_FRAMES = 'iframe[src*="3d_secure"], iframe[src*="3ds"], iframe[name*="challenge"], iframe[src*="acs"]';
+
 export interface LadderAdapterConfig {
   provider: string;
   /** Locked billing origin from config. */
@@ -57,8 +71,28 @@ export interface LadderAdapterConfig {
   /** Pathname pattern of the vendor's login wall. */
   loginWallPattern?: RegExp;
   currency?: string;
+  /**
+   * Packages from the vendor catalogue (upstreams.json). For vendors whose top-up
+   * is a typed amount rather than listed packs (e.g. OpenAI API credits), the
+   * offer comes from config and the amount is typed into the page, never read
+   * from page text.
+   */
+  catalogueOffers?: PurchaseOffer[];
   registry: AdapterRegistry;
   picker?: CandidatePicker;
+  /**
+   * Payment-processor origins the checkout may hop to (e.g. https://checkout.stripe.com).
+   * From config only. Gate 1 refuses a checkout on any other origin.
+   */
+  paymentOrigins?: string[];
+  /** Stripe TEST mode only: type Stripe's public test card when Checkout shows no saved card. */
+  stripeTestCard?: boolean;
+  /** Vendor balance API. When set, the liveness-independent balance reads (and Gate 2) use it. */
+  balanceReader?: () => Promise<number | undefined>;
+  /** After submit, how long Gate 2 waits for the API balance to move. Default 45s. */
+  balanceSettleMs?: number;
+  /** Steel's credentials vault may be signing in: wait this long on the login wall first. Default 0. */
+  loginGraceMs?: number;
   /** Tier-3 steps allowed to reach checkout. Default 4. */
   maxStagingSteps?: number;
   onEvent?: (type: string, detail: Record<string, unknown>) => void;
@@ -117,6 +151,8 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
   private readonly currency: string;
   private readonly maxSteps: number;
   private readonly loginWall: RegExp;
+  private awaitingCredit = false;
+  private lastApiBalance: number | undefined;
 
   constructor(private readonly cfg: LadderAdapterConfig) {
     this.pricingPath = cfg.pricingPath ?? "/pricing";
@@ -150,11 +186,32 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
     return sameOrigin(url, this.cfg.billingOrigin);
   }
 
+  onLoginWall(url: string): boolean {
+    try {
+      const here = new URL(url);
+      return !sameOrigin(here.origin, this.cfg.billingOrigin) || this.loginWall.test(here.pathname);
+    } catch {
+      return false;
+    }
+  }
+
+  async challengeCleared(page: PageLike): Promise<boolean> {
+    return !(await this.challengePresent(page));
+  }
+
+  private async challengePresent(page: PageLike): Promise<boolean> {
+    if ((await page.queryAllText(CHALLENGE_FRAMES).catch(() => [])).length > 0) return true;
+    return CHALLENGE_TEXT_RE.test(await page.innerText().catch(() => ""));
+  }
+
   async ensureLoggedIn(page: PageLike): Promise<boolean> {
     await page.goto(this.url(this.accountPath));
     await page.settle?.(3000); // client-side login redirects land after load
-    const here = new URL(page.currentUrl());
-    if (!sameOrigin(here.origin, this.cfg.billingOrigin) || this.loginWall.test(here.pathname)) return false;
+    // Steel's credentials vault may be signing in right now (steel.md §8).
+    for (let waited = 0; this.onLoginWall(page.currentUrl()) && waited < (this.cfg.loginGraceMs ?? 0); waited += 1000) {
+      await page.settle?.(1000);
+    }
+    if (this.onLoginWall(page.currentUrl())) return false;
     if (this.cfg.loggedInSelector) return (await this.first(page, this.cfg.loggedInSelector)) !== undefined;
     return true;
   }
@@ -162,6 +219,10 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
   async discoverOffers(page: PageLike, _requirement: Requirement): Promise<PurchaseOffer[]> {
     await page.goto(this.url(this.pricingPath));
     await page.settle?.(1500);
+    if (this.cfg.catalogueOffers && this.cfg.catalogueOffers.length > 0) {
+      this.emit("OFFERS_FROM_CATALOGUE", { count: this.cfg.catalogueOffers.length });
+      return [...this.cfg.catalogueOffers];
+    }
     let offers: PurchaseOffer[] = [];
     if (page.jsonLd) {
       offers = offersFromJsonLd(await page.jsonLd(), this.currency);
@@ -206,7 +267,17 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
       this.emit("ADAPTER_RECORDED", { version: next.version, package: key, steps: newSteps.length });
     }
 
+    await this.waitForCheckout(page);
     return this.readStaged(page, offer);
+  }
+
+  private onPaymentOrigin(url: string): boolean {
+    return (this.cfg.paymentOrigins ?? []).some((o) => sameOrigin(url, o));
+  }
+
+  /** A processor-hosted checkout loads after a cross-origin redirect; give it time. */
+  private async waitForCheckout(page: PageLike): Promise<void> {
+    for (let i = 0; i < 10 && !(await this.checkoutReady(page).catch(() => false)); i++) await page.settle?.(1000);
   }
 
   private async replay(page: PageLike, steps: RecordedStep[], offer: PurchaseOffer): Promise<boolean> {
@@ -269,6 +340,7 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
         recorded.push({ action: "click", role: chosen.role, name: chosen.name });
       }
       await page.settle?.(1500);
+      await this.waitForCheckout(page);
     }
     if (await this.checkoutReady(page)) return recorded;
     throw new DeterministicStepError(
@@ -279,17 +351,35 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
 
   private async checkoutReady(page: PageLike): Promise<boolean> {
     if ((await page.queryAllText("[data-checkout-amount]")).length > 0) return true;
+    if (this.onPaymentOrigin(page.currentUrl())) return extractPrice(await page.innerText()) !== undefined;
     const buttons = await page.queryAllText('button, [role="button"], input[type="submit"]');
     if (!buttons.some((b) => CONFIRM_NAME_RE.test(b))) return false;
     return extractPrice(await page.innerText()) !== undefined;
   }
 
   private async readStaged(page: PageLike, offer: PurchaseOffer): Promise<StagedPurchase> {
+    // Origin lock extends to the checkout: the billing origin or a configured processor, nothing else.
+    const here = page.currentUrl();
+    if (!this.canHandle(here) && !this.onPaymentOrigin(here)) {
+      throw new PurchaseFailedError(
+        `The checkout is on ${here}, which is neither the billing origin nor a configured payment origin. Aborting before submit.`,
+        "CHECKOUT_ORIGIN_NOT_ALLOWED",
+      );
+    }
     const text = await page.innerText();
     const rawAmount = await this.first(page, "[data-checkout-amount]");
     const amount = rawAmount !== undefined ? Number(rawAmount.replace(/[^0-9.]/g, "")) : extractPrice(text);
     if (amount === undefined || !Number.isFinite(amount)) {
       throw new DeterministicStepError("Checkout total not readable.", "Open the checkout so the order total is visible. Do not pay.");
+    }
+    // Fail closed on a misread: a real checkout never totals less than the package
+    // (e.g. picking up a "$0.00 credit balance" elsewhere on the page). Gate 1 only
+    // checks the upper bound, so the lower bound lives here.
+    if (amount + 0.005 < offer.price) {
+      throw new PurchaseFailedError(
+        `Read a checkout total of ${amount}, below the ${offer.price} package price. Refusing to submit on a misread total.`,
+        "STAGED_AMOUNT_BELOW_PACKAGE",
+      );
     }
 
     const rawLine = await this.first(page, "[data-checkout-line]");
@@ -320,6 +410,10 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
   async confirmPurchase(page: PageLike, _staged: StagedPurchase): Promise<PurchaseVerification> {
     const recorded = await this.cfg.registry.load(this.cfg.billingOrigin);
     let clicked: { role: string; name: string } | undefined;
+    if (this.onPaymentOrigin(page.currentUrl())) {
+      await page.waitForSelector('button[type="submit"]', 15_000).catch(() => {});
+      await this.enterStripeTestCardIfNeeded(page);
+    }
 
     if (recorded?.confirm && page.clickByRole && (await page.clickByRole(recorded.confirm.role, recorded.confirm.name))) {
       clicked = recorded.confirm;
@@ -333,10 +427,14 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
         }
       }
     }
+    if (!clicked && this.onPaymentOrigin(page.currentUrl()) && page.clickByRole && (await page.clickByRole("button", /^pay(\s|$)/i))) {
+      clicked = { role: "button", name: "Pay" };
+    }
     if (!clicked) {
       throw new DeterministicStepError("Confirm control not found.", "Confirm control not found. The final submit is never delegated to a model.");
     }
     this.emit("CONFIRM_CLICKED", { role: clicked.role, name: clicked.name, deterministic: true });
+    this.awaitingCredit = true;
 
     if (recorded?.confirm?.name !== clicked.name) {
       try {
@@ -354,11 +452,54 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
     }
 
     await page.settle?.(2500);
+    // A bank challenge is not a failure and not a success: hand it to the human.
+    if (await this.challengePresent(page)) {
+      this.emit("CHECKOUT_CHALLENGE", { kind: "3DS_OR_OTP" });
+      throw new TakeoverRequiredError("3DS_CHALLENGE");
+    }
     const tx = await this.first(page, "[data-transaction-id]");
     return tx === undefined ? { confirmed: true } : { confirmed: true, transactionId: tx };
   }
 
+  /** Deterministic, test mode only. Skipped when Stripe shows a saved card instead of card fields. */
+  private async enterStripeTestCardIfNeeded(page: PageLike): Promise<void> {
+    if (!this.cfg.stripeTestCard) return;
+    const url = page.currentUrl();
+    if (!sameOrigin(url, "https://checkout.stripe.com")) return;
+    if (!/\/cs_test_/.test(url)) {
+      throw new PurchaseFailedError("Refusing to enter Stripe's test card outside a test-mode Checkout Session.", "TEST_CARD_OUTSIDE_TEST_MODE");
+    }
+    const visible = (selector: string) => page.waitForSelector(selector, 1500).then(() => true, () => false);
+    if (!(await visible("#cardNumber"))) {
+      this.emit("SAVED_CARD_USED", { processor: "stripe", testMode: true });
+      return;
+    }
+    await page.fill("#cardNumber", STRIPE_TEST_CARD.number);
+    await page.fill("#cardExpiry", STRIPE_TEST_CARD.expiry);
+    await page.fill("#cardCvc", STRIPE_TEST_CARD.cvc);
+    if (await visible("#billingName")) await page.fill("#billingName", STRIPE_TEST_CARD.name);
+    if (await visible("#billingPostalCode")) await page.fill("#billingPostalCode", STRIPE_TEST_CARD.postalCode);
+    this.emit("TEST_CARD_ENTERED", { processor: "stripe", last4: "4242", testMode: true });
+  }
+
   async verifyEntitlement(page: PageLike, requirement: Requirement): Promise<PurchaseVerification> {
+    if (this.cfg.balanceReader) {
+      // Read balance, not receipt: the vendor's API. After a submit the vendor credits
+      // asynchronously (payment → webhook/redirect), so wait for the balance to move.
+      const baseline = this.awaitingCredit ? this.lastApiBalance : undefined;
+      const deadline = Date.now() + (this.cfg.balanceSettleMs ?? 45_000);
+      let balance = await this.cfg.balanceReader();
+      while (baseline !== undefined && (balance === undefined || balance <= baseline) && Date.now() < deadline) {
+        await sleep(2000);
+        balance = await this.cfg.balanceReader();
+      }
+      this.awaitingCredit = false;
+      if (balance !== undefined) this.lastApiBalance = balance;
+      this.emit("BALANCE_READ", { source: "vendor_api", balance });
+      const viaApi: PurchaseVerification = { confirmed: balance !== undefined && balance >= requirement.amount, resource: requirement.resource };
+      if (balance !== undefined) viaApi.balanceAfter = balance;
+      return viaApi;
+    }
     await page.goto(this.url(this.accountPath));
     await page.settle?.(2000);
     const raw = await this.first(page, "[data-balance]");

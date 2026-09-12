@@ -13,7 +13,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { ActionCandidate } from "../browser.js";
-import type { OpenRouterFetch } from "../computer-use.js";
+import { OPENROUTER_REQUEST_TIMEOUT_MS, type OpenRouterFetch } from "../computer-use.js";
 import { InfraBlockedError, ResolutionExhaustedError } from "../../errors.js";
 import { loadLimits } from "../../policy/policy.js";
 
@@ -36,10 +36,15 @@ export interface CandidatePicker {
   pick(request: PickRequest): Promise<PickResult>;
 }
 
-/** Text-only picker profile. ⚠ VERIFY slugs against the live catalogue. */
+/**
+ * Text-only picker profile. A fast non-reasoning model: the picker only returns an
+ * index, and the free reasoning model stalled past the request timeout on live runs.
+ * Measured 2026-09-12 on the picker prompt: flash-lite 0.5s, llama-3.3-70b 0.9s,
+ * gpt-4.1-nano 1.7s, all correct. Override with OPENROUTER_PICKER_MODEL.
+ */
 export const PICKER_PROFILE = {
-  model: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-  models: [] as readonly string[],
+  model: "google/gemini-2.5-flash-lite",
+  models: ["meta-llama/llama-3.3-70b-instruct", "openai/gpt-4.1-nano"] as readonly string[],
 } as const;
 
 export function formatCandidates(candidates: ActionCandidate[]): string {
@@ -91,6 +96,8 @@ export interface OpenRouterPickerOptions {
   replay?: boolean;
   baseUrl?: string;
   fetchImpl?: OpenRouterFetch;
+  /** Abort a model call after this long; the attempt counts and is retried within budget. Default 60s. */
+  requestTimeoutMs?: number;
   onCall?: (info: { stepKey: string; modelUsed: string | undefined; replayed: boolean }) => void;
 }
 
@@ -146,7 +153,9 @@ export function createOpenRouterPicker(options: OpenRouterPickerOptions = {}): C
         };
         if (fallbackModels.length > 0) payload["models"] = fallbackModels;
 
-        const resp = await doFetch(`${baseUrl}/chat/completions`, {
+        let resp: Awaited<ReturnType<OpenRouterFetch>>;
+        try {
+          resp = await doFetch(`${baseUrl}/chat/completions`, {
           method: "POST",
           headers: {
             Authorization: `Bearer ${apiKey}`,
@@ -155,7 +164,12 @@ export function createOpenRouterPicker(options: OpenRouterPickerOptions = {}): C
             "X-OpenRouter-Title": "Aisle",
           },
           body: JSON.stringify(payload),
-        });
+          signal: AbortSignal.timeout(options.requestTimeoutMs ?? OPENROUTER_REQUEST_TIMEOUT_MS),
+          });
+        } catch (err) {
+          lastError = new Error(`RESOLVER_REQUEST_FAILED: ${String(err)}`);
+          continue;
+        }
         if (resp.status === 402) throw new InfraBlockedError();
         if (!resp.ok) {
           lastError = new Error(`RESOLVER_HTTP_${resp.status}`);

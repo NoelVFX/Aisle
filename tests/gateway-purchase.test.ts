@@ -1,58 +1,33 @@
 import { describe, it, expect } from "vitest";
 import { createGateway } from "../src/gateway/gateway.js";
-import { loadUpstreams, type FetchLike } from "../src/gateway/upstreams.js";
+import type { FetchLike } from "../src/gateway/upstreams.js";
 import type { SteelPurchaser, SteelRunner } from "../src/gateway/recovery.js";
 import { runSlowLane } from "../src/slow-lane/executor.js";
-import { MockBrowserProvider, MockVendorAdapter, MockVendorSite } from "../src/slow-lane/adapters/mock-vendor-site.js";
+import { FakeBrowserProvider, FakeShopAdapter, FakeShopSite } from "./helpers/fake-shop.js";
 import { InMemoryIdempotencyStore } from "../src/fast-lane/idempotency.js";
 import { SubmitWithheldError } from "../src/index.js";
 import { makeRequest, SECRET } from "./fixtures.js";
+import { FakeImageVendor, VENDOR_ORIGIN, creditingPurchaser, imageVendorEntry, upstreamsWith } from "./helpers/image-vendor.js";
 
 const noViewing: SteelRunner = { run: async () => { throw new Error("viewing lane must not run"); } };
 const json = (r: { content: Array<{ type: string; text?: string }> }) => JSON.parse(r.content[0]?.text ?? "{}");
 
-/** A tiny HTTP-ish mock vendor so the gateway's replay sees real balance changes. */
-function httpVendor() {
-  const state = { balance: 0 };
-  const fetchImpl: FetchLike = async (url) => {
-    const ok = state.balance >= 1067;
-    if (ok) state.balance -= 1067;
-    return {
-      ok,
-      status: ok ? 200 : 402,
-      headers: { forEach: () => {} },
-      text: async () => JSON.stringify(ok ? { url: `https://cdn/img.png?from=${new URL(url).pathname}` } : { code: "insufficient_credits", required_credits: 1067 }),
-    };
-  };
-  return { state, fetchImpl };
-}
-
 describe("gateway slow lane", () => {
-  const upstreams = loadUpstreams(undefined, { MOCK_VENDOR_PUBLIC_URL: "https://shop.mock.test", MOCK_VENDOR_URL: "http://127.0.0.1:9" });
+  const upstreams = upstreamsWith(imageVendorEntry({ purchase: true }));
 
   it("approval runs the purchaser; a verified purchase replays the exact call", async () => {
-    const vendor = httpVendor();
+    const vendor = new FakeImageVendor(0);
     const calls: Array<{ realMoneyAllowed: boolean; billingOrigin: string }> = [];
-    const purchaser: SteelPurchaser = {
-      async purchase({ job, upstream, realMoneyAllowed, onLive }) {
-        calls.push({ realMoneyAllowed, billingOrigin: upstream.billingOrigin });
-        onLive({ sessionId: "s", debugUrl: "https://api.steel.dev/v1/sessions/s/player", viewerUrl: undefined });
-        vendor.state.balance += job.quote!.unitsGranted;
-        return {
-          outcome: "verified",
-          result: { lane: "slow", purchaseId: "pur_1", alreadyCovered: false, verifiedEntitlement: { balance: vendor.state.balance } as never, resumeToken: {} as never },
-        };
-      },
-    };
-    const g = createGateway({ upstreams, steel: noViewing, purchaser, fetchImpl: vendor.fetchImpl, safeBlockMs: 30, pollMs: 5, publicUrl: () => "http://x", mandateSecret: SECRET, log: () => {} });
+    const purchaser = creditingPurchaser(vendor, calls);
+    const g = createGateway({ upstreams, steel: noViewing, purchaser, extraTools: [vendor.tool()], safeBlockMs: 30, pollMs: 5, publicUrl: () => "http://x", mandateSecret: SECRET, log: () => {} });
 
-    const { recovery_id } = json((await g.callTool("mockvendor__generate_image", { prompt: "hero" }, { taskId: "t" })) as never);
+    const { recovery_id } = json((await g.callTool("imagevendor__generate_image", { prompt: "hero" }, { taskId: "t" })) as never);
     const job = g.coordinator.get(recovery_id)!;
     await g.coordinator.approve(job.id, job.mandate!.signature);
     const result = json((await g.waitForRecovery(job.id)) as never);
 
-    expect(result.url).toContain("/tools/generate_image");
-    expect(calls).toEqual([{ realMoneyAllowed: true, billingOrigin: "https://shop.mock.test" }]);
+    expect(result).toMatchObject({ prompt: "hero", url: expect.stringContaining("cdn.vendor.test") });
+    expect(calls).toEqual([{ realMoneyAllowed: true, billingOrigin: VENDOR_ORIGIN }]);
     expect(job.lane).toBe("slow");
     expect((await g.coordinator.spendFor("t")).task).toBe(20);
   });
@@ -113,13 +88,13 @@ describe("gateway slow lane", () => {
 
 describe("slow lane stopBeforeSubmit", () => {
   it("stages and passes Gate 1, then stops without consuming the mandate or clicking submit", async () => {
-    const site = new MockVendorSite({ provider: "mock-slow-vendor", origin: "https://shop.mock-slow-vendor.test", startingBalance: 0 });
+    const site = new FakeShopSite({ provider: "mock-slow-vendor", origin: "https://shop.mock-slow-vendor.test", startingBalance: 0 });
     const store = new InMemoryIdempotencyStore();
     const request = makeRequest({ provider: "mock-slow-vendor", origin: "https://shop.mock-slow-vendor.test" });
     const events: string[] = [];
     const err = await runSlowLane(request, {
-      provider: new MockBrowserProvider(site),
-      adapter: new MockVendorAdapter(site),
+      provider: new FakeBrowserProvider(site),
+      adapter: new FakeShopAdapter(site),
       store,
       mandateSecret: SECRET,
       stopBeforeSubmit: true,

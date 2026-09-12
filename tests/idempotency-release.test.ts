@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { runSlowLane } from "../src/slow-lane/executor.js";
-import { MockBrowserProvider, MockVendorAdapter, MockVendorSite } from "../src/slow-lane/adapters/mock-vendor-site.js";
+import { FakeBrowserProvider, FakeShopAdapter, FakeShopSite } from "./helpers/fake-shop.js";
 import { InMemoryIdempotencyStore, purchaseKeyFor } from "../src/fast-lane/idempotency.js";
 import { resolveRequirement } from "../src/core/outcome.js";
 import { PurchaseVerificationError } from "../src/index.js";
@@ -11,9 +11,9 @@ const ORIGIN = "https://shop.mock-slow-vendor.test";
 
 describe("releasing a finished purchase record", () => {
   it("without release, a second wall of the same size in the same task is refused after the credits are spent", async () => {
-    const site = new MockVendorSite({ provider: PROVIDER, origin: ORIGIN, startingBalance: 0 });
+    const site = new FakeShopSite({ provider: PROVIDER, origin: ORIGIN, startingBalance: 0 });
     const store = new InMemoryIdempotencyStore();
-    const deps = { provider: new MockBrowserProvider(site), adapter: new MockVendorAdapter(site), store, mandateSecret: SECRET };
+    const deps = { provider: new FakeBrowserProvider(site), adapter: new FakeShopAdapter(site), store, mandateSecret: SECRET };
 
     await runSlowLane(makeRequest({ provider: PROVIDER, origin: ORIGIN }), deps);
     site.balance = 0; // the task spent the credits
@@ -22,9 +22,9 @@ describe("releasing a finished purchase record", () => {
   });
 
   it("after forget, the next wall buys again", async () => {
-    const site = new MockVendorSite({ provider: PROVIDER, origin: ORIGIN, startingBalance: 0 });
+    const site = new FakeShopSite({ provider: PROVIDER, origin: ORIGIN, startingBalance: 0 });
     const store = new InMemoryIdempotencyStore();
-    const deps = { provider: new MockBrowserProvider(site), adapter: new MockVendorAdapter(site), store, mandateSecret: SECRET };
+    const deps = { provider: new FakeBrowserProvider(site), adapter: new FakeShopAdapter(site), store, mandateSecret: SECRET };
 
     const first = makeRequest({ provider: PROVIDER, origin: ORIGIN });
     await runSlowLane(first, deps);
