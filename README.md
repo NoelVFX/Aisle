@@ -117,6 +117,28 @@ Environment variables are listed in [`.env.example`](.env.example).
 `newContext()`, sets 90-second timeouts for captcha solves, and releases the
 session on every path, including a failed CDP connect.
 
+### Computer use: Steel executor, OpenRouter brain
+
+When a discovery or staging step can't complete deterministically, the resolver
+takes over, following Steel's Claude Computer Use integration with the brain swapped
+for OpenRouter:
+
+| | |
+|---|---|
+| Executor | Steel `sessions.computer` (screenshots and actions run inside the Steel session) |
+| Brain | OpenRouter, `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` |
+| Keys | `STEEL_API_KEY` + `OPENROUTER_INFRA_KEY` (no Anthropic key) |
+
+```ts
+const provider = new SteelBrowserProvider();          // controlSurface: "steel-computer" by default
+const agent = createOpenRouterComputerUseAgent();      // Nemotron via OPENROUTER_INFRA_KEY
+await runSlowLane(request, { provider, adapter, agent, store, profiles });
+```
+
+Set `controlSurface: "playwright"` to execute actions through Playwright over
+CDP instead. Override the model with `OPENROUTER_VISION_MODEL` or the `model`
+option; it must accept image input. The resolver never clicks the final submit.
+
 ## Not built yet (in the docs, not in this package)
 
 - **MCP gateway** (`apps/gateway`): namespacing, the blocking call, `SAFE_BLOCK_MS`,
@@ -126,5 +148,6 @@ session on every path, including a failed CDP connect.
 - **Postgres** (`db/schema.sql`). Stores here are in-memory behind interfaces.
 - **Tier 1 JSON-LD / Browser Tools markdown offers, tier 3 AX-index picker, adapter
   promotion, `REPLAY_RESOLVER`.**
-- **Steel SDK 0.8 gaps:** no Profiles API (profiles use session context instead),
-  no trace export, no extension attach. Re-check when upgrading `steel-sdk`.
+- **Steel features the SDK now supports but the code doesn't use yet:** the Profiles API
+  (profiles still use session context), extension attach, and view-only viewer
+  config. Steel SDK 0.18 has no trace export.

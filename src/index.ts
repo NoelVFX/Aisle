@@ -82,12 +82,12 @@ export type { GenericAdapterConfig } from "./slow-lane/adapters/generic-vendor-a
 export {
   ScriptedComputerUseAgent,
   VISION_PROFILE,
-  createAnthropicComputerUseAgent,
   createOpenRouterComputerUseAgent,
   parseComputerUseAction,
 } from "./slow-lane/computer-use.js";
+export { SteelComputerControl } from "./slow-lane/steel-computer.js";
+export type { SteelComputerClient } from "./slow-lane/steel-computer.js";
 export type {
-  AnthropicLike,
   ComputerUseAction,
   ComputerUseAgent,
   ComputerUseOutcome,

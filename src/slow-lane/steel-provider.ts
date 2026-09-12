@@ -1,36 +1,48 @@
 /**
- * Steel Cloud browser provider (steel.md §3–§5, §20).
+ * Steel Cloud browser provider (steel.md §3–§6, §9, §20).
  *
- * Creates a purchase-worker session, connects Playwright over CDP, and exposes
- * the `BrowserSession` port. Typed against steel-sdk v0.8:
+ * Creates a purchase-worker session on a Steel profile, connects Playwright over
+ * CDP, and exposes the `BrowserSession` port. Typed against steel-sdk v0.18:
  * `new Steel({ steelAPIKey })`, `sessions.create()` → `Session` (CDP at
- * `.websocketUrl`, live view at `.sessionViewerUrl`, effective `.timeout`),
- * `sessions.context(id)`, `sessions.files.list(id)`, `sessions.release(id)`.
+ * `.websocketUrl`, live view at `.sessionViewerUrl`, effective `.timeout`,
+ * mounted `.profileId`), `sessions.computer(id, action)`,
+ * `sessions.files.list(id)`, `sessions.release(id)`, `profiles.get(id)`.
  *
- * SDK gaps vs the docs (⚠ VERIFY when upgrading steel-sdk):
- *   - No Profiles API (`profileId` / `persistProfile` / READY polling) in v0.8,
- *     so "remembering" uses the auth-context path (`sessions.context` →
- *     `sessionContext`, steel.md §7).
- *   - No Agent Traces export and no Extensions attach in v0.8.
+ * Remembering (steel.md §6) uses the Profiles API. With no stored binding,
+ * `persistProfile: true` makes Steel create a profile and return its id; later
+ * sessions restore it with `profileId`. Steel writes the userDataDir on release
+ * (UPLOADING → READY), so `waitForProfileReady` gates the next run. The profile
+ * is pinned to a dedicated IP (`useProxy: { type: "fixed", id }`) so restored
+ * cookies never arrive from a new egress.
+ *
+ * Supported by the SDK but not wired yet (⚠ VERIFY before relying on them):
+ *   - `extensionIds` attach and `debugConfig.interactive` for the viewer.
+ * The SDK has no Agent Traces export.
  */
 
 import Steel from "steel-sdk";
-import type { Session, SessionContext, SessionCreateParams } from "steel-sdk/resources/sessions/sessions.js";
+import type { ProfileGetResponse } from "steel-sdk/resources/profiles.js";
+import type { Session, SessionCreateParams } from "steel-sdk/resources/sessions/sessions.js";
 import { chromium, type Browser, type Page } from "playwright-core";
 import type {
-  BrowserProfile,
   BrowserProvider,
   BrowserSession,
   ControlSurface,
   CreateSessionOptions,
   PageLike,
+  ProfileMount,
+  ProfileReadiness,
 } from "./browser.js";
+import { SteelComputerControl } from "./steel-computer.js";
 
 /** steel.md §11 — captcha solves take tens of seconds inside a payment flow. */
 export const CHECKOUT_TIMEOUT_MS = 90_000;
 /** steel.md §3 — 15 minutes. `timeout` cannot be raised on a live session. */
 export const PURCHASE_SESSION_TIMEOUT_MS = 15 * 60_000;
+/** steel.md §22 — READY latency is unmeasured; allow a minute until it is. */
+export const PROFILE_READY_TIMEOUT_MS = 60_000;
 
+const PROFILE_READY_POLL_MS = 1_000;
 const DEFAULT_DIMENSIONS = { width: 1280, height: 720 };
 
 export interface SteelProviderOptions {
@@ -40,10 +52,19 @@ export interface SteelProviderOptions {
   navigationTimeoutMs?: number;
 
   // ---- Purchase-worker configuration (steel.md §4.1). Defaults follow the doc.
-  /** Residential proxy. Default true. */
+  /** Residential proxy. Default true. Ignored when the profile is pinned to a dedicated IP. */
   useProxy?: boolean;
-  /** Dedicated IP pinned to the profile (overrides useProxy). */
+  /**
+   * Custom proxy URL (overrides useProxy). Refused when a dedicated IP is pinned,
+   * because it would move a restored identity to a new egress.
+   */
   proxyUrl?: string;
+  /**
+   * Steel dedicated IP (`fixed:…`, dashboard Settings → Network) that pins
+   * profiles with no IP yet. Defaults to STEEL_DEDICATED_IP_ID. A restored
+   * profile always keeps the IP it was pinned with (steel.md §6, §9).
+   */
+  dedicatedIpId?: string;
   /** Captcha sidecar. Default true. */
   solveCaptcha?: boolean;
   /** Stealth config. Don't rotate the fingerprint between runs on one profile. */
@@ -65,11 +86,25 @@ export interface SteelProviderOptions {
    * ⚠ VERIFY whether the vault holds card fields (steel.md §8) before claiming it.
    */
   credentials?: SessionCreateParams["credentials"];
+  /** How long `waitForProfileReady` polls before reporting TIMEOUT. Default 60s. */
+  profileReadyTimeoutMs?: number;
+  /** Poll interval for `waitForProfileReady`. Default 1s. */
+  profileReadyPollMs?: number;
+
+  /**
+   * What the computer-use resolver drives.
+   *   "steel-computer" (default): Steel's `sessions.computer` API takes screenshots
+   *     and executes actions, matching Steel's Computer Use integration.
+   *   "playwright": Playwright mouse/keyboard over CDP.
+   */
+  controlSurface?: "steel-computer" | "playwright";
 
   /**
    * Escape hatch: raw sessions.create params, merged under the named options.
    * Never set `inactivityTimeout` (kills a session parked for approval) or
-   * `optimizeBandwidth` (breaks 3-DS iframes) on a purchase worker.
+   * `optimizeBandwidth` (breaks 3-DS iframes) on a purchase worker. Profile
+   * selection (`profileId`, `persistProfile`, `sessionContext`) is refused here:
+   * it comes from the ProfileStore binding.
    */
   sessionOptions?: SessionCreateParams;
 }
@@ -82,6 +117,123 @@ export function assertTimeoutApplied(session: Pick<Session, "timeout">, wantedMs
       `STEEL_TIMEOUT_PARAM_WRONG: asked for ${wantedMs}ms, session reports ${String(actual)}. ` +
         "Fix the parameter name before doing anything else.",
     );
+  }
+}
+
+/**
+ * steel.md §6: a session that silently lost its profile remembers nothing.
+ * Returns the mounted profileId. Errors never include the id (credential-tier).
+ */
+export function assertProfileMounted(
+  session: Pick<Session, "profileId">,
+  params: Pick<SessionCreateParams, "profileId" | "persistProfile">,
+): string | undefined {
+  if (params.profileId !== undefined && session.profileId !== params.profileId) {
+    throw new Error("STEEL_PROFILE_NOT_MOUNTED: asked to restore a profile; the session reports a different or no profileId.");
+  }
+  if (params.persistProfile && !session.profileId) {
+    throw new Error("STEEL_PROFILE_NOT_CREATED: persistProfile was set but the session returned no profileId; nothing would be remembered.");
+  }
+  return session.profileId;
+}
+
+/** What `createSession` sends to Steel, plus the values it asserts against. */
+export interface SessionPlan {
+  params: SessionCreateParams;
+  timeoutMs: number;
+  dimensions: { width: number; height: number };
+  /** Dedicated IP the session is pinned to, if any. */
+  dedicatedIpId: string | undefined;
+}
+
+/**
+ * Build the purchase-worker `sessions.create` body (steel.md §4.1, §6, §9).
+ * Pure, so the identity rules are testable without a Steel account.
+ */
+export function buildSessionCreateParams(
+  o: SteelProviderOptions,
+  opts: CreateSessionOptions,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): SessionPlan {
+  for (const owned of ["profileId", "persistProfile", "sessionContext"] as const) {
+    if (o.sessionOptions?.[owned] !== undefined) {
+      throw new Error(`'${owned}' must not be set via sessionOptions: the profile comes from the ProfileStore binding (steel.md §6).`);
+    }
+  }
+
+  const envTimeout = Number(env["STEEL_SESSION_TIMEOUT_MS"]);
+  const timeoutMs = o.sessionTimeoutMs ?? (Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : PURCHASE_SESSION_TIMEOUT_MS);
+  const dimensions = o.dimensions ?? o.sessionOptions?.dimensions ?? DEFAULT_DIMENSIONS;
+
+  const params: SessionCreateParams = {
+    ...o.sessionOptions,
+    useProxy: o.useProxy ?? o.sessionOptions?.useProxy ?? true,
+    solveCaptcha: o.solveCaptcha ?? o.sessionOptions?.solveCaptcha ?? true,
+    blockAds: o.blockAds ?? o.sessionOptions?.blockAds ?? true,
+    dimensions,
+    timeout: timeoutMs,
+    // Browser identity: restore the bound profile, or let Steel create one.
+    persistProfile: opts.persistProfile ?? true,
+  };
+  if (opts.profile) params.profileId = opts.profile.profileId;
+  if (o.stealth !== undefined) params.stealthConfig = o.stealth;
+  if (o.region !== undefined) params.region = o.region;
+  if (o.credentials !== undefined) params.credentials = o.credentials;
+
+  // Network identity: a profile keeps the dedicated IP it was pinned with; the
+  // configured IP only pins profiles that have none yet.
+  const dedicatedIpId = opts.profile?.dedicatedIpId ?? o.dedicatedIpId ?? (env["STEEL_DEDICATED_IP_ID"] || undefined);
+  const proxyUrl = o.proxyUrl ?? o.sessionOptions?.proxyUrl;
+  if (dedicatedIpId !== undefined) {
+    if (proxyUrl !== undefined) {
+      throw new Error("PROFILE_IP_PIN_CONFLICT: proxyUrl would override the dedicated IP pinned to this profile (steel.md §6, §9). Remove one.");
+    }
+    params.useProxy = { type: "fixed", id: dedicatedIpId };
+  } else if (proxyUrl !== undefined) {
+    params.proxyUrl = proxyUrl;
+  }
+
+  for (const forbidden of ["inactivityTimeout", "optimizeBandwidth"]) {
+    if (forbidden in (params as Record<string, unknown>)) {
+      throw new Error(`'${forbidden}' must not be set on a purchase-worker session (steel.md §3, §4.1).`);
+    }
+  }
+  return { params, timeoutMs, dimensions, dedicatedIpId };
+}
+
+/** The slice of the Steel client profile polling needs. Structural, so tests can fake it. */
+export interface SteelProfilesClient {
+  profiles: {
+    get(id: string): PromiseLike<Pick<ProfileGetResponse, "status">>;
+  };
+}
+
+export interface ProfileReadyOptions {
+  timeoutMs?: number | undefined;
+  pollMs?: number | undefined;
+  /** Injectable for tests. */
+  sleep?: ((ms: number) => Promise<void>) | undefined;
+  now?: (() => number) | undefined;
+}
+
+/**
+ * steel.md §6: poll a released profile until Steel has persisted it. A session
+ * created on the profile before READY restores stale state.
+ */
+export async function waitForProfileReady(
+  client: SteelProfilesClient,
+  profileId: string,
+  options: ProfileReadyOptions = {},
+): Promise<ProfileReadiness> {
+  const pollMs = options.pollMs ?? PROFILE_READY_POLL_MS;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const now = options.now ?? Date.now;
+  const deadline = now() + (options.timeoutMs ?? PROFILE_READY_TIMEOUT_MS);
+  for (;;) {
+    const { status } = await client.profiles.get(profileId);
+    if (status === "READY" || status === "FAILED") return status;
+    if (now() >= deadline) return "TIMEOUT";
+    await sleep(pollMs);
   }
 }
 
@@ -161,15 +313,10 @@ class SteelBrowserSession implements BrowserSession {
     readonly page: PageLike,
     readonly control: ControlSurface,
     readonly sessionViewerUrl: string,
+    readonly profile: ProfileMount | undefined,
     private readonly browser: Browser,
     private readonly client: Steel,
   ) {}
-
-  async saveProfile(): Promise<BrowserProfile> {
-    // Auth context: cookies + localStorage, captured live. Treat as a credential.
-    const context: SessionContext = await this.client.sessions.context(this.sessionId);
-    return { provider: this.provider, context, savedAt: new Date().toISOString() };
-  }
 
   async listReceiptFiles(): Promise<string[]> {
     const listed = await this.client.sessions.files.list(this.sessionId);
@@ -180,60 +327,37 @@ class SteelBrowserSession implements BrowserSession {
     try {
       await this.browser.close();
     } finally {
-      // REQUIRED: release ends billing and triggers persistence.
+      // REQUIRED: release ends billing and starts the profile write (UPLOADING → READY).
       await this.client.sessions.release(this.sessionId);
     }
   }
 }
 
 export class SteelBrowserProvider implements BrowserProvider {
-  private readonly apiKey: string;
+  private readonly client: Steel;
   private readonly options: SteelProviderOptions;
 
   constructor(options: SteelProviderOptions = {}) {
     const apiKey = options.apiKey ?? process.env["STEEL_API_KEY"];
     if (!apiKey) throw new Error("STEEL_API_KEY is required for SteelBrowserProvider.");
-    this.apiKey = apiKey;
+    this.client = new Steel({ steelAPIKey: apiKey });
     this.options = options;
   }
 
   async createSession(opts: CreateSessionOptions): Promise<BrowserSession> {
-    const client = new Steel({ steelAPIKey: this.apiKey });
+    const client = this.client;
     const o = this.options;
+    const plan = buildSessionCreateParams(o, opts);
 
-    const envTimeout = Number(process.env["STEEL_SESSION_TIMEOUT_MS"]);
-    const timeout = o.sessionTimeoutMs ?? (Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : PURCHASE_SESSION_TIMEOUT_MS);
-    const dimensions = o.dimensions ?? o.sessionOptions?.dimensions ?? DEFAULT_DIMENSIONS;
-
-    const body: SessionCreateParams = {
-      ...o.sessionOptions,
-      useProxy: o.useProxy ?? o.sessionOptions?.useProxy ?? true,
-      solveCaptcha: o.solveCaptcha ?? o.sessionOptions?.solveCaptcha ?? true,
-      blockAds: o.blockAds ?? o.sessionOptions?.blockAds ?? true,
-      dimensions,
-      timeout,
-    };
-    if (o.proxyUrl !== undefined) body.proxyUrl = o.proxyUrl;
-    if (o.stealth !== undefined) body.stealthConfig = o.stealth;
-    if (o.region !== undefined) body.region = o.region;
-    if (o.credentials !== undefined) body.credentials = o.credentials;
-    if (opts.profile?.context !== undefined) {
-      body.sessionContext = opts.profile.context as SessionCreateParams["sessionContext"];
-    }
-    for (const forbidden of ["inactivityTimeout", "optimizeBandwidth"]) {
-      if (forbidden in (body as Record<string, unknown>)) {
-        throw new Error(`'${forbidden}' must not be set on a purchase-worker session (steel.md §3, §4.1).`);
-      }
-    }
-
-    const session: Session = await client.sessions.create(body);
+    const session: Session = await client.sessions.create(plan.params);
 
     let browser: Browser | undefined;
     try {
-      assertTimeoutApplied(session, timeout);
+      assertTimeoutApplied(session, plan.timeoutMs);
+      const profileId = assertProfileMounted(session, plan.params);
       browser = await chromium.connectOverCDP(session.websocketUrl);
       // Steel hands you a context and page already open. A new context would NOT
-      // inherit the restored identity, so never create one.
+      // inherit the mounted profile, so never create one.
       const context = browser.contexts()[0];
       const page = context?.pages()[0];
       if (!context || !page) {
@@ -242,12 +366,25 @@ export class SteelBrowserProvider implements BrowserProvider {
       page.setDefaultTimeout(o.navigationTimeoutMs ?? CHECKOUT_TIMEOUT_MS);
       page.setDefaultNavigationTimeout(o.navigationTimeoutMs ?? CHECKOUT_TIMEOUT_MS);
 
+      const control: ControlSurface =
+        (o.controlSurface ?? "steel-computer") === "steel-computer"
+          ? new SteelComputerControl(client, session.id, plan.dimensions, () => page.url())
+          : new PlaywrightControl(page, plan.dimensions);
+
+      const profile: ProfileMount | undefined =
+        profileId === undefined
+          ? undefined
+          : plan.dedicatedIpId === undefined
+            ? { profileId }
+            : { profileId, dedicatedIpId: plan.dedicatedIpId };
+
       return new SteelBrowserSession(
         session.id,
         opts.provider,
         new PlaywrightPage(page),
-        new PlaywrightControl(page, dimensions),
+        control,
         session.sessionViewerUrl,
+        profile,
         browser,
         client,
       );
@@ -257,5 +394,12 @@ export class SteelBrowserProvider implements BrowserProvider {
       await client.sessions.release(session.id).catch(() => {});
       throw err;
     }
+  }
+
+  waitForProfileReady(profileId: string): Promise<ProfileReadiness> {
+    return waitForProfileReady(this.client, profileId, {
+      timeoutMs: this.options.profileReadyTimeoutMs,
+      pollMs: this.options.profileReadyPollMs,
+    });
   }
 }

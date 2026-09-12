@@ -1,9 +1,12 @@
 /**
  * Computer-use resolver (aisle-pipeline.md §16, §17).
  *
- * The deterministic adapter path handles the common case. When a READ or
- * STAGING step can't complete, the worker hands the stuck sub-goal to a
- * `ComputerUseAgent`, which drives the browser by screenshots + pixel input.
+ * Executor: Steel (`sessions.computer`, see steel-computer.ts) or Playwright.
+ * Brain: OpenRouter, default model NVIDIA Nemotron 3 Nano Omni (free, vision).
+ *
+ * When a READ or STAGING step can't complete deterministically, the worker hands
+ * the stuck sub-goal to a `ComputerUseAgent`, which drives the browser by
+ * screenshots + pixel actions.
  *
  * Hard rules from the docs:
  *   - A model is never in the final submit, the gate, the origin decision, the
@@ -86,8 +89,6 @@ export class ScriptedComputerUseAgent implements ComputerUseAgent {
   }
 }
 
-const b64 = (bytes: Uint8Array): string => Buffer.from(bytes).toString("base64");
-
 // ---------------------------------------------------------------------------
 // OpenRouter resolver (the documented model layer, §16.3)
 // ---------------------------------------------------------------------------
@@ -106,12 +107,20 @@ export interface OpenRouterComputerUseOptions {
    * NOT the demo vendor key (OPENROUTER_DEMO_KEY). Never recoverable.
    */
   apiKey?: string;
-  /** Primary model. Defaults to the VISION profile's `anthropic/claude-sonnet-4.6`. ⚠ VERIFY slugs. */
+  /**
+   * Must accept image input. Defaults to process.env.OPENROUTER_VISION_MODEL, then
+   * NVIDIA Nemotron 3 Nano Omni (free). ⚠ VERIFY slugs against the live catalogue.
+   */
   model?: string;
-  /** OpenRouter `models` failover array, in priority order. Defaults to `["openai/gpt-5"]`. */
+  /** OpenRouter `models` failover array, in priority order. Defaults to none. */
   fallbackModels?: string[];
   /** Per-invocation cap. Defaults to MAX_RESOLVER_CALLS_PER_JOB (5). */
   maxSteps?: number;
+  /**
+   * Token budget per call. Nemotron is a reasoning model, so reasoning tokens
+   * count against this; too small and the reply comes back empty. Default 4096.
+   */
+  maxTokens?: number;
   baseUrl?: string;
   referer?: string;
   title?: string;
@@ -121,8 +130,12 @@ export interface OpenRouterComputerUseOptions {
 }
 
 /** §16.3 VISION profile. */
-export const VISION_PROFILE = { model: "anthropic/claude-sonnet-4.6", models: ["openai/gpt-5"] } as const;
+export const VISION_PROFILE = {
+  model: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+  models: [] as readonly string[],
+} as const;
 
+const b64 = (bytes: Uint8Array): string => Buffer.from(bytes).toString("base64");
 const dataUrl = (bytes: Uint8Array): string => `data:image/png;base64,${b64(bytes)}`;
 
 /** Parse a single action JSON object out of a model reply. Tolerates fences and prose. */
@@ -168,8 +181,9 @@ export function createOpenRouterComputerUseAgent(options: OpenRouterComputerUseO
   if (!apiKey) {
     throw new Error("OPENROUTER_INFRA_KEY is required for createOpenRouterComputerUseAgent (Aisle's resolver key).");
   }
-  const model = options.model ?? VISION_PROFILE.model;
+  const model = options.model ?? process.env["OPENROUTER_VISION_MODEL"] ?? VISION_PROFILE.model;
   const fallbackModels = options.fallbackModels ?? [...VISION_PROFILE.models];
+  const maxTokens = options.maxTokens ?? 4096;
   const baseUrl = options.baseUrl ?? "https://openrouter.ai/api/v1";
   const defaultMaxSteps = options.maxSteps ?? loadLimits().maxResolverCallsPerJob;
   const doFetch: OpenRouterFetch = options.fetchImpl ?? (globalThis.fetch as unknown as OpenRouterFetch);
@@ -203,7 +217,15 @@ export function createOpenRouterComputerUseAgent(options: OpenRouterComputerUseO
       ];
 
       for (let step = 0; step < maxSteps; step++) {
-        let body: string;
+        const payload: Record<string, unknown> = {
+          model,
+          max_tokens: maxTokens,
+          // Keep reasoning out of `content` so the JSON action parses cleanly.
+          reasoning: { exclude: true },
+          messages,
+        };
+        if (fallbackModels.length > 0) payload["models"] = fallbackModels;
+
         let resp: { ok: boolean; status: number; text(): Promise<string> };
         try {
           resp = await doFetch(`${baseUrl}/chat/completions`, {
@@ -214,7 +236,7 @@ export function createOpenRouterComputerUseAgent(options: OpenRouterComputerUseO
               "HTTP-Referer": options.referer ?? "https://aisle.dev",
               "X-OpenRouter-Title": options.title ?? "Aisle",
             },
-            body: JSON.stringify({ model, models: fallbackModels, max_tokens: 300, messages }),
+            body: JSON.stringify(payload),
           });
         } catch (err) {
           return { success: false, steps: step + 1, note: `OpenRouter request failed: ${String(err)}` };
@@ -222,9 +244,8 @@ export function createOpenRouterComputerUseAgent(options: OpenRouterComputerUseO
         // §16.5: the resolver's own credits are gone. Never a recovery job.
         if (resp.status === 402) throw new InfraBlockedError();
         if (!resp.ok) return { success: false, steps: step + 1, note: `OpenRouter HTTP ${resp.status}` };
-        body = await resp.text();
 
-        const parsed = parseOpenAiBody(body);
+        const parsed = parseOpenAiBody(await resp.text());
         options.onModelCall?.({ step: step + 1, modelRequested: model, modelUsed: parsed.model });
         const action = parsed.content === undefined ? undefined : parseComputerUseAction(parsed.content);
         messages.push({ role: "assistant", content: parsed.content ?? "" });
@@ -262,106 +283,5 @@ function parseOpenAiBody(body: string): { content: string | undefined; model: st
     };
   } catch {
     return { content: undefined, model: undefined };
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Anthropic reference implementation (optional; client is injected)
-// ---------------------------------------------------------------------------
-
-export interface AnthropicLike {
-  beta: {
-    messages: {
-      create(params: Record<string, unknown>): Promise<{
-        content: Array<Record<string, unknown>>;
-        stop_reason?: string;
-      }>;
-    };
-  };
-}
-
-export interface AnthropicComputerUseOptions {
-  model?: string;
-  /** Defaults to MAX_RESOLVER_CALLS_PER_JOB (5). */
-  maxSteps?: number;
-  toolType?: string;
-  betaFlag?: string;
-}
-
-/**
- * Reference computer-use loop over an injected Anthropic client. The documented
- * resolver is OpenRouter (§16); this exists for hosts that already hold an
- * Anthropic client. Same budget and same never-submit rule apply.
- */
-export function createAnthropicComputerUseAgent(
-  client: AnthropicLike,
-  options: AnthropicComputerUseOptions = {},
-): ComputerUseAgent {
-  const model = options.model ?? "claude-sonnet-5";
-  const toolType = options.toolType ?? "computer_20250124";
-  const betaFlag = options.betaFlag ?? "computer-use-2025-01-24";
-  const defaultMaxSteps = options.maxSteps ?? loadLimits().maxResolverCallsPerJob;
-
-  return {
-    async run(surface, instruction, runOpts) {
-      const maxSteps = Math.min(runOpts?.maxSteps ?? defaultMaxSteps, defaultMaxSteps);
-      const { width, height } = surface.viewport();
-      const tools = [{ type: toolType, name: "computer", display_width_px: width, display_height_px: height }];
-
-      const messages: Array<Record<string, unknown>> = [
-        {
-          role: "user",
-          content: [
-            { type: "text", text: `${instruction}\nNever confirm, submit, or pay for anything.` },
-            { type: "image", source: { type: "base64", media_type: "image/png", data: b64(await surface.screenshot()) } },
-          ],
-        },
-      ];
-
-      for (let step = 0; step < maxSteps; step++) {
-        const resp = await client.beta.messages.create({ model, max_tokens: 1024, tools, betas: [betaFlag], messages });
-        messages.push({ role: "assistant", content: resp.content });
-
-        const toolUses = resp.content.filter((c) => c["type"] === "tool_use");
-        if (toolUses.length === 0 || resp.stop_reason === "end_turn") {
-          return { success: true, steps: step + 1 };
-        }
-
-        const toolResults: Array<Record<string, unknown>> = [];
-        for (const tu of toolUses) {
-          await applyAction(surface, mapAnthropicAction((tu["input"] ?? {}) as Record<string, unknown>));
-          toolResults.push({
-            type: "tool_result",
-            tool_use_id: tu["id"],
-            content: [
-              { type: "image", source: { type: "base64", media_type: "image/png", data: b64(await surface.screenshot()) } },
-            ],
-          });
-        }
-        messages.push({ role: "user", content: toolResults });
-      }
-      return { success: false, steps: maxSteps, note: "max steps reached" };
-    },
-  };
-}
-
-function mapAnthropicAction(input: Record<string, unknown>): ComputerUseAction {
-  const action = String(input["action"] ?? "");
-  const coord = Array.isArray(input["coordinate"]) ? (input["coordinate"] as number[]) : undefined;
-  switch (action) {
-    case "left_click":
-    case "mouse_click":
-      return coord?.[0] === undefined || coord[1] === undefined ? { type: "screenshot" } : { type: "click", x: coord[0], y: coord[1] };
-    case "type":
-      return { type: "type", text: String(input["text"] ?? "") };
-    case "key":
-      return { type: "key", key: String(input["text"] ?? "") };
-    case "scroll": {
-      const dir = String(input["scroll_direction"] ?? "down");
-      const amount = Number(input["scroll_amount"] ?? 3) * 100;
-      return { type: "scroll", dx: 0, dy: dir === "up" ? -amount : amount };
-    }
-    default:
-      return { type: "screenshot" };
   }
 }

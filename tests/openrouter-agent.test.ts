@@ -48,7 +48,7 @@ describe("parseComputerUseAction", () => {
 });
 
 describe("OpenRouter resolver", () => {
-  it("drives the control surface with the VISION profile and a models fallback array", async () => {
+  it("drives the control surface with Nemotron 3 Nano Omni by default", async () => {
     const site = new MockVendorSite({ provider: PROVIDER, origin: ORIGIN, failDiscoverUntilAssisted: true });
     const session = await new MockBrowserProvider(site).createSession({ provider: PROVIDER });
     const bodies: Array<Record<string, unknown>> = [];
@@ -62,9 +62,24 @@ describe("OpenRouter resolver", () => {
     const outcome = await agent.run(session.control, "reveal pricing");
     expect(outcome.success).toBe(true);
     expect(site.discoverUnlocked).toBe(true);
-    expect(bodies[0]?.["model"]).toBe("anthropic/claude-sonnet-4.6");
-    expect(bodies[0]?.["models"]).toEqual(["openai/gpt-5"]);
+    expect(bodies[0]?.["model"]).toBe("nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free");
+    expect(bodies[0]?.["models"]).toBeUndefined();
+    expect(bodies[0]?.["reasoning"]).toEqual({ exclude: true });
+    expect(Number(bodies[0]?.["max_tokens"])).toBeGreaterThanOrEqual(2048);
     expect(used).toEqual(["openai/gpt-5", "openai/gpt-5"]);
+  });
+
+  it("sends a models failover array only when one is configured", async () => {
+    const site = new MockVendorSite({ provider: PROVIDER, origin: ORIGIN });
+    const session = await new MockBrowserProvider(site).createSession({ provider: PROVIDER });
+    const bodies: Array<Record<string, unknown>> = [];
+    const agent = createOpenRouterComputerUseAgent({
+      apiKey: "infra-key",
+      fallbackModels: ["some/other-vision-model"],
+      fetchImpl: fakeFetch(['{"action":"done","success":true}'], bodies),
+    });
+    await agent.run(session.control, "anything");
+    expect(bodies[0]?.["models"]).toEqual(["some/other-vision-model"]);
   });
 
   it("fails loud with INFRA_BLOCKED when the resolver key itself 402s (§16.5)", async () => {

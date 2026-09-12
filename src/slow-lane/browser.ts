@@ -49,20 +49,42 @@ export interface ControlSurface {
 }
 
 /**
- * A persisted browser profile — Steel's "session context" (cookies +
- * localStorage + origins). Opaque to us; we only store and replay it so the
- * vendor stays authenticated across recovery sessions.
+ * The Steel profile bound to one (user, vendor) — a `vendor_profiles` row
+ * (steel.md §6). Steel holds the browser identity; we hold the pointer to it
+ * and the egress it is pinned to.
+ *
+ * ⚠ `profileId` is credential-tier: anyone who can create a session with it
+ * drives a browser logged in as this user. Keep it out of logs, events, tool
+ * results and model prompts.
  */
 export interface BrowserProfile {
+  userId: string;
   provider: string;
-  context: unknown;
-  savedAt: string;
+  profileId: string;
+  /** Steel dedicated IP (`fixed:…`) pinned to this profile. */
+  dedicatedIpId?: string;
+  /** When a job on this profile last ended with a verified entitlement. */
+  lastVerifiedAt?: string;
 }
+
+/** The profile a live session runs on, as the provider mounted it. */
+export interface ProfileMount {
+  profileId: string;
+  dedicatedIpId?: string;
+}
+
+/** Where a released profile's write ended up (Steel: UPLOADING → READY | FAILED). */
+export type ProfileReadiness = "READY" | "FAILED" | "TIMEOUT";
 
 export interface CreateSessionOptions {
   provider: string;
-  /** Resume a saved profile to reuse authenticated vendor state. */
+  /** Restore this profile and its pinned IP. Omit to have the provider create a profile. */
   profile?: BrowserProfile;
+  /**
+   * Write the session's state back to the profile on release. Default true.
+   * Read-only sessions pass false so they never mutate the stored identity (steel.md §4.2).
+   */
+  persistProfile?: boolean;
 }
 
 /** A live browser session bound to one vendor. */
@@ -73,18 +95,24 @@ export interface BrowserSession {
   readonly sessionViewerUrl?: string;
   readonly page: PageLike;
   readonly control: ControlSurface;
-  /** Capture the current auth/cookie state as a reusable profile. */
-  saveProfile(): Promise<BrowserProfile>;
+  /** The profile this session runs on, restored or newly created. */
+  readonly profile?: ProfileMount | undefined;
   /**
    * List receipt/invoice/license files the session accumulated (Steel Files API),
    * for the audit trail. Optional — mocks and non-Steel providers may omit it.
    */
   listReceiptFiles?(): Promise<string[]>;
+  /** Release the session. For Steel this starts the profile write. */
   close(): Promise<void>;
 }
 
 export interface BrowserProvider {
   createSession(opts: CreateSessionOptions): Promise<BrowserSession>;
+  /**
+   * Wait for a released profile to finish persisting. A session created on it
+   * before READY restores stale state. Optional for providers without profiles.
+   */
+  waitForProfileReady?(profileId: string): Promise<ProfileReadiness>;
 }
 
 /** Derive the canonical origin (scheme + host[:port]) from a URL. */
