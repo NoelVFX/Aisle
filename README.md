@@ -307,8 +307,15 @@ listed in `AISLE_REAL_PURCHASE_PROVIDERS`.
 card saved on the account: Aisle never types card details.
 
 ```bash
-npm run steel:login -- openrouter   # optional: sign the Steel profile in ahead of time
+npm run steel:credentials -- openrouter   # store the login in Steel's vault; Steel signs in by itself
+npm run steel:login -- openrouter         # or: sign the Steel profile in once by hand
 ```
+
+`steel:credentials` asks for the email and password in your terminal (password hidden) and
+sends them to Steel's credentials vault for the vendor's billing origin (steel.md §8). Steel
+types them into the sign-in form inside the purchase session; Aisle never sees them. Vendors
+opt in with `purchase.steelCredentials: true` (OpenRouter and Studio do). An emailed code, a
+passkey or a Google/GitHub sign-in still becomes a scoped takeover.
 
 The tier-3 picker uses `google/gemini-2.5-flash-lite` (fallbacks: llama-3.3-70b, gpt-4.1-nano).
 Model calls abort after 60s and retry within the resolver budget.

@@ -15,7 +15,8 @@
       "offersFrom": "catalogue",
       "paymentOrigins": [
         "https://checkout.stripe.com"
-      ]
+      ],
+      "steelCredentials": true
     },
     "offers": [
       {

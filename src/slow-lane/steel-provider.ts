@@ -394,6 +394,14 @@ class PlaywrightPage implements PageLike {
     return true;
   }
 
+  async setChecked(selector: string, checked: boolean): Promise<boolean> {
+    const loc = this.page.locator(selector).first();
+    if ((await loc.count()) === 0) return false;
+    if ((await loc.isChecked().catch(() => checked)) === checked) return false;
+    await loc.setChecked(checked, { force: true });
+    return true;
+  }
+
   async settle(ms = 1500): Promise<void> {
     await this.page.waitForLoadState("domcontentloaded").catch(() => {});
     await this.page.waitForTimeout(ms);

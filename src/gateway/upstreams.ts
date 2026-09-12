@@ -218,6 +218,7 @@ export function openRouterChatTool(env: NodeJS.ProcessEnv, fetchImpl: FetchLike)
     inputShape: {
       prompt: z.string().describe("The user message to send."),
       model: z.string().optional().describe("OpenRouter model slug. Defaults to openai/gpt-4o-mini (paid)."),
+      max_tokens: z.number().int().positive().optional().describe("Most tokens to generate. OpenRouter reserves credits for this up front."),
     },
     async call(args) {
       const res = await fetchImpl("https://openrouter.ai/api/v1/chat/completions", {
@@ -231,6 +232,7 @@ export function openRouterChatTool(env: NodeJS.ProcessEnv, fetchImpl: FetchLike)
         body: JSON.stringify({
           model: typeof args["model"] === "string" && args["model"] ? args["model"] : "openai/gpt-4o-mini",
           messages: [{ role: "user", content: String(args["prompt"] ?? "") }],
+          ...(typeof args["max_tokens"] === "number" ? { max_tokens: args["max_tokens"] } : {}),
         }),
       });
       return toResult(res, (text) => {

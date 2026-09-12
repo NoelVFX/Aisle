@@ -5,7 +5,7 @@ import { createGateway } from "../src/gateway/gateway.js";
 import { loadUpstreams, type FetchLike } from "../src/gateway/upstreams.js";
 import { createBalanceReaders, type GetJson } from "../src/gateway/balances.js";
 import type { SteelRunner } from "../src/gateway/recovery.js";
-import { LadderVendorAdapter } from "../src/slow-lane/adapters/ladder-adapter.js";
+import { LadderVendorAdapter, extractCheckoutTotal } from "../src/slow-lane/adapters/ladder-adapter.js";
 import { InMemoryAdapterRegistry } from "../src/slow-lane/adapters/recorded-adapter.js";
 import type { PageLike } from "../src/slow-lane/browser.js";
 
@@ -88,22 +88,140 @@ describe("Studio vendor config", () => {
   });
 });
 
+describe("vendor account setup", () => {
+  it("stops with ACCOUNT_SETUP_REQUIRED on a billing-address form; the picker is never asked", async () => {
+    let pickerCalls = 0;
+    const events: string[] = [];
+    const page = {
+      currentUrl: () => "https://openrouter.ai/settings/credits",
+      goto: async () => {},
+      settle: async () => {},
+      queryAllText: async () => [],
+      innerText: async () => "Add a Billing Address. A billing address is required to verify your identity and help prevent fraud.",
+      actionableCandidates: async () => [{ index: 0, role: "button", name: "Complete address details to continue", near: "" }],
+      clickCandidate: async () => {},
+    } as unknown as PageLike;
+    const a = new LadderVendorAdapter({
+      provider: "openrouter",
+      billingOrigin: "https://openrouter.ai",
+      pricingPath: "/settings/credits",
+      registry: new InMemoryAdapterRegistry(),
+      picker: { pick: async () => { pickerCalls += 1; return { index: 0, why: "", modelUsed: undefined, replayed: false }; } },
+      onEvent: (t) => events.push(t),
+    });
+    const offer = { productId: "openrouter_credits_5", label: "$5 credits", unitsGranted: 5, price: 5, currency: "USD", billing: "one_time" as const, autoRenew: false };
+    await expect(a.stagePurchase(page, offer)).rejects.toMatchObject({ code: "ACCOUNT_SETUP_REQUIRED" });
+    expect(pickerCalls).toBe(0);
+    expect(events).toContain("ACCOUNT_SETUP_REQUIRED");
+  });
+});
+
+describe("vendor account setup: payment method dialog", () => {
+  it("OpenRouter's Add Credits on an account with no card is setup, not a picker step", async () => {
+    let pickerCalls = 0;
+    const events: string[] = [];
+    // Controls and text recorded live from openrouter.ai/settings/credits after "Add Credits".
+    const page = {
+      currentUrl: () => "https://openrouter.ai/settings/credits",
+      goto: async () => {},
+      settle: async () => {},
+      queryAllText: async () => [],
+      innerText: async () => "Buy Credits\nAdd Credits\nAdd a Payment Method\nUse one-time payment methods\nClose",
+      actionableCandidates: async () => [
+        { index: 0, role: "switch", name: "Use one-time payment methods", near: "" },
+        { index: 1, role: "button", name: "Close", near: "" },
+        { index: 2, role: "button", name: "Save payment method", near: "" },
+      ],
+      clickCandidate: async () => {},
+    } as unknown as PageLike;
+    const a = new LadderVendorAdapter({
+      provider: "openrouter",
+      billingOrigin: "https://openrouter.ai",
+      pricingPath: "/settings/credits",
+      registry: new InMemoryAdapterRegistry(),
+      picker: { pick: async () => { pickerCalls += 1; return { index: 0, why: "", modelUsed: undefined, replayed: false }; } },
+      onEvent: (t) => events.push(t),
+    });
+    const offer = { productId: "openrouter_credits_5", label: "$5 credits", unitsGranted: 5, price: 5, currency: "USD", billing: "one_time" as const, autoRenew: false };
+    await expect(a.stagePurchase(page, offer)).rejects.toMatchObject({ code: "ACCOUNT_SETUP_REQUIRED" });
+    expect(pickerCalls).toBe(0);
+  });
+});
+
+describe("OpenRouter Purchase Credits dialog (recorded live)", () => {
+  it("reads the labelled total, not the first price (a fee line)", () => {
+    const dialog = "Purchase Credits\nVISA\n(5488)\nAmount\nBilling address\nService fees\n$0.80\nSales Tax / VAT\nN/A\nTotal due\n$10.80\nPurchase";
+    expect(extractCheckoutTotal(dialog)).toBe(10.8);
+    expect(extractCheckoutTotal("Order total: $1,234.50")).toBe(1234.5);
+    expect(extractCheckoutTotal("Buy 500 credits for $5")).toBeUndefined();
+  });
+
+  it("types the package amount, stages the new total, then clicks Purchase", async () => {
+    let amount = 10;
+    const filled: Array<[string, string]> = [];
+    const clicked: string[] = [];
+    const text = () => `Purchase Credits\nAmount\nService fees\n$0.80\nTotal due\n$${(amount + 0.8).toFixed(2)}\nPurchase`;
+    const spin = { index: 2, role: "spinbutton", name: "(5 - 25000)", near: "Amount Billing address Edit Tax ID" };
+    const page = {
+      currentUrl: () => "https://openrouter.ai/settings/credits",
+      goto: async () => {},
+      settle: async () => {},
+      queryAllText: async (sel: string) => (sel.includes("button") ? ["Purchase", "Close"] : []),
+      innerText: async () => text(),
+      actionableCandidates: async () => [{ index: 0, role: "button", name: "Close", near: "" }, spin, { index: 4, role: "button", name: "Purchase", near: "" }],
+      fillCandidate: async (c: { name: string }, v: string) => {
+        filled.push([c.name, v]);
+        amount = Number(v);
+      },
+      clickCandidate: async () => {},
+      clickByRole: async (_role: string, name: string | RegExp) => {
+        if (name !== "Purchase") return false;
+        clicked.push(name);
+        return true;
+      },
+    } as unknown as PageLike;
+    const offer = { productId: "openrouter_credits_5", label: "$5 credits", unitsGranted: 5, price: 5, currency: "USD", billing: "one_time" as const, autoRenew: false };
+    const events: string[] = [];
+    const a = new LadderVendorAdapter({
+      provider: "openrouter",
+      billingOrigin: "https://openrouter.ai",
+      pricingPath: "/settings/credits",
+      catalogueOffers: [offer],
+      registry: new InMemoryAdapterRegistry(),
+      // The dialog is already a checkout: the model must not be asked anything.
+      picker: { pick: async () => { throw new Error("picker must not be called"); } },
+      onEvent: (t) => events.push(t),
+    });
+    const staged = await a.stagePurchase(page, offer);
+    expect(filled).toEqual([["(5 - 25000)", "5"]]);
+    expect(staged.amount).toBe(5.8); // within the $6.25 cap; the prefilled $10.80 would not be
+    await a.confirmPurchase(page, staged);
+    expect(clicked).toEqual(["Purchase"]);
+    expect(events).toEqual(expect.arrayContaining(["AMOUNT_ENTERED", "CONFIRM_CLICKED"]));
+  });
+});
+
 describe("Stripe Checkout in the slow lane", () => {
   const staged = { lineItem: "500 credits", amount: 5, currency: "USD", billingPeriod: "one_time" as const, autoRenew: false };
   function stripePage(url: string, cardFields: boolean) {
     const filled: Array<[string, string]> = [];
+    const toggled: Array<[string, boolean]> = [];
     const page = {
       currentUrl: () => url,
       waitForSelector: async (sel: string) => {
         if (sel.startsWith("#") && !cardFields) throw new Error("not visible");
       },
       fill: async (sel: string, value: string) => void filled.push([sel, value]),
+      setChecked: async (sel: string, checked: boolean) => {
+        toggled.push([sel, checked]);
+        return true;
+      },
       clickByRole: async (_role: string, name: string | RegExp) => name === "Pay",
       settle: async () => {},
       queryAllText: async () => [],
       innerText: async () => "",
     } as unknown as PageLike;
-    return { page, filled };
+    return { page, filled, toggled };
   }
   const adapter = (events: string[], balanceReader?: () => Promise<number | undefined>) =>
     new LadderVendorAdapter({
@@ -116,11 +234,14 @@ describe("Stripe Checkout in the slow lane", () => {
       ...(balanceReader ? { balanceReader, balanceSettleMs: 10_000 } : {}),
     });
 
-  it("types Stripe's public test card only on a test-mode session, then clicks Pay", async () => {
+  it("types Stripe's public test card only on a test-mode session, declines Link signup, then clicks Pay", async () => {
     const events: string[] = [];
-    const { page, filled } = stripePage("https://checkout.stripe.com/c/pay/cs_test_a1b2#fid", true);
+    const { page, filled, toggled } = stripePage("https://checkout.stripe.com/c/pay/cs_test_a1b2#fid", true);
     await adapter(events).confirmPurchase(page, staged);
     expect(filled[0]).toEqual(["#cardNumber", "4242424242424242"]);
+    // Seen live: a ticked "Save my information" box requires a phone number and blocks Pay.
+    expect(toggled).toEqual([["#enableStripePass", false]]);
+    expect(events.indexOf("LINK_SIGNUP_DECLINED")).toBeLessThan(events.indexOf("CONFIRM_CLICKED"));
     expect(events).toEqual(expect.arrayContaining(["TEST_CARD_ENTERED", "CONFIRM_CLICKED"]));
   });
 

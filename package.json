@@ -13,6 +13,7 @@
     "smoke:steel": "node --env-file=.env --import tsx src/steel-smoke.ts",
     "gateway": "tsx src/gateway/server.ts",
     "steel:login": "tsx src/gateway/steel-login.ts",
+    "steel:credentials": "tsx src/gateway/steel-credentials.ts",
     "gateway:http": "tsx src/gateway/http-server.ts",
     "vendor:studio": "tsx src/demo-vendor/launch.ts"
   },

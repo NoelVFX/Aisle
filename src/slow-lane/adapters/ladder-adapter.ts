@@ -37,6 +37,7 @@ const CONFIRM_LABELS = [
   "Place order",
   "Pay now",
   "Pay",
+  "Purchase",
   "Confirm purchase",
   "Confirm payment",
   "Confirm and pay",
@@ -50,6 +51,32 @@ const FILLABLE = new Set(["textbox", "spinbutton", "searchbox"]);
 const CHALLENGE_TEXT_RE =
   /3-?D ?Secure|verify (it'?s|that it'?s) you|authenticate (this|your) (payment|purchase)|one-time (pass)?code|enter the (verification )?code|confirm (this|the) (payment|purchase) in your (bank|banking app)/i;
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * Account setup the user owns: a billing address or a first payment method. Aisle
+ * never invents identity or card details, and never lets a model try (seen live on
+ * OpenRouter: "A billing address is required to verify your identity").
+ */
+const ACCOUNT_SETUP_TEXT_RE =
+  /billing address is required|add a billing address|add a payment method to (continue|purchase)|no payment method on file|save payment method/i;
+/** Controls that start that setup. Never offered to the picker. */
+const ACCOUNT_SETUP_CONTROL_RE = /billing address|payment method|address details|add (a )?card/i;
+/** The amount box of a typed-amount top-up, e.g. OpenRouter's spinbutton "(5 - 25000)" next to "Amount". */
+const AMOUNT_FIELD_RE = /amount|\(\s*\d+\s*[-–]\s*\d+\s*\)|top.?up/i;
+
+/**
+ * The checkout total, preferring a labelled total ("Total due $10.80") over the first
+ * price on the page, which is often a fee line ("Service fees $0.80"). The last labelled
+ * total wins: the order summary sits below any balance banner.
+ */
+export function extractCheckoutTotal(text: string): number | undefined {
+  const matches = [...text.matchAll(/\b(?:total due|amount due|order total|grand total|total)\b[^\d$€£]{0,20}[$€£]\s?([\d,]+(?:\.\d{1,2})?)/gi)];
+  const last = matches.at(-1)?.[1];
+  return last === undefined ? undefined : Number(last.replace(/,/g, ""));
+}
+
+/** Controls that only dismiss. Clicking them never moves toward a checkout. */
+const DISMISS_RE = /^\s*(close|cancel|dismiss|back|not now|no thanks)\s*$/i;
 
 /**
  * Stripe's PUBLIC test card. Only ever typed into a TEST-mode Stripe Checkout
@@ -268,7 +295,36 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
     }
 
     await this.waitForCheckout(page);
+    await this.enterTypedAmount(page, offer);
     return this.readStaged(page, offer);
+  }
+
+  /**
+   * Typed-amount top-ups (catalogue offers: OpenRouter, OpenAI): put the package amount
+   * in the amount field before Gate 1 reads the total. If this misses, the prefilled
+   * amount's total exceeds the mandate cap and Gate 1 refuses.
+   */
+  private async enterTypedAmount(page: PageLike, offer: PurchaseOffer): Promise<void> {
+    if (!this.cfg.catalogueOffers || !page.actionableCandidates || !page.fillCandidate) return;
+    const field = (await page.actionableCandidates()).find((c) => FILLABLE.has(c.role) && AMOUNT_FIELD_RE.test(`${c.name} ${c.near}`));
+    if (!field) return;
+    await page.fillCandidate(field, String(offer.price));
+    await page.settle?.(1500);
+    this.emit("AMOUNT_ENTERED", { field: field.name, amount: offer.price });
+  }
+
+  /** A PurchaseFailedError, not a DeterministicStepError: the vision resolver must not take this over. */
+  private async assertNoAccountSetup(page: PageLike): Promise<void> {
+    if (ACCOUNT_SETUP_TEXT_RE.test(await page.innerText().catch(() => ""))) this.throwAccountSetup();
+  }
+
+  private throwAccountSetup(): never {
+    this.emit("ACCOUNT_SETUP_REQUIRED", { vendor: this.cfg.provider });
+    throw new PurchaseFailedError(
+      `${this.cfg.provider} needs account setup before it can take payment (a billing address and a saved payment method). ` +
+        `Add them once at ${this.cfg.billingOrigin}, then retry. Nothing was bought.`,
+      "ACCOUNT_SETUP_REQUIRED",
+    );
   }
 
   private onPaymentOrigin(url: string): boolean {
@@ -305,11 +361,17 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
     const recorded: RecordedStep[] = [];
     for (let step = 0; step < this.maxSteps; step++) {
       if (await this.checkoutReady(page)) return recorded;
+      await this.assertNoAccountSetup(page);
 
-      const candidates: ActionCandidate[] = (await page.actionableCandidates())
-        .filter((c) => !CONFIRM_NAME_RE.test(c.name))
+      const all = await page.actionableCandidates();
+      const candidates: ActionCandidate[] = all
+        .filter((c) => !CONFIRM_NAME_RE.test(c.name) && !ACCOUNT_SETUP_CONTROL_RE.test(c.name) && !DISMISS_RE.test(c.name))
         .map((c, index) => ({ ...c, index }));
-      if (candidates.length === 0) break;
+      if (candidates.length === 0) {
+        // Only setup controls were on offer (e.g. an "add a payment method" dialog): the account isn't ready to pay.
+        if (all.some((c) => ACCOUNT_SETUP_CONTROL_RE.test(c.name))) this.throwAccountSetup();
+        break;
+      }
 
       const goal =
         `Buy exactly this package: "${offer.label}" (${offer.unitsGranted} units for ${offer.currency} ${offer.price}, one-time). ` +
@@ -368,7 +430,7 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
     }
     const text = await page.innerText();
     const rawAmount = await this.first(page, "[data-checkout-amount]");
-    const amount = rawAmount !== undefined ? Number(rawAmount.replace(/[^0-9.]/g, "")) : extractPrice(text);
+    const amount = rawAmount !== undefined ? Number(rawAmount.replace(/[^0-9.]/g, "")) : (extractCheckoutTotal(text) ?? extractPrice(text));
     if (amount === undefined || !Number.isFinite(amount)) {
       throw new DeterministicStepError("Checkout total not readable.", "Open the checkout so the order total is visible. Do not pay.");
     }
@@ -413,6 +475,7 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
     if (this.onPaymentOrigin(page.currentUrl())) {
       await page.waitForSelector('button[type="submit"]', 15_000).catch(() => {});
       await this.enterStripeTestCardIfNeeded(page);
+      await this.declineStripeLinkSignup(page);
     }
 
     if (recorded?.confirm && page.clickByRole && (await page.clickByRole(recorded.confirm.role, recorded.confirm.name))) {
@@ -459,6 +522,17 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
     }
     const tx = await this.first(page, "[data-transaction-id]");
     return tx === undefined ? { confirmed: true } : { confirmed: true, transactionId: tx };
+  }
+
+  /**
+   * Stripe Link's "Save my information for faster checkout" is the user's choice, never
+   * Aisle's. Left ticked it demands a phone number and Pay silently does nothing.
+   */
+  private async declineStripeLinkSignup(page: PageLike): Promise<void> {
+    if (!page.setChecked || !sameOrigin(page.currentUrl(), "https://checkout.stripe.com")) return;
+    if (await page.setChecked("#enableStripePass", false).catch(() => false)) {
+      this.emit("LINK_SIGNUP_DECLINED", { processor: "stripe" });
+    }
   }
 
   /** Deterministic, test mode only. Skipped when Stripe shows a saved card instead of card fields. */

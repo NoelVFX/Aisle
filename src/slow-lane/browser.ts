@@ -50,6 +50,8 @@ export interface PageLike {
   clickByRole?(role: string, name: string | RegExp): Promise<boolean>;
   /** Fill the first control with this role and accessible name; false when absent. */
   fillByRole?(role: string, name: string | RegExp, value: string): Promise<boolean>;
+  /** Set a checkbox. True only when it existed and its state changed. */
+  setChecked?(selector: string, checked: boolean): Promise<boolean>;
   /** Let navigation and client-side rendering settle after an action. */
   settle?(ms?: number): Promise<void>;
 }
