@@ -156,6 +156,70 @@ describe("slow lane — computer-use fallback", () => {
   });
 });
 
+describe("slow lane — already covered (§8)", () => {
+  it("skips the purchase when the balance already clears the requirement", async () => {
+    const site = new MockVendorSite({ provider: PROVIDER, origin: ORIGIN, startingBalance: 10_000 });
+    const result = await runSlowLane(makeRequest(), {
+      provider: new MockBrowserProvider(site),
+      adapter: new MockVendorAdapter(site),
+    });
+    expect(site.purchaseClicks).toBe(0);
+    expect(result.verifiedEntitlement.balance).toBe(10_000);
+  });
+});
+
+describe("slow lane — verification is a delta (§17 Gate 2)", () => {
+  it("fails when a pre-existing balance is present but the purchase adds nothing", async () => {
+    // Start at 1000 (< requirement 3200 so it still buys), but credits never post.
+    const site = new MockVendorSite({
+      provider: PROVIDER,
+      origin: ORIGIN,
+      startingBalance: 1000,
+      dropCredits: true,
+    });
+    // Absolute check (after >= requirement) would still fail here, but the point
+    // is the delta: after (1000) is NOT >= before (1000) + granted (5000).
+    await expect(
+      runSlowLane(makeRequest(), { provider: new MockBrowserProvider(site), adapter: new MockVendorAdapter(site) }),
+    ).rejects.toBeInstanceOf(PurchaseVerificationError);
+  });
+});
+
+describe("slow lane — HITL takeover (§15.11 / 3-DS)", () => {
+  it("hands the session to a human on a challenge, then completes", async () => {
+    const site = new MockVendorSite({
+      provider: PROVIDER,
+      origin: ORIGIN,
+      startingBalance: 0,
+      require3dsOnceOnConfirm: true,
+    });
+    let takeoverCalls = 0;
+    const result = await runSlowLane(makeRequest(), {
+      provider: new MockBrowserProvider(site),
+      adapter: new MockVendorAdapter(site),
+      onTakeover: async () => {
+        takeoverCalls += 1;
+        // Human clears 3-DS and the checkout completes → credits post.
+        site.takeoverCleared = true;
+        site.balance += 5000;
+      },
+    });
+    expect(takeoverCalls).toBe(1);
+    expect(result.verifiedEntitlement.balance).toBe(5000);
+  });
+
+  it("fails when a challenge appears and no takeover handler is provided", async () => {
+    const site = new MockVendorSite({
+      provider: PROVIDER,
+      origin: ORIGIN,
+      require3dsOnceOnConfirm: true,
+    });
+    await expect(
+      runSlowLane(makeRequest(), { provider: new MockBrowserProvider(site), adapter: new MockVendorAdapter(site) }),
+    ).rejects.toBeTruthy();
+  });
+});
+
 describe("slow lane — idempotency", () => {
   it("does not buy twice for the same requirement", async () => {
     const site = new MockVendorSite({ provider: PROVIDER, origin: ORIGIN, startingBalance: 0 });

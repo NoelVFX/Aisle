@@ -51,6 +51,11 @@ export interface SteelProviderOptions {
   /** Viewport dimensions. */
   dimensions?: SessionCreateParams["dimensions"];
   /**
+   * Steel session timeout (ms). The default (5 min) will expire while a human
+   * taps approve — set this generously. Defaults to 15 min here.
+   */
+  sessionTimeoutMs?: number;
+  /**
    * Enable Steel CREDENTIAL INJECTION for the session. Steel types stored
    * secrets straight into the page, so the card/login never enters this process
    * or a model prompt. This flag carries NO secret — the value must be stored in
@@ -152,6 +157,13 @@ class SteelBrowserSession implements BrowserSession {
     return { provider: this.provider, context, savedAt: new Date().toISOString() };
   }
 
+  async listReceiptFiles(): Promise<string[]> {
+    // Files the vendor's confirmation page dropped into the session (receipts,
+    // invoices, license keys) — Steel preserves them past release.
+    const listed = await this.client.sessions.files.list(this.sessionId);
+    return listed.data.map((f) => f.path);
+  }
+
   async close(): Promise<void> {
     try {
       await this.browser.close();
@@ -188,6 +200,8 @@ export class SteelBrowserProvider implements BrowserProvider {
     if (o.region !== undefined) body.region = o.region;
     if (o.dimensions !== undefined) body.dimensions = o.dimensions;
     if (o.credentials !== undefined) body.credentials = o.credentials;
+    // Keep the remote session alive through human approval (default 5 min is too short).
+    body.timeout = o.sessionTimeoutMs ?? 15 * 60 * 1000;
     if (opts.profile?.context !== undefined) {
       // Resume saved auth (cookies/localStorage) for this vendor.
       body.sessionContext = opts.profile.context as SessionCreateParams["sessionContext"];

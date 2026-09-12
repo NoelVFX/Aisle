@@ -39,7 +39,7 @@ export { buildResumeToken, isResumeTokenExpired } from "./resume/resume-token.js
 
 // ---- Slow lane (Steel + Playwright + CDP, computer-use fallback) ----------
 export { runSlowLane } from "./slow-lane/executor.js";
-export type { SlowLaneDeps, SlowLaneEvent } from "./slow-lane/executor.js";
+export type { SlowLaneDeps, SlowLaneEvent, TakeoverContext } from "./slow-lane/executor.js";
 export { SteelBrowserProvider } from "./slow-lane/steel-provider.js";
 export type { SteelProviderOptions } from "./slow-lane/steel-provider.js";
 export { InMemoryProfileStore, FileProfileStore } from "./slow-lane/profiles.js";
@@ -87,6 +87,7 @@ export {
   MandateRejectedError,
   PurchaseFailedError,
   PurchaseVerificationError,
+  TakeoverRequiredError,
 } from "./errors.js";
 
 export type * from "./types.js";

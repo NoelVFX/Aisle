@@ -165,7 +165,13 @@ export interface FastLaneResult {
  * recovery happened via WebMCP (fast) or a browser (slow) — it gets a verified
  * entitlement and a resume token either way.
  */
-export type RecoveryResult = FastLaneResult & { lane: "fast" | "slow" };
+export type RecoveryResult = FastLaneResult & {
+  lane: "fast" | "slow";
+  /** Steel live/replay viewer URL — part of the audit trail (slow lane). */
+  sessionViewerUrl?: string;
+  /** Receipt/invoice/license files captured from the Steel session (slow lane). */
+  receiptFileIds?: string[];
+};
 
 // ---------------------------------------------------------------------------
 // Slow-lane (browser) domain types

@@ -75,6 +75,11 @@ export interface BrowserSession {
   readonly control: ControlSurface;
   /** Capture the current auth/cookie state as a reusable profile. */
   saveProfile(): Promise<BrowserProfile>;
+  /**
+   * List receipt/invoice/license files the session accumulated (Steel Files API),
+   * for the audit trail. Optional — mocks and non-Steel providers may omit it.
+   */
+  listReceiptFiles?(): Promise<string[]>;
   close(): Promise<void>;
 }
 

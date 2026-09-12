@@ -171,7 +171,30 @@ await runSlowLane(request, { provider, adapter, profiles, agent });
 
 `SteelProviderOptions` surfaces the below-the-protocol features as first-class:
 `useProxy` / `proxyUrl`, `solveCaptcha`, `stealth`, `blockAds`, `region`,
-`dimensions`, `credentials`, plus a raw `sessionOptions` escape hatch.
+`dimensions`, `credentials`, `sessionTimeoutMs` (defaults to 15 min so the
+session survives human approval), plus a raw `sessionOptions` escape hatch.
+
+The worker also uses these Steel capabilities:
+
+- **Already-covered check (§8).** Reads the balance *before* buying; if it
+  already clears the requirement, it emits `ALREADY_COVERED` and skips the
+  purchase entirely.
+- **Delta verification (§17 Gate 2).** Confirms `balanceAfter ≥ balanceBefore +
+  unitsGranted` — not merely that the balance now clears the requirement — so a
+  no-op checkout can't pass as success.
+- **HITL takeover (§15.11).** An adapter raises `TakeoverRequiredError` on a
+  3-DS / OTP / bank challenge; the worker emits `TAKEOVER_REQUESTED` with the
+  live viewer URL and awaits your `onTakeover` handler, then re-verifies. No
+  faking, no failing.
+- **Receipt capture (§15.8).** After purchase, session files (invoice / receipt
+  / license) are listed via the Steel Files API and returned on
+  `RecoveryResult.receiptFileIds`; the viewer URL is on `sessionViewerUrl`.
+- **Tier-2 fallback on every step, including confirm.** On a
+  `DeterministicStepError` the injected computer-use agent (e.g. the OpenRouter
+  one) recovers the step and the worker retries once. Confirm is included by
+  default (`allowComputerUseOnConfirm`, default true); set it false for strict
+  deterministic-only submit. Either way Gate 1 (staged-vs-mandate) and Gate 2
+  (delta) still run, so a wrong click never becomes a wrong purchase.
 
 ### Credentials injection (the card never touches this agent)
 

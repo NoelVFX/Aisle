@@ -21,6 +21,7 @@ import {
   DeterministicStepError,
   type VendorPurchaseAdapter,
 } from "../vendor-adapter.js";
+import { TakeoverRequiredError } from "../../errors.js";
 import type {
   PurchaseOffer,
   PurchaseVerification,
@@ -39,6 +40,8 @@ export interface MockVendorConfig {
   redirectOrigin?: string;
   /** Confirm "succeeds" but credits never post (verification must fail). */
   dropCredits?: boolean;
+  /** Confirm raises a 3-DS-style TakeoverRequiredError until takeover clears it. */
+  require3dsOnceOnConfirm?: boolean;
 }
 
 const DEFAULT_OFFERS: PurchaseOffer[] = [
@@ -62,6 +65,8 @@ export class MockVendorSite {
   purchaseClicks = 0;
   readonly redirectOrigin?: string;
   readonly dropCredits: boolean;
+  readonly require3ds: boolean;
+  takeoverCleared = false;
 
   constructor(cfg: MockVendorConfig = {}) {
     this.provider = cfg.provider ?? "mock-slow-vendor";
@@ -73,6 +78,7 @@ export class MockVendorSite {
     this.discoverUnlocked = !cfg.failDiscoverUntilAssisted;
     this.redirectOrigin = cfg.redirectOrigin;
     this.dropCredits = cfg.dropCredits ?? false;
+    this.require3ds = cfg.require3dsOnceOnConfirm ?? false;
   }
 }
 
@@ -278,6 +284,9 @@ export class MockVendorAdapter implements VendorPurchaseAdapter {
   }
 
   async confirmPurchase(page: PageLike, _staged: StagedPurchase): Promise<PurchaseVerification> {
+    if (this.site.require3ds && !this.site.takeoverCleared) {
+      throw new TakeoverRequiredError("3-DS challenge presented at checkout.");
+    }
     await page.clickByText("Confirm");
     return { confirmed: true, transactionId: this.site.lastTxn };
   }

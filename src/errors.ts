@@ -37,3 +37,14 @@ export class PurchaseVerificationError extends FastLaneError {
     super(message, "PURCHASE_VERIFICATION_FAILED");
   }
 }
+
+/**
+ * The checkout hit a challenge the automation must not clear on its own — 3-DS,
+ * an OTP, a bank verification step. The worker hands the live session to a human
+ * (Steel HITL takeover) rather than failing or faking it.
+ */
+export class TakeoverRequiredError extends FastLaneError {
+  constructor(message: string) {
+    super(message, "TAKEOVER_REQUIRED");
+  }
+}
