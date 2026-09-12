@@ -13,6 +13,7 @@ import { classifyFailure, isRateLimitNotWall, registerVendorRules } from "../cla
 import { normalizeError, type NormalizedError } from "../error-normalizer.js";
 import {
   RecoveryCoordinator,
+  type FastPurchaser,
   type RecoveryJob,
   type SteelPurchaser,
   type SteelRunner,
@@ -49,6 +50,22 @@ registerVendorRules("openai", [
   },
 ]);
 
+/**
+ * Higgsfield, per the docs' example (aisle-pipeline.md §6). ⚠ VERIFY the real body
+ * against a drained account and tighten.
+ */
+registerVendorRules("higgsfield", [
+  {
+    test: (e) => e.code === "insufficient_credits" || /insufficient credits|not enough credits/i.test(e.message ?? ""),
+    type: "INSUFFICIENT_CREDITS",
+    resource: "image_credits",
+    required: (e) => {
+      const v = e.body !== null && typeof e.body === "object" ? (e.body as Record<string, unknown>)["required_credits"] : undefined;
+      return typeof v === "number" ? v : undefined;
+    },
+  },
+]);
+
 /** OpenAI rate limits are 429 too. Buying credits does not fix them. */
 const isOpenAiRateLimit = (ns: string, e: NormalizedError): boolean =>
   ns === "openai" && e.status === 429 && e.code === "rate_limit_exceeded";
@@ -57,6 +74,7 @@ export interface GatewayOptions {
   upstreams: Upstreams;
   steel: SteelRunner;
   purchaser?: SteelPurchaser;
+  fastPurchaser?: FastPurchaser;
   realPurchaseProviders?: ReadonlySet<string>;
   env?: NodeJS.ProcessEnv;
   fetchImpl?: FetchLike;
@@ -97,6 +115,7 @@ export function createGateway(options: GatewayOptions) {
       return true;
     },
     ...(options.purchaser === undefined ? {} : { purchaser: options.purchaser }),
+    ...(options.fastPurchaser === undefined ? {} : { fastPurchaser: options.fastPurchaser }),
     ...(options.realPurchaseProviders === undefined ? {} : { realPurchaseProviders: options.realPurchaseProviders }),
     ...(options.mandateSecret === undefined ? {} : { mandateSecret: options.mandateSecret }),
     ...(options.pollMs === undefined ? {} : { pollMs: options.pollMs }),
@@ -197,6 +216,13 @@ export function createGateway(options: GatewayOptions) {
           recovery_id: job.id,
           approve_url: job.approveUrl,
           quote: job.quote?.reason,
+          session: job.session.status,
+          plans: job.plans && {
+            selected: job.selectedPlanId,
+            recommended: job.plans.recommended,
+            alternatives: job.plans.alternatives,
+            how_to_choose: "The user picks a plan and approves on the approval page. Do not choose for them.",
+          },
           next: "Call aisle__wait_for_recovery with this recovery_id. Do NOT re-run the original tool.",
         });
 

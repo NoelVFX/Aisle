@@ -65,6 +65,7 @@ export function createSteelPurchaser(options: SteelPurchaserOptions): SteelPurch
         ...(cfg.accountPath ? { accountPath: cfg.accountPath } : {}),
         ...(cfg.loggedInSelector ? { loggedInSelector: cfg.loggedInSelector } : {}),
         ...(cfg.loginWallPattern ? { loginWallPattern: new RegExp(cfg.loginWallPattern, "i") } : {}),
+        ...(cfg.offersFrom === "catalogue" ? { catalogueOffers: [...upstream.offers] } : {}),
         registry: new FileAdapterRegistry(join(options.stateDir, "adapters")),
         ...(picker ? { picker } : {}),
         onEvent: (type, detail) => emit(type, detail),
@@ -72,13 +73,18 @@ export function createSteelPurchaser(options: SteelPurchaserOptions): SteelPurch
 
       const agent = infraKey ? createOpenRouterComputerUseAgent({ apiKey: infraKey }) : undefined;
 
+      // Web path (web-path.md §2.2): capture cookies + localStorage from the user's
+      // LIVE browsing session. The worker starts from them, isolated, and persists nothing.
+      const sessionContext = job.workerContextFrom ? await client.sessions.context(job.workerContextFrom) : undefined;
+      if (sessionContext) emit("WORKER_CONTEXT_CAPTURED", { fromBrowsingSession: true });
+
       try {
         const result = await runSlowLane(
           { checkpoint: job.checkpoint, quote: job.quote, mandate: job.mandate },
           {
             provider,
             adapter,
-            profiles: new FileProfileStore(join(options.stateDir, "profiles")),
+            ...(sessionContext ? { sessionContext } : { profiles: new FileProfileStore(join(options.stateDir, "profiles")) }),
             ...(agent ? { agent } : {}),
             store: options.store,
             stopBeforeSubmit: !realMoneyAllowed,

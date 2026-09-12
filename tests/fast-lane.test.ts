@@ -39,7 +39,7 @@ describe("fast lane — happy path", () => {
     await runFastLane(req(), deps(vendor));
     expect(calls).toHaveLength(1);
     expect(Object.keys(calls[0] ?? {}).sort()).toEqual(["idempotency_key", "product_id", "quantity"]);
-    expect(String(calls[0]?.["idempotency_key"])).toMatch(/^purchase:task_1:[0-9a-f]{64}$/);
+    expect(String(calls[0]?.["idempotency_key"])).toMatch(/^purchase:task_1:[0-9a-f]{64}:[0-9a-f-]{36}$/);
   });
 });
 

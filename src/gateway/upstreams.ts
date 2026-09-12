@@ -23,8 +23,24 @@ export interface PurchaseConfig {
   loggedInSelector?: string;
   /** Regex (pathname) of the vendor's login wall. */
   loginWallPattern?: string;
+  /**
+   * "catalogue": use `offers` from this file instead of parsing the page — for
+   * typed-amount top-ups. Default "page" (JSON-LD, then page text).
+   */
+  offersFrom?: "page" | "catalogue";
   /** Drop this purchase config when the env var is unset. */
   requiresEnv?: string;
+  /**
+   * Vendor MCP endpoint with purchase + balance tools (fast lane, §13–§14).
+   * Must be on the canonical or billing origin. Tried before the Steel browser.
+   */
+  mcpUrl?: string;
+  /**
+   * Where to actually connect for `mcpUrl` when the same server is reachable
+   * locally (e.g. the mock vendor behind a tunnel this machine can't resolve).
+   * Operator config only, loopback only. The origin lock still checks `mcpUrl`.
+   */
+  mcpDialUrl?: string;
 }
 
 export interface UpstreamEntry extends UpstreamConfig {
@@ -75,6 +91,21 @@ export function loadUpstreams(
     if (up.toolUrl === "") delete up.toolUrl;
     if (up.purchase?.requiresEnv && !env[up.purchase.requiresEnv]) delete up.purchase;
     if (up.purchase?.loginWallPattern) new RegExp(up.purchase.loginWallPattern); // validate early
+    if (up.purchase?.mcpDialUrl !== undefined && !/^https?:\/\//.test(up.purchase.mcpDialUrl)) {
+      delete (up.purchase as PurchaseConfig).mcpDialUrl; // env unset
+    }
+    if (up.purchase?.mcpDialUrl) {
+      const host = new URL(up.purchase.mcpDialUrl).hostname;
+      if (host !== "127.0.0.1" && host !== "localhost" && host !== "[::1]") {
+        throw new Error(`Upstream '${ns}' purchase.mcpDialUrl must be a loopback address.`);
+      }
+    }
+    if (up.purchase?.mcpUrl) {
+      const mcpOrigin = canonicalize(up.purchase.mcpUrl);
+      if (mcpOrigin !== billing && mcpOrigin !== canonicalize(up.canonicalOrigin)) {
+        throw new Error(`Upstream '${ns}' purchase.mcpUrl must be on its canonical or billing origin.`);
+      }
+    }
     if (up.purchase) Object.freeze(up.purchase);
     Object.freeze(up.offers);
     Object.freeze(up);

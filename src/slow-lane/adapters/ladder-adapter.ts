@@ -57,6 +57,13 @@ export interface LadderAdapterConfig {
   /** Pathname pattern of the vendor's login wall. */
   loginWallPattern?: RegExp;
   currency?: string;
+  /**
+   * Packages from the vendor catalogue (upstreams.json). For vendors whose top-up
+   * is a typed amount rather than listed packs (e.g. OpenAI API credits), the
+   * offer comes from config and the amount is typed into the page, never read
+   * from page text.
+   */
+  catalogueOffers?: PurchaseOffer[];
   registry: AdapterRegistry;
   picker?: CandidatePicker;
   /** Tier-3 steps allowed to reach checkout. Default 4. */
@@ -162,6 +169,10 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
   async discoverOffers(page: PageLike, _requirement: Requirement): Promise<PurchaseOffer[]> {
     await page.goto(this.url(this.pricingPath));
     await page.settle?.(1500);
+    if (this.cfg.catalogueOffers && this.cfg.catalogueOffers.length > 0) {
+      this.emit("OFFERS_FROM_CATALOGUE", { count: this.cfg.catalogueOffers.length });
+      return [...this.cfg.catalogueOffers];
+    }
     let offers: PurchaseOffer[] = [];
     if (page.jsonLd) {
       offers = offersFromJsonLd(await page.jsonLd(), this.currency);
@@ -290,6 +301,15 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
     const amount = rawAmount !== undefined ? Number(rawAmount.replace(/[^0-9.]/g, "")) : extractPrice(text);
     if (amount === undefined || !Number.isFinite(amount)) {
       throw new DeterministicStepError("Checkout total not readable.", "Open the checkout so the order total is visible. Do not pay.");
+    }
+    // Fail closed on a misread: a real checkout never totals less than the package
+    // (e.g. picking up a "$0.00 credit balance" elsewhere on the page). Gate 1 only
+    // checks the upper bound, so the lower bound lives here.
+    if (amount + 0.005 < offer.price) {
+      throw new PurchaseFailedError(
+        `Read a checkout total of ${amount}, below the ${offer.price} package price. Refusing to submit on a misread total.`,
+        "STAGED_AMOUNT_BELOW_PACKAGE",
+      );
     }
 
     const rawLine = await this.first(page, "[data-checkout-line]");

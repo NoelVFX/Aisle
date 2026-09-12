@@ -143,4 +143,7 @@ export { createOpenRouterPicker, parsePickerReply, formatCandidates, PICKER_PROF
 export type { CandidatePicker, OpenRouterPickerOptions, PickRequest, PickResult } from "./slow-lane/resolver/picker.js";
 export type { ActionCandidate } from "./slow-lane/browser.js";
 
+// ---- MO XIA's recovery flow (plan selection, recovery session state machine) ----
+export * as recoveryFlow from "./recovery-flow/index.js";
+
 export type * from "./types.js";

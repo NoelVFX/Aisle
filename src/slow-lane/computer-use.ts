@@ -97,7 +97,7 @@ export class ScriptedComputerUseAgent implements ComputerUseAgent {
 export interface OpenRouterFetch {
   (
     url: string,
-    init: { method: string; headers: Record<string, string>; body: string },
+    init: { method: string; headers: Record<string, string>; body: string; signal?: AbortSignal },
   ): Promise<{ ok: boolean; status: number; text(): Promise<string> }>;
 }
 
@@ -127,7 +127,12 @@ export interface OpenRouterComputerUseOptions {
   /** Called after every model call with the model OpenRouter actually used (cost attribution). */
   onModelCall?: (info: { step: number; modelRequested: string; modelUsed: string | undefined }) => void;
   fetchImpl?: OpenRouterFetch;
+  /** Abort a model call after this long. Free reasoning models can stall indefinitely. Default 60s. */
+  requestTimeoutMs?: number;
 }
+
+/** Free-tier models can hold a request open for minutes; never wait longer than this. */
+export const OPENROUTER_REQUEST_TIMEOUT_MS = 60_000;
 
 /** §16.3 VISION profile. */
 export const VISION_PROFILE = {
@@ -237,6 +242,7 @@ export function createOpenRouterComputerUseAgent(options: OpenRouterComputerUseO
               "X-OpenRouter-Title": options.title ?? "Aisle",
             },
             body: JSON.stringify(payload),
+            signal: AbortSignal.timeout(options.requestTimeoutMs ?? OPENROUTER_REQUEST_TIMEOUT_MS),
           });
         } catch (err) {
           return { success: false, steps: step + 1, note: `OpenRouter request failed: ${String(err)}` };

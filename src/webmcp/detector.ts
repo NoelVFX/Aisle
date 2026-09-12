@@ -21,12 +21,12 @@ export interface FastLaneCapability {
 const PURCHASE_CAPABILITY = "payment.purchase";
 const BALANCE_CAPABILITY = "payment.balance";
 
-/** Name heuristics, used only when annotations are absent. */
+/** Name heuristics, used only when annotations are absent. Anchored: `get_purchase_history` is not a purchase. */
 const PURCHASE_NAME_PATTERNS = [
-  /purchase[_-]?credits?/i,
-  /buy[_-]?credits?/i,
-  /top[_-]?up/i,
-  /add[_-]?credits?/i,
+  /^purchase[_-]?credits?$/i,
+  /^buy[_-]?credits?$/i,
+  /^top[_-]?up([_-]?credits?)?$/i,
+  /^add[_-]?credits?$/i,
 ];
 
 const BALANCE_NAME_PATTERNS = [
@@ -44,7 +44,9 @@ function matchByName(tools: WebMcpTool[], patterns: RegExp[]): WebMcpTool | unde
 }
 
 function resolvePurchaseTool(tools: WebMcpTool[]): WebMcpTool | undefined {
-  return matchByCapability(tools, PURCHASE_CAPABILITY) ?? matchByName(tools, PURCHASE_NAME_PATTERNS);
+  // A tool the vendor marks read-only is never used to spend money.
+  const candidates = tools.filter((t) => t.annotations?.readOnlyHint !== true);
+  return matchByCapability(candidates, PURCHASE_CAPABILITY) ?? matchByName(candidates, PURCHASE_NAME_PATTERNS);
 }
 
 function resolveBalanceTool(tools: WebMcpTool[]): WebMcpTool | undefined {

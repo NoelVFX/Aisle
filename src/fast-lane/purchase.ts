@@ -13,7 +13,8 @@ import { PurchaseFailedError } from "../errors.js";
 export interface BalanceReading {
   balance: number;
   accountId: string | undefined;
-  resource: string;
+  /** The resource the vendor says this balance is for; undefined when it doesn't say. */
+  resource: string | undefined;
 }
 
 export interface PurchaseOutcome {
@@ -28,14 +29,15 @@ export async function readBalance(session: WebMcpSession, capability: FastLaneCa
     throw new PurchaseFailedError(`Balance check failed: ${result.text ?? "unknown error"}`, "BALANCE_READ_FAILED");
   }
   const content = result.structuredContent ?? {};
-  const balance = asNumber(content["balance"] ?? content["credits"] ?? content["amount"]);
+  // Only fields that mean "balance". A generic `amount` could be money, not units.
+  const balance = asNumber(content["balance"] ?? content["credits"]);
   if (balance === undefined) {
     throw new PurchaseFailedError("Balance tool returned no recognizable balance field.", "BALANCE_READ_FAILED");
   }
   return {
     balance,
     accountId: asString(content["accountId"] ?? content["account_id"] ?? content["account"]),
-    resource: asString(content["resource"]) ?? "credits",
+    resource: asString(content["resource"]),
   };
 }
 

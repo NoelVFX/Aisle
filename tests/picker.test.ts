@@ -52,6 +52,20 @@ describe("OpenRouter picker", () => {
     await expect(picker.pick({ goal: "g", candidates, stepKey: "k" })).rejects.toBeInstanceOf(ResolutionExhaustedError);
   });
 
+  it("aborts a stalled model call and retries instead of hanging the purchase", async () => {
+    let calls = 0;
+    const stallThenAnswer: OpenRouterFetch = (_url, init) => {
+      calls += 1;
+      if (calls === 1) {
+        return new Promise((_resolve, reject) => init.signal?.addEventListener("abort", () => reject(init.signal?.reason)));
+      }
+      return fetchReplies([{ content: '{"index": 2, "why": "5k"}' }])(_url, init);
+    };
+    const picker = createOpenRouterPicker({ apiKey: "infra", requestTimeoutMs: 20, fetchImpl: stallThenAnswer });
+    expect((await picker.pick({ goal: "g", candidates, stepKey: "k" })).index).toBe(2);
+    expect(calls).toBe(2);
+  });
+
   it("fails loud when Aisle's own resolver key 402s", async () => {
     const picker = createOpenRouterPicker({ apiKey: "infra", fetchImpl: fetchReplies([{ status: 402, content: "" }]) });
     await expect(picker.pick({ goal: "g", candidates, stepKey: "k" })).rejects.toBeInstanceOf(InfraBlockedError);

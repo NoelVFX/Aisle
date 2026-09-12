@@ -115,6 +115,11 @@ export interface CreateSessionOptions {
    * Read-only sessions pass false so they never mutate the stored identity (steel.md §4.2).
    */
   persistProfile?: boolean;
+  /**
+   * Start from cookies + localStorage captured from another live session
+   * (web-path.md §2.2). Mutually exclusive with `profile`; never persisted.
+   */
+  sessionContext?: unknown;
 }
 
 /** A live browser session bound to one vendor. */

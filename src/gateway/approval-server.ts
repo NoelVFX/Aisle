@@ -39,6 +39,9 @@ function view(job: RecoveryJob) {
       signature: m.signature,
     },
     remaining: job.remaining,
+    session: job.session.status,
+    plans: job.plans,
+    selected_plan: job.selectedPlanId,
     refusal: job.refusal && { reason: job.refusal.reason, message: job.refusal.message },
     lane: job.lane,
     live: job.live,
@@ -83,6 +86,7 @@ ol{margin:0;padding-left:18px;max-height:280px;overflow:auto;font:12px/1.5 ui-mo
 <section><h2>Approve this transaction</h2><h1 id="tool"></h1><div class="status" id="status"></div>
 <div class="amount" id="amount"></div><div id="reason" class="note"></div>
 <dl id="fields"></dl>
+<div id="plans"></div>
 <div id="actions"><button id="approve">Approve</button><button id="reject">Reject</button></div>
 <p class="note">No real money moves in this gateway. After approval a Steel browser opens the vendor's billing page; mock vendors are credited in-process.</p>
 </section>
@@ -113,7 +117,19 @@ async function refresh(){
   const r = await fetch("/r/"+id+"/state"); if(!r.ok){ $("status").textContent="Unknown recovery"; return; }
   const s = await r.json();
   $("tool").textContent = s.blocked_tool + " hit " + s.blocker;
-  $("status").textContent = "Status: " + s.status + (s.refusal ? " · " + s.refusal.message : "") + (s.error ? " · " + s.error : "");
+  $("status").textContent = "Status: " + s.status + (s.session ? " · session " + s.session : "") + (s.refusal ? " · " + s.refusal.message : "") + (s.error ? " · " + s.error : "");
+  $("plans").replaceChildren();
+  if (s.plans && s.status === "awaiting_approval") {
+    const all = [s.plans.recommended].concat(s.plans.alternatives);
+    $("plans").append(Object.assign(document.createElement("p"), { className: "note", textContent: "Choose a plan:" }));
+    all.forEach(function (p) {
+      const label = document.createElement("label");
+      const radio = Object.assign(document.createElement("input"), { type: "radio", name: "plan", checked: p.id === s.selected_plan });
+      radio.onchange = async function () { await fetch("/r/" + id + "/select", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ plan_id: p.id }) }); refresh(); };
+      label.append(radio, " " + p.name + " · " + p.credits + " units · $" + p.price + (p.id === s.plans.recommended.id ? " (recommended)" : ""));
+      $("plans").append(label, document.createElement("br"));
+    });
+  }
   $("fields").replaceChildren();
   if (s.mandate){
     signature = s.mandate.signature;
@@ -133,7 +149,10 @@ $("reject").onclick = async () => { await fetch("/r/"+id+"/reject",{method:"POST
 refresh(); setInterval(refresh, 1000);
 </script></body></html>`;
 
-export function startApprovalServer(coordinator: RecoveryCoordinator, port: number, attempts = 10): Promise<ApprovalServer> {
+/** Extra routes mounted on the same local server (the web product). Return true when handled. */
+export type ExtraRoutes = (req: IncomingMessage, res: import("node:http").ServerResponse, url: URL) => Promise<boolean>;
+
+export function startApprovalServer(coordinator: RecoveryCoordinator, port: number, attempts = 10, extra?: ExtraRoutes): Promise<ApprovalServer> {
   const server: Server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
     const parts = url.pathname.split("/").filter(Boolean);
@@ -141,6 +160,14 @@ export function startApprovalServer(coordinator: RecoveryCoordinator, port: numb
       res.writeHead(status, { "content-type": type, "cache-control": "no-store" });
       res.end(body === undefined ? undefined : typeof body === "string" ? body : JSON.stringify(body));
     };
+
+    if (extra) {
+      try {
+        if (await extra(req, res, url)) return;
+      } catch (err) {
+        return send(500, { error: err instanceof Error ? err.message : String(err) });
+      }
+    }
 
     if (req.method === "GET" && parts.length === 0) {
       return send(200, coordinator.list().map((j) => ({ id: j.id, status: j.status, tool: j.checkpoint.tool, url: `/r/${j.id}` })));
@@ -155,6 +182,11 @@ export function startApprovalServer(coordinator: RecoveryCoordinator, port: numb
       const body = await readJson(req);
       const out = await coordinator.approve(job.id, String(body["mandate_signature"] ?? ""));
       return out.ok ? send(204) : send(409, out);
+    }
+    if (req.method === "POST" && parts[2] === "select") {
+      const body = await readJson(req);
+      const out = await coordinator.selectPlan(job.id, String(body["plan_id"] ?? ""));
+      return out.ok ? send(200, { ok: true, selected_plan: job.selectedPlanId }) : send(409, out);
     }
     if (req.method === "POST" && parts[2] === "reject") {
       const body = await readJson(req);

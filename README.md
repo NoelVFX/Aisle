@@ -187,9 +187,18 @@ option; it must accept image input. The resolver never clicks the final submit.
 
 ## MCP gateway (test it from Codex or Claude Code)
 
-`src/gateway/` is a local stdio MCP server. The agent calls vendor tools through
-it; a billing wall blocks the call, opens a recovery, asks for one approval tap,
-runs a Steel session on the locked billing origin, and then replays or reports.
+`src/gateway/` is an MCP server over stdio (`server.ts`) or Streamable HTTP
+(`http-server.ts`). The agent calls vendor tools through it; a billing wall blocks
+the call, opens a recovery, asks for one approval tap, buys through the fast lane
+(vendor MCP purchase tools) or the Steel slow lane, and then replays or reports.
+
+```bash
+npm run gateway:http    # MCP at http://127.0.0.1:8788/mcp, approvals + web browser at :8787
+codex mcp add aisle --url http://127.0.0.1:8788/mcp
+claude mcp add --transport http aisle http://127.0.0.1:8788/mcp
+```
+
+Set `AISLE_MCP_PORT` / `AISLE_APPROVAL_PORT` if those ports are taken.
 
 | Tool | What it does |
 |---|---|
@@ -227,6 +236,25 @@ to 2 minutes, or until you click **End Steel session**. The viewer is read-only 
 gateway never runs a checkout. Its Steel session skips proxies and captcha
 solving unless `AISLE_STEEL_PROXY_CAPTCHA=1`, since those need a paid Steel balance.
 
+### Plan selection and the recovery session
+
+Every recovery carries MO XIA's recovery session (`src/recovery-flow/`). The quote
+from `aisle-pipeline.md` stays the recommended plan; other one-time packages that
+cover the shortfall and fit the per-purchase ceiling are offered as alternatives.
+
+- The blocked tool result lists `plans.recommended`, `plans.alternatives` and `plans.selected`.
+- The approval card (and the web browser card) has a plan chooser. Picking a plan posts
+  `POST /r/{id}/select {plan_id}`: the plan is re-gated against every ceiling, the quote is
+  rebuilt and the mandate is re-signed, so the tap approves exactly the chosen plan. A plan
+  over a ceiling is refused with nothing changed. No changes after approval.
+- The session moves `PLAN_RECOMMENDED → CUSTOMER_SELECTED → AWAITING_APPROVAL → APPROVED →
+  PURCHASING → PURCHASED → ENTITLEMENT_UPDATED → READY_TO_RESUME`, or ends `PURCHASE_WITHHELD`
+  (real-money submit off), `PURCHASE_UNKNOWN` (bought but unverified — never retried) or
+  `PURCHASE_FAILED`. Each step is a `SESSION_STATUS` event and shows on the approval page.
+
+The rest of `src/recovery-flow/` (approval records, purchase guard, executors, resume
+requests, the standalone orchestrator) is exported as `recoveryFlow` for hosts that run it directly.
+
 ## Buying in the Steel browser: the click ladder
 
 After approval, a vendor with a `purchase` block in `upstreams.json` runs the real
@@ -250,22 +278,24 @@ npm run smoke:purchase              # real Steel purchase on it: cold run (picke
 npm run steel:login -- openai       # log a Steel profile in to OpenAI once, by hand
 ```
 
+Recorded adapters are keyed by exact billing origin, so a new quick-tunnel URL for the
+mock vendor starts cold again (tier 3). Model calls abort after 60s and retry within the
+resolver budget, so a stalled free model can't hang a purchase.
+
 Recorded adapters, resolver recordings and profile bindings live in `.aisle/`.
 `REPLAY_RESOLVER=1` replays recorded picker choices instead of calling the model.
 
 ## Not built yet (in the docs, not in this package)
 
-- **Remote HTTP gateway** (`apps/gateway`): the local gateway is stdio, one per agent
-  session.
-- **OpenAI checkout is unverified.** Its billing flow needs a logged-in profile and a
-  saved card, and it has not been recorded. Real submit stays off by default.
+- **OpenAI checkout is unverified.** Its billing page needs a logged-in Steel profile
+  (`npm run steel:login -- openai`) and a saved card, and the flow has not been recorded.
+  Real submit stays off unless `AISLE_REAL_PURCHASE_PROVIDERS=openai`.
+- **Higgsfield sells subscriptions on its public pricing page.** Aisle refuses recurring
+  billing, so it has no offers until a logged-in credit top-up page is inspected.
 - **Receipt upload and trace export** from the Steel session.
 - **Control plane** (`apps/api`): durable recovery jobs and the SSE event stream. The
   gateway keeps jobs in memory and its approval page polls.
-- **Web path** (CDP 402 detector, enrollments).
-- **Postgres** (`db/schema.sql`). Stores here are in-memory behind interfaces.
-- **Tier 1 JSON-LD / Browser Tools markdown offers, tier 3 AX-index picker, adapter
-  promotion, `REPLAY_RESOLVER`.**
+- **Postgres** (`db/schema.sql`). Stores here are in-memory or files behind interfaces.
 - **Steel features the SDK now supports but the code doesn't use yet:** extension
   attach and view-only viewer config. Steel SDK 0.18 has no trace export.
 - **Profile READY latency is unmeasured.** `waitForProfileReady` defaults to 60s;

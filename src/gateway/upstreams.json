@@ -11,13 +11,29 @@
       "realMoney": true,
       "pricingPath": "/settings/organization/billing/overview",
       "accountPath": "/settings/organization/billing/overview",
-      "loginWallPattern": "^/(login|log-in|signin|auth)"
+      "loginWallPattern": "^/(login|log-in|signin|auth)",
+      "offersFrom": "catalogue"
     },
     "offers": [
       { "productId": "openai_credits_5", "label": "$5 API credits", "unitsGranted": 5, "price": 5, "currency": "USD", "billing": "one_time", "autoRenew": false },
       { "productId": "openai_credits_10", "label": "$10 API credits", "unitsGranted": 10, "price": 10, "currency": "USD", "billing": "one_time", "autoRenew": false },
       { "productId": "openai_credits_25", "label": "$25 API credits", "unitsGranted": 25, "price": 25, "currency": "USD", "billing": "one_time", "autoRenew": false }
     ]
+  },
+  "higgsfield": {
+    "description": "Higgsfield (image/video generation). ⚠ VERIFY origins and error shape against a logged-in account. Its public pricing page sells monthly plans billed annually, which Aisle refuses; one-time credit packs, if offered, sit behind login and are not listed here yet.",
+    "canonicalOrigin": "https://platform.higgsfield.ai",
+    "billingOrigin": "https://higgsfield.ai",
+    "billingUrl": "https://higgsfield.ai/pricing",
+    "resource": "image_credits",
+    "purchase": {
+      "mode": "slow-lane",
+      "realMoney": true,
+      "pricingPath": "/pricing",
+      "accountPath": "/pricing",
+      "loginWallPattern": "^/(login|signin|sign-in|auth)"
+    },
+    "offers": []
   },
   "mockvendor": {
     "description": "Mock image vendor. With `npm run mock:vendor` running, it is a real website Steel buys credits on (fake money). Without it, an in-process mock with example.com as a placeholder billing page.",
@@ -30,6 +46,8 @@
       "mode": "slow-lane",
       "realMoney": false,
       "requiresEnv": "MOCK_VENDOR_PUBLIC_URL",
+      "mcpUrl": "${MOCK_VENDOR_PUBLIC_URL}/mcp",
+      "mcpDialUrl": "${MOCK_VENDOR_URL}/mcp",
       "pricingPath": "/pricing",
       "accountPath": "/account",
       "loggedInSelector": "[data-account-email]"

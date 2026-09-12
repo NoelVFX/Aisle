@@ -1,15 +1,14 @@
 /**
- * Recovery jobs for the gateway (aisle-pipeline.md §7–§12, §13, §18, §20).
+ * Recovery jobs for the gateway (aisle-pipeline.md §7–§13, §18, §20).
  *
- *   open: freeze checkpoint (origin from upstreams.json) → quote → policy gate →
- *         signed mandate → AWAITING_APPROVAL
- *   approve (one human tap, signature-checked, idempotent) → lane:
- *     - slow lane (vendor has `purchase` config and a purchaser is wired): real
- *       Steel browser stages the checkout with the click ladder, Gate 1, then a
- *       deterministic submit and Gate 2 — or, for a real-money vendor that isn't
- *       allowlisted, stops before submit (STAGED_NOT_SUBMITTED);
- *     - otherwise the Steel viewing session: open the billing page, credit an
- *       in-process mock (FAKE_PURCHASE), or end DRY_RUN_COMPLETE.
+ *   open: freeze checkpoint (origin from upstreams.json / enrollment) → quote →
+ *         policy gate → signed mandate → AWAITING_APPROVAL
+ *   approve (one human tap, signature-checked, idempotent) → lane router (§13):
+ *     1. fast lane: the vendor's MCP purchase tools, when configured and viable;
+ *     2. slow lane: a real Steel browser stages the checkout with the click
+ *        ladder, Gate 1, deterministic submit, Gate 2 — or, for a real-money
+ *        vendor that isn't allowlisted, stops before submit;
+ *     3. otherwise the Steel viewing session (open the billing page, no purchase).
  */
 
 import { randomUUID } from "node:crypto";
@@ -20,6 +19,25 @@ import { buildQuote } from "../quote/quote.js";
 import { gate, InMemorySpendLedger, loadLimits, type SpendLedger } from "../policy/policy.js";
 import { signMandate, verifyMandate } from "../mandate/mandate.js";
 import type { UpstreamEntry, Upstreams } from "./upstreams.js";
+import type { PurchaseOffer } from "../types.js";
+// MO XIA's recovery flow: plan recommendation, customer selection, and the
+// recovery session state machine, wired into every gateway recovery.
+import { recommendCreditPlan, type CreditPlan, type PurchaseRecommendation } from "../recovery-flow/purchase-recommender.js";
+import { selectPurchasePlan } from "../recovery-flow/customer-selection.js";
+import {
+  createRecoverySession,
+  transitionRecoverySession,
+  type RecoverySession,
+  type RecoverySessionStatus,
+} from "../recovery-flow/recovery-session.js";
+
+const toPlan = (o: PurchaseOffer): CreditPlan => ({
+  id: o.productId,
+  name: o.label,
+  credits: o.unitsGranted,
+  price: o.price,
+  currency: o.currency,
+});
 
 export type JobStatus =
   | "awaiting_approval"
@@ -42,13 +60,10 @@ export interface TimelineEvent {
 /** A Steel session while it is open. Never carries a profileId. */
 export interface SteelLive {
   sessionId: string;
-  /** Live player (embeddable). */
   debugUrl: string | undefined;
-  /** Steel dashboard page for the session. */
   viewerUrl: string | undefined;
 }
 
-/** What the Steel viewing session did. Never carries a profileId. */
 export interface SteelEvidence extends SteelLive {
   finalUrl: string;
   title: string | undefined;
@@ -63,7 +78,6 @@ export interface SteelRunner {
     jobId: string;
     emit: (type: string, detail?: Record<string, unknown>) => void;
     onLive: (live: SteelLive) => void;
-    /** Resolves when the user ends the session from the approval page. */
     hold: Promise<void>;
   }): Promise<SteelEvidence>;
 }
@@ -72,16 +86,29 @@ export type SteelPurchaseOutcome =
   | { outcome: "verified"; result: RecoveryResult }
   | { outcome: "withheld"; staged: StagedCheckout };
 
-/** Runs the slow lane in a real Steel browser for an approved job. */
+/** Slow lane: a real Steel browser for an approved job. */
 export interface SteelPurchaser {
   purchase(input: {
     job: RecoveryJob;
     upstream: UpstreamEntry;
-    /** False for a real-money vendor that isn't allowlisted: stage + Gate 1, never submit. */
     realMoneyAllowed: boolean;
     emit: (type: string, detail?: Record<string, unknown>) => void;
     onLive: (live: SteelLive) => void;
   }): Promise<SteelPurchaseOutcome>;
+}
+
+export type FastPurchaseOutcome =
+  | { outcome: "verified"; result: RecoveryResult }
+  /** No purchase was attempted: the vendor has no viable purchase tools or couldn't be reached. */
+  | { outcome: "no_fast_lane"; reason: string };
+
+/** Fast lane: the vendor's MCP purchase tools for an approved job. */
+export interface FastPurchaser {
+  purchase(input: {
+    job: RecoveryJob;
+    upstream: UpstreamEntry;
+    emit: (type: string, detail?: Record<string, unknown>) => void;
+  }): Promise<FastPurchaseOutcome>;
 }
 
 export interface RecoveryJob {
@@ -89,18 +116,24 @@ export interface RecoveryJob {
   taskId: string;
   reqHash: string;
   namespace: string;
+  surface: "cli" | "web";
   status: JobStatus;
-  lane?: "slow" | "viewing";
+  lane?: "fast" | "slow" | "viewing";
   checkpoint: TaskCheckpoint;
+  /** MO XIA's recovery session: every lifecycle step is a validated transition. */
+  session: RecoverySession;
+  /** MO XIA's recommendation: the recommended plan plus alternatives the customer may pick. */
+  plans?: PurchaseRecommendation;
+  selectedPlanId?: string;
   quote?: Quote;
   mandate?: PurchaseMandate;
   refusal?: Refusal;
   remaining?: { task: number; day: number };
   approveUrl: string;
-  /** Set while a Steel session is open. */
+  /** Web path: the user's live browsing session, whose context seeds the worker session. */
+  workerContextFrom?: string;
   live?: SteelLive;
   steel?: SteelEvidence;
-  /** The checkout the slow lane staged (withheld or submitted). */
   staged?: StagedCheckout;
   purchase?: { purchaseId: string | null; balance: number | null; alreadyCovered: boolean };
   error?: string;
@@ -115,17 +148,18 @@ export interface OpenRecoveryInput {
   tool: string;
   arguments: unknown;
   blocker: Blocker;
+  surface?: "cli" | "web";
+  /** Web path: the browsing Steel session id (web-path.md §2.2). */
+  workerContextFrom?: string;
 }
 
 export interface CoordinatorDeps {
   upstreams: Upstreams;
   steel: SteelRunner;
-  /** Credit an in-process mock vendor after the viewing session. False for real vendors. */
   fakeCredit: (namespace: string, units: number) => boolean;
   publicUrl: () => string;
-  /** Slow-lane purchaser. Without it every approval runs the viewing session. */
   purchaser?: SteelPurchaser;
-  /** Real-money vendors allowed to actually submit (AISLE_REAL_PURCHASE_PROVIDERS). */
+  fastPurchaser?: FastPurchaser;
   realPurchaseProviders?: ReadonlySet<string>;
   spend?: SpendLedger;
   userId?: string;
@@ -185,29 +219,35 @@ export class RecoveryCoordinator {
     }
 
     const id = randomUUID();
+    const surface = input.surface ?? "cli";
     const checkpoint = freezeCheckpoint({
       taskId: input.taskId,
       toolCallId: input.toolCallId,
       tool: input.tool,
       arguments: input.arguments,
-      origin: lockOrigin(input.namespace, upstream), // FROM CONFIG. Never from the error.
+      // FROM CONFIG / ENROLLMENT. Never from the error or the page.
+      origin: lockOrigin(input.namespace, upstream, surface === "web" ? "enrollment" : "task_configuration"),
       blocker,
+      surface,
     });
     const job: RecoveryJob = {
       id,
       taskId: input.taskId,
       reqHash,
       namespace: input.namespace,
+      surface,
       status: "awaiting_approval",
       checkpoint,
+      session: createRecoverySession(input.taskId),
       approveUrl: `${this.deps.publicUrl()}/r/${id}`,
+      ...(input.workerContextFrom ? { workerContextFrom: input.workerContextFrom } : {}),
       events: [],
       createdAt: new Date().toISOString(),
     };
     this.jobs.set(id, job);
     this.byRequirement.set(key, id);
 
-    this.emit(job, "RECOVERY_CREATED", { tool: input.tool, blocker: blocker.type, resource: blocker.resource, required: blocker.required });
+    this.emit(job, "RECOVERY_CREATED", { tool: input.tool, surface, blocker: blocker.type, resource: blocker.resource, required: blocker.required });
     this.emit(job, "CHECKPOINT_FROZEN", { billingOrigin: checkpoint.origin.billingOrigin, argumentsHash: checkpoint.argumentsHash });
 
     const limits = loadLimits();
@@ -237,15 +277,105 @@ export class RecoveryCoordinator {
     job.remaining = { task: limits.perTask - spend.task, day: limits.perDay - spend.day };
     this.emit(job, "POLICY_PASSED", { remainingTask: job.remaining.task, remainingDay: job.remaining.day });
 
+    // Plan recommendation (MO XIA): every one-time package under the per-purchase
+    // ceiling that clears the shortfall. The docs' quote stays the recommended plan.
+    const quoted = outcome.quote;
+    const viable = upstream.offers.filter((o) => o.billing === "one_time" && o.autoRenew === false && o.price <= limits.perPurchase);
+    try {
+      const rec = recommendCreditPlan({ requiredCredits: Math.max(1, blocker.required ?? 1), plans: viable.map(toPlan) });
+      const all = [rec.recommended, ...rec.alternatives];
+      const primary = all.find((p) => p.id === quoted.productId) ?? rec.recommended;
+      job.plans = { recommended: primary, alternatives: all.filter((p) => p.id !== primary.id) };
+    } catch {
+      const offer = upstream.offers.find((o) => o.productId === quoted.productId);
+      job.plans = { recommended: offer ? toPlan(offer) : { id: quoted.productId, name: quoted.productId, credits: quoted.unitsGranted, price: quoted.price, currency: quoted.currency }, alternatives: [] };
+    }
+    job.selectedPlanId = job.plans.recommended.id;
+    this.advance(job, "PLAN_RECOMMENDED");
+    this.emit(job, "PLAN_RECOMMENDED", {
+      recommended: job.plans.recommended.id,
+      alternatives: job.plans.alternatives.map((p) => p.id),
+    });
+    this.advance(job, "CUSTOMER_SELECTED");
+
     job.mandate = signMandate(
       outcome.quote,
       { taskId: input.taskId, recoveryJobId: id, userId: this.userId },
       this.deps.mandateSecret === undefined ? {} : { secret: this.deps.mandateSecret },
     );
     this.emit(job, "MANDATE_SIGNED", { cap: job.mandate.maximumAmount, expiresAt: job.mandate.expiresAt });
+    this.advance(job, "AWAITING_APPROVAL");
     this.emit(job, "APPROVAL_REQUESTED", { url: job.approveUrl });
     this.deps.onApprovalRequested?.(job);
     return job;
+  }
+
+  /** Move the job's recovery session. Invalid transitions throw, so no step can be skipped. */
+  private advance(job: RecoveryJob, next: RecoverySessionStatus): void {
+    job.session = transitionRecoverySession(job.session, next);
+    this.emit(job, "SESSION_STATUS", { status: next });
+  }
+
+  /** Record a terminal session status on a failure path without masking the original error. */
+  private advanceIfValid(job: RecoveryJob, next: RecoverySessionStatus): void {
+    try {
+      this.advance(job, next);
+    } catch {
+      // Already terminal or not yet purchasing; the job status carries the outcome.
+    }
+  }
+
+  /**
+   * Customer plan selection (MO XIA). Allowed until approval. The chosen plan is
+   * re-checked against the policy gate and the mandate is re-signed, so approval
+   * always binds exactly the plan on the card.
+   */
+  async selectPlan(id: string, planId: string): Promise<{ ok: boolean; error?: string }> {
+    const job = this.jobs.get(id);
+    if (!job?.plans || !job.quote || !job.mandate) return { ok: false, error: "NO_PLANS" };
+    if (job.status !== "awaiting_approval" || this.approved.has(job.mandate.mandateId)) {
+      return { ok: false, error: `JOB_${job.status.toUpperCase()}` };
+    }
+    let selection: ReturnType<typeof selectPurchasePlan>;
+    try {
+      selection = selectPurchasePlan(job.plans, planId);
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+    if (planId === job.selectedPlanId) return { ok: true };
+
+    const offer = this.deps.upstreams[job.namespace]?.offers.find((o) => o.productId === planId);
+    if (!offer) return { ok: false, error: "PLAN_NOT_IN_CATALOGUE" };
+    const quote: Quote = {
+      ...job.quote,
+      productId: offer.productId,
+      quantity: 1,
+      unitsGranted: offer.unitsGranted,
+      price: offer.price,
+      currency: offer.currency,
+      reason: selection.wasRecommended
+        ? `Customer selected the recommended ${offer.label} at $${offer.price}.`
+        : `Customer selected ${offer.label} at $${offer.price} instead of the recommended ${job.plans.recommended.name}.`,
+    };
+
+    const limits = loadLimits();
+    const spend = await this.spend.get(job.taskId, this.userId);
+    const verdict = gate(quote, job.checkpoint, spend, limits);
+    if (!verdict.ok) return { ok: false, error: verdict.message };
+
+    this.advance(job, "CUSTOMER_SELECTED");
+    job.quote = quote;
+    job.selectedPlanId = planId;
+    job.remaining = { task: limits.perTask - spend.task, day: limits.perDay - spend.day };
+    job.mandate = signMandate(
+      quote,
+      { taskId: job.taskId, recoveryJobId: job.id, userId: this.userId },
+      this.deps.mandateSecret === undefined ? {} : { secret: this.deps.mandateSecret },
+    );
+    this.emit(job, "PLAN_SELECTED", { planId, price: offer.price, units: offer.unitsGranted, wasRecommended: selection.wasRecommended });
+    this.emit(job, "MANDATE_SIGNED", { cap: job.mandate.maximumAmount, expiresAt: job.mandate.expiresAt });
+    this.advance(job, "AWAITING_APPROVAL");
+    return { ok: true };
   }
 
   /** POST /r/{id}/approve { mandate_signature }. Idempotent on approval:{mandateId}. */
@@ -264,6 +394,7 @@ export class RecoveryCoordinator {
       return { ok: false, error: job.error };
     }
 
+    this.advance(job, "APPROVED");
     this.approved.add(job.mandate.mandateId);
     job.status = "running";
     this.emit(job, "APPROVAL_GRANTED");
@@ -280,7 +411,6 @@ export class RecoveryCoordinator {
     return { ok: true };
   }
 
-  /** End a held Steel viewing session early ("End Steel session"). */
   releaseSteel(id: string): boolean {
     const release = this.holds.get(id);
     if (!release) return false;
@@ -291,18 +421,45 @@ export class RecoveryCoordinator {
 
   private async execute(job: RecoveryJob): Promise<void> {
     const upstream = this.deps.upstreams[job.namespace];
-    if (upstream?.purchase && this.deps.purchaser) return this.executeSlowLane(job, upstream);
+    if (upstream?.purchase && (this.deps.purchaser || this.deps.fastPurchaser)) return this.executePurchase(job, upstream);
     return this.executeViewing(job);
   }
 
-  private async executeSlowLane(job: RecoveryJob, upstream: UpstreamEntry): Promise<void> {
+  /** Lane router (§13): fast lane when the vendor has purchase tools, else the Steel browser. */
+  private async executePurchase(job: RecoveryJob, upstream: UpstreamEntry): Promise<void> {
     const quote = job.quote!;
     const realMoney = upstream.purchase?.realMoney ?? true;
     const realMoneyAllowed = !realMoney || (this.deps.realPurchaseProviders?.has(job.namespace) ?? false);
-    job.lane = "slow";
+
+    const resolved = async (r: RecoveryResult) => {
+      job.purchase = { purchaseId: r.purchaseId, balance: r.verifiedEntitlement.balance, alreadyCovered: r.alreadyCovered };
+      if (!r.alreadyCovered) await this.spend.addSpend(job.taskId, this.userId, quote.price);
+      this.advance(job, "PURCHASED");
+      this.advance(job, "ENTITLEMENT_UPDATED");
+      this.advance(job, "READY_TO_RESUME");
+      job.status = "resolved";
+    };
+
     try {
+      this.advance(job, "PURCHASING");
+      if (upstream.purchase?.mcpUrl && this.deps.fastPurchaser) {
+        if (realMoneyAllowed) {
+          job.lane = "fast";
+          this.emit(job, "PURCHASE_STARTED", { lane: "fast", realMoney });
+          const fast = await this.deps.fastPurchaser.purchase({ job, upstream, emit: (type, detail = {}) => this.emit(job, type, detail) });
+          if (fast.outcome === "verified") return await resolved(fast.result);
+          this.emit(job, "FAST_LANE_UNAVAILABLE", { reason: fast.reason });
+        } else {
+          this.emit(job, "FAST_LANE_SKIPPED", { reason: "real-money submit is not enabled for this vendor" });
+        }
+      }
+
+      if (!this.deps.purchaser) {
+        throw new Error("The vendor has no usable purchase tools and no Steel purchaser is configured (STEEL_API_KEY).");
+      }
+      job.lane = "slow";
       this.emit(job, "PURCHASE_STARTED", { lane: "slow", realMoney, submit: realMoneyAllowed ? "enabled" : "withheld" });
-      const out = await this.deps.purchaser!.purchase({
+      const out = await this.deps.purchaser.purchase({
         job,
         upstream,
         realMoneyAllowed,
@@ -316,17 +473,17 @@ export class RecoveryCoordinator {
 
       if (out.outcome === "withheld") {
         job.staged = out.staged;
+        this.advance(job, "PURCHASE_WITHHELD");
         job.status = "staged_not_submitted";
         return;
       }
-      const r = out.result;
-      job.purchase = { purchaseId: r.purchaseId, balance: r.verifiedEntitlement.balance, alreadyCovered: r.alreadyCovered };
-      if (!r.alreadyCovered) await this.spend.addSpend(job.taskId, this.userId, quote.price);
-      job.status = "resolved";
+      await resolved(out.result);
     } catch (err) {
       job.live = undefined;
       job.status = "failed";
       const code = (err as { code?: unknown }).code;
+      // Unverified or in-flight purchases may have moved money: UNKNOWN, never FAILED.
+      this.advanceIfValid(job, code === "PURCHASE_VERIFICATION_FAILED" || code === "PURCHASE_IN_FLIGHT" ? "PURCHASE_UNKNOWN" : "PURCHASE_FAILED");
       job.error = err instanceof Error ? err.message : String(err);
       if (code === "NOT_AUTHENTICATED") {
         job.error += ` Log the Steel profile in once with: npm run steel:login -- ${job.namespace}`;
@@ -341,6 +498,7 @@ export class RecoveryCoordinator {
     const hold = new Promise<void>((resolve) => this.holds.set(job.id, resolve));
     job.lane = "viewing";
     try {
+      this.advance(job, "PURCHASING");
       this.emit(job, "PURCHASE_STARTED", { lane: "viewing", mode: "no-real-money" });
       job.steel = await this.deps.steel.run({
         provider: job.namespace,
@@ -361,21 +519,25 @@ export class RecoveryCoordinator {
         await this.spend.addSpend(job.taskId, this.userId, quote.price);
         this.emit(job, "PURCHASE_COMPLETED", { stub: true, amount: quote.price, units: quote.unitsGranted });
         this.emit(job, "ENTITLEMENT_VERIFIED", { units: quote.unitsGranted });
+        this.advance(job, "PURCHASED");
+        this.advance(job, "ENTITLEMENT_UPDATED");
+        this.advance(job, "READY_TO_RESUME");
         job.status = "resolved";
       } else {
-        this.emit(job, "PURCHASE_SKIPPED", { reason: "DRY_RUN: this vendor has no slow-lane purchase wired" });
+        this.emit(job, "PURCHASE_SKIPPED", { reason: "DRY_RUN: this vendor has no purchase lane wired" });
+        this.advance(job, "PURCHASE_WITHHELD");
         job.status = "dry_run_complete";
       }
     } catch (err) {
       this.holds.delete(job.id);
       job.live = undefined;
+      this.advanceIfValid(job, "PURCHASE_FAILED");
       job.status = "failed";
       job.error = err instanceof Error ? err.message : String(err);
       this.emit(job, "RECOVERY_FAILED", { error: job.error });
     }
   }
 
-  /** Block until the job leaves the open states or the deadline passes. */
   async wait(id: string, timeoutMs: number, onChange?: (job: RecoveryJob) => Promise<void> | void): Promise<RecoveryJob> {
     const job = this.jobs.get(id);
     if (!job) throw new Error(`UNKNOWN_RECOVERY:${id}`);

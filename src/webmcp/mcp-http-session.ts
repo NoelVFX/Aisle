@@ -79,14 +79,23 @@ export class McpWebMcpSession implements WebMcpSession {
   async connect(): Promise<void> {
     if (this.connected) return;
     if (!this.connecting) {
-      this.connecting = this.client.connect(this.opts.transport ?? this.buildTransport()).then(() => {
-        this.connected = true;
-      });
+      this.connecting = this.client.connect(this.opts.transport ?? this.buildTransport()).then(
+        () => {
+          this.connected = true;
+        },
+        (err: unknown) => {
+          // Don't cache a failure: the next call gets a fresh attempt.
+          this.connecting = undefined;
+          throw err;
+        },
+      );
     }
     await this.connecting;
   }
 
   async close(): Promise<void> {
+    // A connect still in flight would otherwise leave the connection open.
+    if (this.connecting) await this.connecting.catch(() => {});
     if (!this.connected) return;
     await this.client.close();
     this.connected = false;
@@ -106,9 +115,13 @@ export class McpWebMcpSession implements WebMcpSession {
   }
 
   private buildTransport(): Transport {
-    const options: StreamableHTTPClientTransportOptions = {};
+    // Never follow redirects. The origin lock checks the configured URL; a
+    // redirect would carry the purchase call and vendor headers to another server.
+    const options: StreamableHTTPClientTransportOptions = {
+      fetch: (url, init) => fetch(url, { ...init, redirect: "error" }),
+    };
     if (this.opts.headers) {
-      options.requestInit = { headers: this.opts.headers };
+      options.requestInit = { headers: this.opts.headers, redirect: "error" };
     }
     // The SDK's own transport class has an optional `sessionId` typed without
     // `| undefined`, which trips `exactOptionalPropertyTypes` at the
