@@ -1,3 +1,262 @@
+# top-up-agent
+
+Transaction recovery for coding agents. When a tool call hits a paywall
+(`402 / insufficient_credits / quota_exceeded`), this module recovers the task,
+verifies the entitlement, and hands back a **resume token** so the host agent
+replays the failed call exactly where it stopped.
+
+It runs *inside* a host coding agent (Hermes / Claude / Codex); the host owns
+the task, the quote engine, and the approval UX.
+
+Two lanes, one converged outcome:
+
+- **Fast lane** — the vendor exposes **WebMCP** purchase tools; buy directly, no
+  browser.
+- **Slow lane** — no WebMCP; drive the vendor's real checkout with **Steel Cloud
+  + Playwright over CDP**, with a host-injected **computer-use** fallback for
+  dynamic pages, and Steel **profile** persistence for authenticated sessions.
+
+Both lanes return the same `RecoveryResult` (`{ lane, verifiedEntitlement,
+resumeToken }`), so the host doesn't care which path recovered the task.
+
+```ts
+import { runFastLane, runSlowLane, NoFastLaneError } from "top-up-agent";
+
+try {
+  return await runFastLane(request, { session });        // WebMCP path
+} catch (err) {
+  if (err instanceof NoFastLaneError) {
+    return await runSlowLane(request, { provider, adapter, profiles, agent });
+  }
+  throw err;
+}
+```
+
+## The workflow this implements
+
+```
+         (tool call hits 402, host produces Quote + signed Mandate, user approves)
+                                     │
+                                     ▼
+                    ┌────────────────────────────────┐
+                    │ 1. Detect WebMCP                │  does the vendor expose
+                    │    detectWebMcp(session)        │  purchase + balance tools?
+                    └────────────────────────────────┘
+                          │ yes                 │ no
+                          ▼                     ▼
+                 2. Guard (origin lock,    throw NoFastLaneError
+                    amount ≤ max,          → host falls back to SLOW LANE
+                    signature, expiry)        (Steel + Playwright)
+                          │
+                          ▼
+                 3. Purchase via the vendor's WebMCP tool
+                    (args derived ONLY from quote/mandate)
+                          │
+                          ▼
+                 4. Verify entitlement (balance delta re-read)
+                          │
+                          ▼
+                 5. Issue resume token  ──────────►  HERMES replays the
+                                                      original failed call
+```
+
+## Usage (from the host agent)
+
+```ts
+import { runFastLane, NoFastLaneError } from "top-up-agent";
+
+try {
+  const { verifiedEntitlement, resumeToken } = await runFastLane(
+    { checkpoint, quote, mandate },   // produced upstream + approved
+    { session, emit: onEvent },       // session = host's live WebMCP connection
+  );
+  // Host activates the resume token: replay resumeToken.resumeAction verbatim.
+} catch (err) {
+  if (err instanceof NoFastLaneError) {
+    // Hand off to the slow lane (Steel + Playwright).
+  } else {
+    throw err; // MandateRejected / PurchaseFailed / PurchaseVerification
+  }
+}
+```
+
+The host supplies a `WebMcpSession` — a live connection to **one** vendor's
+WebMCP surface (`origin`, `provider`, `listTools()`, `callTool()`). This module
+never opens connections itself, which keeps it testable: the mock vendor
+implements the same interface.
+
+## Safety properties
+
+- **Origin lock** — the WebMCP session's origin must equal the mandate's
+  task-configured origin. A vendor may *describe* a purchase; only task
+  configuration *authorizes* the origin.
+- **Spend ceiling** — a quoted price above `mandate.maximumAmount` is rejected
+  before any tool is called.
+- **Single-use / idempotent** — one purchase per `(task, requirement)`; a
+  crashed-and-retried run re-reads balance instead of buying again.
+- **Verify ≠ checkout** — a resume token is issued only after the balance is
+  confirmed to cover the need.
+- **Verbatim replay** — the resume token carries the *original* failed tool
+  call; the host does not regenerate the request.
+
+## Slow lane — Steel + Playwright + CDP
+
+```
+  no WebMCP  →  create Steel session (resume saved profile)
+                     │  chromium.connectOverCDP(session.connectUrl)
+                     ▼
+              open mandate.origin ──► ORIGIN LOCK (redirect away ⇒ reject)
+                     ▼
+              discover offers ──► bind to the approved product (ceiling re-checked)
+                     ▼
+              stage checkout  ──► re-check observed total vs mandate
+                     ▼
+              confirm (transactional) ──► if result lost: PURCHASE_RESULT_UNKNOWN,
+                     │                     re-read balance, never re-click
+                     ▼
+              verify entitlement ──► balance ≥ requirement
+                     ▼
+              save profile  →  resume token  →  HERMES
+```
+
+- **Browser behind a port.** The worker and adapters talk to `PageLike` /
+  `ControlSurface`, never Playwright directly. `SteelBrowserProvider` implements
+  them with a live remote browser; `MockBrowserProvider` implements them in
+  memory so tests and `npm run demo:slow` need no Steel key and no browser.
+- **Deterministic first, model second.** Each vendor has a small
+  `VendorPurchaseAdapter` (scripted Playwright). When a step can't complete it
+  throws `DeterministicStepError`; the worker hands that sub-goal to a
+  host-injected `ComputerUseAgent` and retries once. Two reference agents ship:
+  - `createOpenRouterComputerUseAgent({ apiKey })` — OpenAI-compatible vision +
+    a JSON action protocol, works with **free OpenRouter vision models**
+    (`OPENROUTER_API_KEY`). No Anthropic key needed. Free models are weak at
+    pixel-precise clicking — fine as a best-effort last resort.
+  - `createAnthropicComputerUseAgent(client)` — Anthropic computer-use loop over
+    an injected client (`ANTHROPIC_API_KEY`).
+
+  **The core demo needs no model at all** — the deterministic path + mock
+  vendors complete the full MVP loop. A model is only the slow-lane fallback for
+  dynamic real pages.
+- **Profiles.** After authenticating, the session context (cookies/localStorage)
+  is saved via a `ProfileStore` (`InMemory` / `File`) and resumed next time.
+
+### One adapter for most vendors
+
+`GenericVendorAdapter` is the default: no per-vendor class. It guesses the
+pricing/billing paths, reads prices and unit counts out of the page text, clicks
+buy/confirm by common labels, and reads the balance back — and the instant a
+step is ambiguous it throws `DeterministicStepError`, so the worker hands that
+sub-goal to the computer-use agent. Easy sites go fast; hard ones (canvas,
+closed shadow DOM, unusual layouts) fall through to the model. Tune a vendor with
+config, not code.
+
+```ts
+import {
+  SteelBrowserProvider, GenericVendorAdapter,
+  FileProfileStore, createAnthropicComputerUseAgent,
+} from "top-up-agent";
+
+const provider = new SteelBrowserProvider({
+  useProxy: true,                 // residential proxy pool
+  solveCaptcha: true,             // Steel's CAPTCHA sidecar
+  stealth: { humanizeInteractions: true },
+  credentials: { autoSubmit: true, blurFields: true },  // enable injection (see below)
+});
+const adapter  = new GenericVendorAdapter({ provider: "acme", origin: "https://acme.example" });
+const profiles = new FileProfileStore("./.profiles");
+const agent    = createAnthropicComputerUseAgent(anthropicClient);
+
+await runSlowLane(request, { provider, adapter, profiles, agent });
+```
+
+`SteelProviderOptions` surfaces the below-the-protocol features as first-class:
+`useProxy` / `proxyUrl`, `solveCaptcha`, `stealth`, `blockAds`, `region`,
+`dimensions`, `credentials`, `sessionTimeoutMs` (defaults to 15 min so the
+session survives human approval), plus a raw `sessionOptions` escape hatch.
+
+The worker also uses these Steel capabilities:
+
+- **Already-covered check (§8).** Reads the balance *before* buying; if it
+  already clears the requirement, it emits `ALREADY_COVERED` and skips the
+  purchase entirely.
+- **Delta verification (§17 Gate 2).** Confirms `balanceAfter ≥ balanceBefore +
+  unitsGranted` — not merely that the balance now clears the requirement — so a
+  no-op checkout can't pass as success.
+- **HITL takeover (§15.11).** An adapter raises `TakeoverRequiredError` on a
+  3-DS / OTP / bank challenge; the worker emits `TAKEOVER_REQUESTED` with the
+  live viewer URL and awaits your `onTakeover` handler, then re-verifies. No
+  faking, no failing.
+- **Receipt capture (§15.8).** After purchase, session files (invoice / receipt
+  / license) are listed via the Steel Files API and returned on
+  `RecoveryResult.receiptFileIds`; the viewer URL is on `sessionViewerUrl`.
+- **Tier-2 fallback on every step, including confirm.** On a
+  `DeterministicStepError` the injected computer-use agent (e.g. the OpenRouter
+  one) recovers the step and the worker retries once. Confirm is included by
+  default (`allowComputerUseOnConfirm`, default true); set it false for strict
+  deterministic-only submit. Either way Gate 1 (staged-vs-mandate) and Gate 2
+  (delta) still run, so a wrong click never becomes a wrong purchase.
+
+### Credentials injection (the card never touches this agent)
+
+Setting `credentials` on the provider enables Steel to **type stored secrets
+straight into the page** — so the card/login never enters this process or a model
+prompt. That flag carries **no secret**. The value must be stored in Steel
+out-of-band, keyed to the vendor origin, e.g. from your own code:
+
+```ts
+// Run this yourself, once, with the user's consent — NOT inside the agent loop.
+await steel.credentials.create({ origin: "https://acme.example", value: { /* card/login */ } });
+```
+
+This agent deliberately never accepts a plaintext card or types payment
+credentials itself; it only flips the injection switch.
+
+## Commands
+
+```bash
+npm install
+npm run demo         # fast lane: mock WebMCP vendor
+npm run demo:slow    # slow lane: mock vendor website (no Steel key needed)
+npm test             # vitest: both lanes — routing, guards, verify, idempotency, fallback
+npm run typecheck
+
+# Verify the REAL Steel provider end-to-end (needs STEEL_API_KEY in .env):
+npm run smoke:steel  # create session → CDP connect → navigate → screenshot → release
+```
+
+## Layout
+
+```
+src/
+├── index.ts                  public surface (both lanes)
+├── types.ts                  shared contracts (Quote, Mandate, Entitlement, ResumeToken, Offer, …)
+├── errors.ts                 typed outcomes (NoFastLane / MandateRejected / …)
+├── webmcp/                   fast-lane transport
+│   ├── session.ts            WebMcpSession interface (host-supplied)
+│   └── detector.ts           detect + resolve purchase/balance tools
+├── fast-lane/
+│   ├── executor.ts           detect → guard → purchase → verify → resume
+│   ├── guards.ts             origin lock, ceiling, signature, expiry (SHARED with slow lane)
+│   ├── purchase.ts           call the WebMCP purchase/balance tools
+│   ├── verify.ts             balance-delta verification
+│   └── idempotency.ts        purchase key + store (SHARED with slow lane)
+├── slow-lane/
+│   ├── executor.ts           browser purchase worker + transaction state machine
+│   ├── browser.ts            PageLike / ControlSurface / BrowserProvider ports
+│   ├── steel-provider.ts     Steel Cloud + Playwright-over-CDP implementation
+│   ├── profiles.ts           ProfileStore (InMemory / File) — Steel profile saving
+│   ├── vendor-adapter.ts     VendorPurchaseAdapter interface + chooseMinimumOffer/selectOffer
+│   ├── computer-use.ts       ComputerUseAgent + Scripted + Anthropic reference
+│   └── adapters/
+│       ├── generic-vendor-adapter.ts  ONE adapter for most vendors (heuristics + fallback)
+│       └── mock-vendor-site.ts        in-memory vendor site + adapter + browser
+├── resume/
+│   └── resume-token.ts       build/validate the handoff artifact
+├── mock/
+│   └── mock-vendor.ts        in-memory WebMCP vendor (fast lane)
+├── demo.ts                   fast-lane walkthrough
+└── slow-lane-demo.ts         slow-lane walkthrough
+```
 # Aisle Agent Wake-up Logic
 
 This module implements the event-driven wake-up layer for Aisle.

@@ -1,0 +1,84 @@
+/**
+ * Pre-flight guards. These run BEFORE any purchase tool is called; every one
+ * of them is a hard gate. The governing principle: a vendor (or any web
+ * content) may *describe* a purchase, but only task configuration — expressed
+ * through the signed mandate — can *authorize* one.
+ */
+
+import type { PurchaseMandate, Quote } from "../types.js";
+import { MandateRejectedError } from "../errors.js";
+
+/**
+ * Verify the mandate signature. Stubbed for the demo (the signing authority is
+ * owned by the approval/policy layer); swap in real verification before real
+ * money moves.
+ */
+export function verifyMandateSignature(mandate: PurchaseMandate): boolean {
+  return typeof mandate.signature === "string" && mandate.signature.length > 0;
+}
+
+export interface GuardContext {
+  mandate: PurchaseMandate;
+  quote: Quote;
+  /**
+   * The origin we are ACTUALLY about to transact against — the WebMCP session's
+   * origin (fast lane) or the browser's current page origin (slow lane).
+   */
+  actualOrigin: string;
+  /** The provider of the live connection (session / browser). */
+  actualProvider: string;
+  now?: Date;
+}
+
+/**
+ * Assert every invariant required to safely execute the purchase. Throws
+ * `MandateRejectedError` on the first violation. Shared by both lanes.
+ */
+export function assertPurchaseAllowed(ctx: GuardContext): void {
+  const { mandate, quote, actualOrigin, actualProvider } = ctx;
+  const now = ctx.now ?? new Date();
+
+  if (!verifyMandateSignature(mandate)) {
+    throw new MandateRejectedError("Mandate signature is missing or invalid.");
+  }
+
+  if (new Date(mandate.expiresAt).getTime() <= now.getTime()) {
+    throw new MandateRejectedError(`Mandate ${mandate.mandateId} has expired.`);
+  }
+
+  // Origin lock: we must be transacting against the exact origin the task
+  // authorized. Never trust an origin that came from tool output or a page.
+  if (normalizeOrigin(actualOrigin) !== normalizeOrigin(mandate.origin)) {
+    throw new MandateRejectedError(
+      `Origin lock violation: actual origin '${actualOrigin}' != mandate origin '${mandate.origin}'.`,
+    );
+  }
+
+  if (mandate.provider !== quote.provider || mandate.provider !== actualProvider) {
+    throw new MandateRejectedError("Provider mismatch between mandate, quote, and connection.");
+  }
+
+  if (mandate.productId !== quote.purchase.productId) {
+    throw new MandateRejectedError("Mandate productId does not match the quoted product.");
+  }
+
+  // Per-purchase ceiling: the quoted price must not exceed what was authorized.
+  if (quote.purchase.price > mandate.maximumAmount) {
+    throw new MandateRejectedError(
+      `Quoted price ${quote.purchase.price} exceeds mandate maximum ${mandate.maximumAmount}.`,
+    );
+  }
+
+  if (quote.purchase.currency !== mandate.currency) {
+    throw new MandateRejectedError("Currency mismatch between quote and mandate.");
+  }
+
+  if (mandate.autoRenew !== false || quote.autoRenew !== false) {
+    throw new MandateRejectedError("Auto-renew is not permitted for a recovery purchase.");
+  }
+}
+
+/** Lowercase + strip a trailing slash so origin comparison is stable. */
+export function normalizeOrigin(origin: string): string {
+  return origin.trim().toLowerCase().replace(/\/+$/, "");
+}

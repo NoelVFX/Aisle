@@ -1,5 +1,42 @@
 {
   "name": "top-up-agent",
+  "version": "0.1.0",
+  "description": "Fast-lane transaction recovery for coding agents: detect a vendor's WebMCP purchase tools, buy the minimum entitlement, verify it, and hand back a resume token.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "demo": "tsx src/demo.ts",
+    "demo:slow": "tsx src/slow-lane-demo.ts",
+    "smoke:steel": "node --env-file=.env --import tsx src/steel-smoke.ts"
+  },
+  "keywords": [
+    "webmcp",
+    "mcp",
+    "agent",
+    "payments",
+    "entitlement",
+    "recovery"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "playwright-core": "^1.48.2",
+    "steel-sdk": "^0.8.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8"
+  },
+  "optionalDependencies": {
+    "@anthropic-ai/sdk": "^0.32.1"
+  }
+}
   "version": "1.0.0",
   "description": "Event-driven wake-up logic for Aisle agent recovery",
   "type": "module",
