@@ -6,3 +6,8 @@ coverage/
 .vitest/
 .env
 .env.*
+!.env.example
+
+# Smoke-test artifacts
+steel-smoke.png
+.profiles/

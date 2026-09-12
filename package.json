@@ -11,7 +11,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "demo": "tsx src/demo.ts",
-    "demo:slow": "tsx src/slow-lane-demo.ts"
+    "demo:slow": "tsx src/slow-lane-demo.ts",
+    "smoke:steel": "node --env-file=.env --import tsx src/steel-smoke.ts"
   },
   "keywords": [
     "webmcp",

@@ -151,6 +151,9 @@ npm run demo         # fast lane: mock WebMCP vendor
 npm run demo:slow    # slow lane: mock vendor website (no Steel key needed)
 npm test             # vitest: both lanes — routing, guards, verify, idempotency, fallback
 npm run typecheck
+
+# Verify the REAL Steel provider end-to-end (needs STEEL_API_KEY in .env):
+npm run smoke:steel  # create session → CDP connect → navigate → screenshot → release
 ```
 
 ## Layout

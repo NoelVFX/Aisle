@@ -1,19 +1,23 @@
 /**
  * Steel Cloud browser provider.
  *
- * Creates a remote Steel session, connects Playwright to it over CDP, and
- * exposes the standard `BrowserSession` port (PageLike + ControlSurface +
- * profile save). Because Steel runs the browser remotely we depend on
- * `playwright-core` (no local browser download) and connect via
- * `chromium.connectOverCDP(session.connectUrl)`.
+ * Creates a remote Steel session, connects Playwright to it over CDP
+ * (`chromium.connectOverCDP(session.websocketUrl)`), and exposes the standard
+ * `BrowserSession` port (PageLike + ControlSurface + profile save). Because
+ * Steel runs the browser remotely we depend on `playwright-core` — no local
+ * browser download.
  *
- * NOTE: the Steel SDK surface is accessed loosely (typed `any`) so the provider
- * keeps working across SDK versions — confirm exact method/field names
- * (`sessions.create`, `connectUrl`/`websocketUrl`, `sessions.context`,
- * `sessions.release`) against the Steel docs for your installed version.
+ * Typed against steel-sdk v0.8: `new Steel({ steelAPIKey })`,
+ * `sessions.create({ sessionContext })` → `Session` (CDP at `.websocketUrl`,
+ * live view at `.sessionViewerUrl`), `sessions.context(id)`, `sessions.release(id)`.
  */
 
 import Steel from "steel-sdk";
+import type {
+  Session,
+  SessionContext,
+  SessionCreateParams,
+} from "steel-sdk/resources/sessions/sessions.js";
 import { chromium, type Browser, type Page } from "playwright-core";
 import type {
   BrowserProfile,
@@ -27,8 +31,8 @@ import type {
 export interface SteelProviderOptions {
   /** Defaults to process.env.STEEL_API_KEY. */
   apiKey?: string;
-  /** Extra options forwarded to sessions.create (proxy, captcha solver, etc.). */
-  sessionOptions?: Record<string, unknown>;
+  /** Extra options forwarded to sessions.create (proxy, captcha, dimensions, …). */
+  sessionOptions?: SessionCreateParams;
   /** Navigation default timeout (ms). */
   navigationTimeoutMs?: number;
 }
@@ -97,17 +101,14 @@ class SteelBrowserSession implements BrowserSession {
     readonly provider: string,
     readonly page: PageLike,
     readonly control: ControlSurface,
+    readonly sessionViewerUrl: string,
     private readonly browser: Browser,
-    private readonly client: { sessions: Record<string, (...args: never[]) => unknown> },
-    readonly sessionViewerUrl?: string,
+    private readonly client: Steel,
   ) {}
 
   async saveProfile(): Promise<BrowserProfile> {
     // Steel exposes the live cookies/localStorage as the session "context".
-    const ctxFn = this.client.sessions["context"] as
-      | ((id: string) => Promise<unknown>)
-      | undefined;
-    const context = ctxFn ? await ctxFn(this.sessionId) : undefined;
+    const context: SessionContext = await this.client.sessions.context(this.sessionId);
     return { provider: this.provider, context, savedAt: new Date().toISOString() };
   }
 
@@ -115,10 +116,7 @@ class SteelBrowserSession implements BrowserSession {
     try {
       await this.browser.close();
     } finally {
-      const releaseFn = this.client.sessions["release"] as
-        | ((id: string) => Promise<unknown>)
-        | undefined;
-      if (releaseFn) await releaseFn(this.sessionId);
+      await this.client.sessions.release(this.sessionId);
     }
   }
 }
@@ -137,20 +135,17 @@ export class SteelBrowserProvider implements BrowserProvider {
   }
 
   async createSession(opts: CreateSessionOptions): Promise<BrowserSession> {
-    // Typed loosely on purpose — see file header.
-    const client: any = new (Steel as any)({ steelAPIKey: this.apiKey });
+    const client = new Steel({ steelAPIKey: this.apiKey });
 
-    const createArgs: Record<string, unknown> = { ...this.options.sessionOptions };
+    const body: SessionCreateParams = { ...this.options.sessionOptions };
     if (opts.profile?.context !== undefined) {
       // Resume saved auth (cookies/localStorage) for this vendor.
-      createArgs["sessionContext"] = opts.profile.context;
+      body.sessionContext = opts.profile.context as SessionCreateParams["sessionContext"];
     }
 
-    const session = await client.sessions.create(createArgs);
-    const connectUrl: string = session.connectUrl ?? session.websocketUrl ?? session.wsUrl;
-    const viewerUrl: string | undefined = session.sessionViewerUrl ?? session.debugUrl;
+    const session: Session = await client.sessions.create(body);
 
-    const browser = await chromium.connectOverCDP(connectUrl);
+    const browser = await chromium.connectOverCDP(session.websocketUrl);
     const context = browser.contexts()[0] ?? (await browser.newContext());
     const page = context.pages()[0] ?? (await context.newPage());
 
@@ -160,9 +155,9 @@ export class SteelBrowserProvider implements BrowserProvider {
       opts.provider,
       new PlaywrightPage(page, navTimeout),
       new PlaywrightControl(page),
+      session.sessionViewerUrl,
       browser,
       client,
-      viewerUrl,
     );
   }
 }
