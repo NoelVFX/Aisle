@@ -23,8 +23,9 @@
 import Steel from "steel-sdk";
 import type { ProfileGetResponse } from "steel-sdk/resources/profiles.js";
 import type { Session, SessionCreateParams } from "steel-sdk/resources/sessions/sessions.js";
-import { chromium, type Browser, type Page } from "playwright-core";
+import { chromium, type Browser, type CDPSession, type Page } from "playwright-core";
 import type {
+  ActionCandidate,
   BrowserProvider,
   BrowserSession,
   ControlSurface,
@@ -237,8 +238,127 @@ export async function waitForProfileReady(
   }
 }
 
+const ACTIONABLE_ROLES = new Set([
+  "button",
+  "link",
+  "radio",
+  "checkbox",
+  "combobox",
+  "menuitem",
+  "tab",
+  "textbox",
+  "spinbutton",
+  "searchbox",
+  "option",
+  "switch",
+]);
+const MAX_CANDIDATES = 80;
+
+type AxNode = { ignored?: boolean; role?: { value?: unknown }; name?: { value?: unknown }; backendDOMNodeId?: number };
+type RoleArg = Parameters<Page["getByRole"]>[0];
+
 class PlaywrightPage implements PageLike {
+  private cdp: CDPSession | undefined;
+
   constructor(private readonly page: Page) {}
+
+  private async cdpSession(): Promise<CDPSession> {
+    if (!this.cdp) {
+      this.cdp = await this.page.context().newCDPSession(this.page);
+      await this.cdp.send("DOM.enable").catch(() => {});
+      await this.cdp.send("Accessibility.enable").catch(() => {});
+    }
+    return this.cdp;
+  }
+
+  async jsonLd(): Promise<unknown[]> {
+    return this.page.$$eval('script[type="application/ld+json"]', (els) =>
+      els
+        .map((e) => {
+          try {
+            return JSON.parse(e.textContent ?? "") as unknown;
+          } catch {
+            return null;
+          }
+        })
+        .filter((x) => x !== null),
+    );
+  }
+
+  /** Tier 3 (§17): real nodes from Accessibility.getFullAXTree, numbered. */
+  async actionableCandidates(): Promise<ActionCandidate[]> {
+    const cdp = await this.cdpSession();
+    const { nodes } = (await cdp.send("Accessibility.getFullAXTree")) as unknown as { nodes: AxNode[] };
+    const out: ActionCandidate[] = [];
+    for (const n of nodes) {
+      const role = String(n.role?.value ?? "");
+      const name = String(n.name?.value ?? "").replace(/\s+/g, " ").trim();
+      if (n.ignored || !ACTIONABLE_ROLES.has(role) || !name || n.backendDOMNodeId === undefined) continue;
+      const near = await this.nearPriceText(cdp, n.backendDOMNodeId).catch(() => "");
+      out.push({ index: out.length, role, name: name.slice(0, 120), near, backendNodeId: n.backendDOMNodeId });
+      if (out.length >= MAX_CANDIDATES) break;
+    }
+    return out;
+  }
+
+  /** Walk up to three ancestors and return the first price-bearing text. */
+  private async nearPriceText(cdp: CDPSession, backendNodeId: number): Promise<string> {
+    const { object } = await cdp.send("DOM.resolveNode", { backendNodeId });
+    if (!object.objectId) return "";
+    try {
+      const res = await cdp.send("Runtime.callFunctionOn", {
+        objectId: object.objectId,
+        returnByValue: true,
+        functionDeclaration:
+          "function(){let el=this;for(let i=0;i<4&&el;i++){const t=(el.innerText||'').replace(/\\s+/g,' ').trim();" +
+          "if(/[$€£]\\s?\\d/.test(t))return t.slice(0,160);el=el.parentElement;}return '';}",
+      });
+      return typeof res.result.value === "string" ? res.result.value : "";
+    } finally {
+      await cdp.send("Runtime.releaseObject", { objectId: object.objectId }).catch(() => {});
+    }
+  }
+
+  private async centerOf(candidate: ActionCandidate): Promise<{ x: number; y: number }> {
+    if (candidate.backendNodeId === undefined) throw new Error("Candidate has no DOM node.");
+    const cdp = await this.cdpSession();
+    await cdp.send("DOM.scrollIntoViewIfNeeded", { backendNodeId: candidate.backendNodeId }).catch(() => {});
+    const { quads } = await cdp.send("DOM.getContentQuads", { backendNodeId: candidate.backendNodeId });
+    const q = quads[0];
+    if (!q || q.length < 8) throw new Error(`Candidate "${candidate.name}" is not visible.`);
+    return { x: (q[0]! + q[2]! + q[4]! + q[6]!) / 4, y: (q[1]! + q[3]! + q[5]! + q[7]!) / 4 };
+  }
+
+  async clickCandidate(candidate: ActionCandidate): Promise<void> {
+    const { x, y } = await this.centerOf(candidate);
+    await this.page.mouse.click(x, y);
+  }
+
+  async fillCandidate(candidate: ActionCandidate, value: string): Promise<void> {
+    const { x, y } = await this.centerOf(candidate);
+    await this.page.mouse.click(x, y);
+    await this.page.keyboard.press("Control+A"); // Steel browsers run on Linux
+    await this.page.keyboard.type(value);
+  }
+
+  async clickByRole(role: string, name: string | RegExp): Promise<boolean> {
+    const loc = this.page.getByRole(role as RoleArg, { name, exact: typeof name === "string" }).first();
+    if ((await loc.count()) === 0) return false;
+    await loc.click();
+    return true;
+  }
+
+  async fillByRole(role: string, name: string | RegExp, value: string): Promise<boolean> {
+    const loc = this.page.getByRole(role as RoleArg, { name, exact: typeof name === "string" }).first();
+    if ((await loc.count()) === 0) return false;
+    await loc.fill(value);
+    return true;
+  }
+
+  async settle(ms = 1500): Promise<void> {
+    await this.page.waitForLoadState("domcontentloaded").catch(() => {});
+    await this.page.waitForTimeout(ms);
+  }
 
   currentUrl(): string {
     return this.page.url();

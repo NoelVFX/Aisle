@@ -1,4 +1,7 @@
 import { describe, it, expect } from "vitest";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createGateway } from "../src/gateway/gateway.js";
 import { loadUpstreams, MockImageVendor, type FetchLike } from "../src/gateway/upstreams.js";
 import type { SteelRunner } from "../src/gateway/recovery.js";
@@ -95,6 +98,56 @@ describe("gateway intercept", () => {
     const first = json((await g.callTool("openai__chat", { prompt: "hi" }, { taskId: "t" })) as never);
     expect(first.status).toBe("AWAITING_APPROVAL");
     expect(g.coordinator.get(first.recovery_id)?.checkpoint.blocker).toMatchObject({ type: "INSUFFICIENT_CREDITS", resource: "usd_balance" });
+  });
+
+  it("opens the configured billing page, goes live, and holds Steel until the user ends it", async () => {
+    const body = { error: { type: "insufficient_quota", code: "credit_balance_exhausted", message: "You have no credits remaining." } };
+    let requested: string | undefined;
+    let released = false;
+    const steel: SteelRunner = {
+      async run({ billingUrl, onLive, hold }) {
+        requested = billingUrl;
+        onLive({ sessionId: "s1", debugUrl: "https://api.steel.dev/v1/sessions/s1/player", viewerUrl: "https://app.steel.dev/sessions/s1" });
+        await hold;
+        released = true;
+        return { sessionId: "s1", debugUrl: undefined, viewerUrl: undefined, finalUrl: billingUrl, title: "Billing", screenshotPath: undefined };
+      },
+    };
+    const live: string[] = [];
+    const g = createGateway({
+      upstreams,
+      steel,
+      env: { OPENAI_API_KEY: "sk-test" },
+      fetchImpl: openAiFetch(429, body),
+      safeBlockMs: 30,
+      pollMs: 5,
+      publicUrl: () => "http://127.0.0.1:0",
+      mandateSecret: SECRET,
+      log: () => {},
+      onSteelLive: (j) => live.push(j.live?.debugUrl ?? ""),
+    });
+    const { recovery_id } = json((await g.callTool("openai__chat", { prompt: "hi" }, { taskId: "t" })) as never);
+    const job = g.coordinator.get(recovery_id)!;
+    await g.coordinator.approve(job.id, job.mandate!.signature);
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(requested).toBe("https://platform.openai.com/settings/organization/billing/overview");
+    expect(live).toEqual(["https://api.steel.dev/v1/sessions/s1/player"]);
+    expect(job.live?.sessionId).toBe("s1");
+    expect(released).toBe(false);
+    expect(json((await g.waitForRecovery(job.id)) as never).status).toBe("RECOVERY_RUNNING");
+
+    expect(g.coordinator.releaseSteel(job.id)).toBe(true);
+    expect(json((await g.waitForRecovery(job.id)) as never).status).toBe("DRY_RUN_COMPLETE");
+    expect(released).toBe(true);
+    expect(job.live).toBeUndefined();
+  });
+
+  it("refuses a billingUrl that leaves the billing origin", () => {
+    const dir = mkdtempSync(join(tmpdir(), "aisle-up-"));
+    const file = join(dir, "upstreams.json");
+    writeFileSync(file, JSON.stringify({ evil: { description: "", canonicalOrigin: "https://api.v.test", billingOrigin: "https://v.test", billingUrl: "https://evil-example.com/buy", resource: "credits", offers: [] } }));
+    expect(() => loadUpstreams(file)).toThrow(/billingUrl must be on its billingOrigin/);
   });
 
   it("an OpenAI rate limit is not a wall", async () => {

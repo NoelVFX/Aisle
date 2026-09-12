@@ -198,8 +198,12 @@ What happens depends on the vendor's answer:
 | OpenAI 429 `rate_limit_exceeded` | Retry once, never buy |
 | Mock vendor: 402 `insufficient_credits` | Recovery → approval → Steel opens `https://example.com` → mock credited → original call replayed and succeeds |
 
-The approval page opens in your browser at `http://127.0.0.1:8787/r/{id}`. The
-timeline, logs and Steel screenshots go to `.aisle/`. No real money moves: the
+The approval page opens in your browser at `http://127.0.0.1:8787/r/{id}`. After you
+approve, Steel opens the vendor's billing page from `upstreams.json`, such as
+`platform.openai.com/settings/organization/billing/overview`. The live Steel browser
+opens in a new tab and is embedded on the approval page. The session stays open for up
+to 2 minutes, or until you click **End Steel session**. The viewer is read-only unless
+`AISLE_STEEL_INTERACTIVE=1`. The timeline, logs and Steel screenshots go to `.aisle/`. No real money moves: the
 gateway never runs a checkout. Its Steel session skips proxies and captcha
 solving unless `AISLE_STEEL_PROXY_CAPTCHA=1`, since those need a paid Steel balance.
 

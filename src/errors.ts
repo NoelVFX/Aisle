@@ -1,5 +1,7 @@
 /** Typed errors so the host agent can branch on recovery outcomes. */
 
+import type { StagedCheckout } from "./types.js";
+
 export class FastLaneError extends Error {
   constructor(
     message: string,
@@ -77,5 +79,19 @@ export class ResolutionExhaustedError extends FastLaneError {
 export class InfraBlockedError extends FastLaneError {
   constructor(message = "Resolver credits exhausted. Aisle cannot recover its own resolver. Top up manually.") {
     super(message, "INFRA_BLOCKED");
+  }
+}
+
+/**
+ * The checkout was staged and passed Gate 1, but real-money submit is not
+ * enabled for this vendor (aisle-pipeline.md §27). Nothing was submitted and the
+ * mandate was not consumed.
+ */
+export class SubmitWithheldError extends FastLaneError {
+  constructor(
+    message: string,
+    readonly staged: StagedCheckout,
+  ) {
+    super(message, "SUBMIT_WITHHELD");
   }
 }

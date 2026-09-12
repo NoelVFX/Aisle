@@ -57,6 +57,7 @@ export interface GatewayOptions {
   mandateSecret?: string;
   onEvent?: (job: RecoveryJob, event: TimelineEvent) => void;
   onApprovalRequested?: (job: RecoveryJob) => void;
+  onSteelLive?: (job: RecoveryJob) => void;
   log?: (message: string) => void;
 }
 
@@ -86,6 +87,7 @@ export function createGateway(options: GatewayOptions) {
     ...(options.pollMs === undefined ? {} : { pollMs: options.pollMs }),
     ...(options.onEvent === undefined ? {} : { onEvent: options.onEvent }),
     ...(options.onApprovalRequested === undefined ? {} : { onApprovalRequested: options.onApprovalRequested }),
+    ...(options.onSteelLive === undefined ? {} : { onSteelLive: options.onSteelLive }),
   });
 
   const text = (value: unknown, isError = false): CallToolResult => ({

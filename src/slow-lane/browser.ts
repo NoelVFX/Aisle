@@ -35,6 +35,36 @@ export interface PageLike {
    * candidate labels. Goes through the real input pipeline (isTrusted:true).
    */
   tryClickByText(text: string): Promise<boolean>;
+
+  // ---- Optional rich capabilities (Playwright/CDP providers). Adapters must work without them.
+
+  /** Parsed `script[type="application/ld+json"]` blocks — tier 1 (aisle-pipeline.md §17). */
+  jsonLd?(): Promise<unknown[]>;
+  /** Numbered actionable nodes from the accessibility tree — tier 3. */
+  actionableCandidates?(): Promise<ActionCandidate[]>;
+  /** Click a candidate through real input (isTrusted). */
+  clickCandidate?(candidate: ActionCandidate): Promise<void>;
+  /** Focus a candidate field and type a value. */
+  fillCandidate?(candidate: ActionCandidate, value: string): Promise<void>;
+  /** Click the first control with this role and accessible name; false when absent. */
+  clickByRole?(role: string, name: string | RegExp): Promise<boolean>;
+  /** Fill the first control with this role and accessible name; false when absent. */
+  fillByRole?(role: string, name: string | RegExp, value: string): Promise<boolean>;
+  /** Let navigation and client-side rendering settle after an action. */
+  settle?(ms?: number): Promise<void>;
+}
+
+/**
+ * One real, actionable node offered to the tier-3 picker. The model returns
+ * `index`; `backendNodeId` never leaves this process and is never recorded.
+ */
+export interface ActionCandidate {
+  index: number;
+  role: string;
+  name: string;
+  /** Nearby price-bearing text, to tell "Buy" buttons apart. */
+  near: string;
+  backendNodeId?: number;
 }
 
 /** Pixel-level control, used only by the computer-use fallback. */

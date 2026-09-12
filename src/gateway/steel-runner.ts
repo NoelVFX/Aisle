@@ -1,6 +1,7 @@
 /**
- * The gateway's Steel step: open a real Steel session on the LOCKED billing
- * origin, take a screenshot through `sessions.computer`, and release.
+ * The gateway's Steel step: open a real Steel browser on the vendor's billing
+ * page (on the LOCKED billing origin), let the user watch it live, take a
+ * screenshot through `sessions.computer`, and release.
  *
  * It does not purchase. It never runs the checkout, never consumes the mandate,
  * and uses `persistProfile: false` so a test run never writes a stored identity.
@@ -8,27 +9,45 @@
 
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import Steel from "steel-sdk";
 import { SteelBrowserProvider, type SteelProviderOptions } from "../slow-lane/steel-provider.js";
-import type { SteelEvidence, SteelRunner } from "./recovery.js";
+import type { SteelEvidence, SteelLive, SteelRunner } from "./recovery.js";
 
 export interface SteelRunnerOptions {
-  /** Keep the session open this long so you can watch it in the viewer. */
+  /** Longest the session stays open for watching, unless ended from the approval page. */
   holdMs?: number;
   screenshotsDir: string;
   provider?: SteelProviderOptions;
 }
 
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
 export function createSteelRunner(opts: SteelRunnerOptions): SteelRunner {
   return {
-    async run({ provider, billingOrigin, jobId, emit }): Promise<SteelEvidence> {
+    async run({ provider, billingUrl, jobId, emit, onLive, hold }): Promise<SteelEvidence> {
       const steel = new SteelBrowserProvider(opts.provider); // throws if STEEL_API_KEY is missing
+      const client = new Steel({ steelAPIKey: opts.provider?.apiKey ?? process.env["STEEL_API_KEY"] ?? "" });
       const session = await steel.createSession({ provider, persistProfile: false });
-      emit("STEEL_SESSION_CREATED", { sessionId: session.sessionId, viewer: session.sessionViewerUrl });
 
       try {
-        await session.page.goto(billingOrigin);
+        const details = await client.sessions.retrieve(session.sessionId).catch(() => undefined);
+        const live: SteelLive = {
+          sessionId: session.sessionId,
+          debugUrl: details?.debugUrl,
+          viewerUrl: session.sessionViewerUrl,
+        };
+        emit("STEEL_SESSION_CREATED", { ...live });
+        onLive(live);
+
+        await session.page.goto(billingUrl);
+        emit("PAGE_OPENED", { requested: billingUrl, url: session.page.currentUrl() });
+
+        // Let client-side redirects (e.g. to a login page) settle before recording
+        // where the browser really ended up.
+        await sleep(3000);
         const finalUrl = session.page.currentUrl();
-        emit("PAGE_OPENED", { url: finalUrl });
+        const loginWall = /\/(login|signin|sign-in|auth)\b/i.test(new URL(finalUrl).pathname);
+        if (finalUrl !== billingUrl) emit("PAGE_REDIRECTED", { url: finalUrl, loginWall });
 
         const title = (await session.page.textContent("title").catch(() => null))?.trim() || undefined;
 
@@ -43,8 +62,14 @@ export function createSteelRunner(opts: SteelRunnerOptions): SteelRunner {
           emit("SCREENSHOT_FAILED", { error: err instanceof Error ? err.message : String(err) });
         }
 
-        if (opts.holdMs && opts.holdMs > 0) await new Promise((r) => setTimeout(r, opts.holdMs));
-        return { sessionId: session.sessionId, viewerUrl: session.sessionViewerUrl, finalUrl, title, screenshotPath };
+        const holdMs = opts.holdMs ?? 120_000;
+        if (holdMs > 0) {
+          emit("STEEL_SESSION_HOLDING", { maxSeconds: Math.round(holdMs / 1000) });
+          const ended = await Promise.race([hold.then(() => "user"), sleep(holdMs).then(() => "timeout")]);
+          emit("STEEL_SESSION_HOLD_ENDED", { by: ended });
+        }
+
+        return { ...live, finalUrl, title, screenshotPath };
       } finally {
         await session.close();
         emit("SESSION_CLOSED", { sessionId: session.sessionId });

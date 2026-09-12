@@ -30,6 +30,7 @@ import {
   PurchaseFailedError,
   PurchaseVerificationError,
   ResolutionExhaustedError,
+  SubmitWithheldError,
   TakeoverRequiredError,
 } from "../errors.js";
 import {
@@ -66,6 +67,12 @@ export interface SlowLaneDeps {
   now?: () => Date;
   /** HMAC secret for mandate verification; defaults to process.env.MANDATE_SECRET. */
   mandateSecret?: string;
+  /**
+   * Stage the checkout and run Gate 1, then stop before claiming the mandate or
+   * clicking submit (SubmitWithheldError). For real-money vendors that are not
+   * explicitly enabled.
+   */
+  stopBeforeSubmit?: boolean;
 }
 
 export interface TakeoverContext {
@@ -90,6 +97,7 @@ export type SlowLaneEvent =
   | { type: "RESOLVER_CALLED"; profile: "VISION"; instruction: string; callsUsed: number; budget: number }
   | ({ type: "CHECKOUT_STAGED" } & StagedCheckout)
   | { type: "MANDATE_COMPARISON_PASSED"; staged: number; cap: number }
+  | { type: "SUBMIT_WITHHELD"; staged: number; cap: number }
   | { type: "PURCHASE_STARTED"; lane: "slow" }
   | { type: "PURCHASE_SUBMITTED" }
   | { type: "TAKEOVER_REQUESTED"; reason: string; sessionViewerUrl?: string | undefined }
@@ -317,6 +325,20 @@ export async function runSlowLane(request: RecoveryRequest, deps: SlowLaneDeps):
     // 7. GATE 1 — staged checkout vs signed mandate, field by field. Aborts before any spend.
     assertMatchesMandate(staged, mandate);
     emit({ type: "MANDATE_COMPARISON_PASSED", staged: staged.amount, cap: mandate.maximumAmount });
+
+    if (deps.stopBeforeSubmit) {
+      emit({ type: "SUBMIT_WITHHELD", staged: staged.amount, cap: mandate.maximumAmount });
+      throw new SubmitWithheldError(
+        "Checkout staged and matched the mandate, but real-money submit is not enabled for this vendor. Nothing was submitted.",
+        {
+          lineItem: staged.lineItem,
+          amount: staged.amount,
+          currency: staged.currency,
+          billingPeriod: staged.billingPeriod,
+          autoRenew: staged.autoRenew,
+        },
+      );
+    }
 
     // 8. Claim the requirement and consume the single-use mandate.
     const claim = await store.claim({ idempotencyKey: key, mandateId: mandate.mandateId, purchaseId, status: "PENDING" });

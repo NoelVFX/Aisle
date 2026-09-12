@@ -39,10 +39,17 @@ export interface TimelineEvent {
   detail: Record<string, unknown>;
 }
 
-/** What the Steel session did. Never carries a profileId. */
-export interface SteelEvidence {
+/** A Steel session while it is open. Never carries a profileId. */
+export interface SteelLive {
   sessionId: string;
+  /** Live player (embeddable). */
+  debugUrl: string | undefined;
+  /** Steel dashboard page for the session. */
   viewerUrl: string | undefined;
+}
+
+/** What the Steel session did. Never carries a profileId. */
+export interface SteelEvidence extends SteelLive {
   finalUrl: string;
   title: string | undefined;
   screenshotPath: string | undefined;
@@ -51,9 +58,16 @@ export interface SteelEvidence {
 export interface SteelRunner {
   run(input: {
     provider: string;
+    /** Locked billing origin from config. */
     billingOrigin: string;
+    /** Billing page to open, validated to be on billingOrigin. */
+    billingUrl: string;
     jobId: string;
     emit: (type: string, detail?: Record<string, unknown>) => void;
+    /** Called as soon as the session is live, so the user can watch it. */
+    onLive: (live: SteelLive) => void;
+    /** Resolves when the user ends the session from the approval page. */
+    hold: Promise<void>;
   }): Promise<SteelEvidence>;
 }
 
@@ -69,6 +83,8 @@ export interface RecoveryJob {
   refusal?: Refusal;
   remaining?: { task: number; day: number };
   approveUrl: string;
+  /** Set while the Steel session is open. */
+  live?: SteelLive;
   steel?: SteelEvidence;
   error?: string;
   events: TimelineEvent[];
@@ -96,10 +112,13 @@ export interface CoordinatorDeps {
   pollMs?: number;
   onEvent?: (job: RecoveryJob, event: TimelineEvent) => void;
   onApprovalRequested?: (job: RecoveryJob) => void;
+  /** The Steel session for a job is live (e.g. open its player in the browser). */
+  onSteelLive?: (job: RecoveryJob) => void;
 }
 
 export class RecoveryCoordinator {
   private readonly jobs = new Map<string, RecoveryJob>();
+  private readonly holds = new Map<string, () => void>();
   private readonly byRequirement = new Map<string, string>();
   private readonly approved = new Set<string>();
   private readonly spend: SpendLedger;
@@ -241,16 +260,35 @@ export class RecoveryCoordinator {
     return { ok: true };
   }
 
+  /** End a held Steel session early ("End Steel session" on the approval page). */
+  releaseSteel(id: string): boolean {
+    const release = this.holds.get(id);
+    if (!release) return false;
+    this.holds.delete(id);
+    release();
+    return true;
+  }
+
   private async execute(job: RecoveryJob): Promise<void> {
     const quote = job.quote!;
+    const upstream = this.deps.upstreams[job.namespace];
+    const hold = new Promise<void>((resolve) => this.holds.set(job.id, resolve));
     try {
       this.emit(job, "PURCHASE_STARTED", { lane: "slow", mode: "no-real-money" });
       job.steel = await this.deps.steel.run({
         provider: job.namespace,
         billingOrigin: job.checkpoint.origin.billingOrigin,
+        billingUrl: upstream?.billingUrl ?? job.checkpoint.origin.billingOrigin,
         jobId: job.id,
         emit: (type, detail = {}) => this.emit(job, type, detail),
+        onLive: (live) => {
+          job.live = live;
+          this.deps.onSteelLive?.(job);
+        },
+        hold,
       });
+      this.holds.delete(job.id);
+      job.live = undefined;
 
       if (this.deps.fakeCredit(job.namespace, quote.unitsGranted)) {
         await this.spend.addSpend(job.taskId, this.userId, quote.price);
@@ -262,6 +300,8 @@ export class RecoveryCoordinator {
         job.status = "dry_run_complete";
       }
     } catch (err) {
+      this.holds.delete(job.id);
+      job.live = undefined;
       job.status = "failed";
       job.error = err instanceof Error ? err.message : String(err);
       this.emit(job, "RECOVERY_FAILED", { error: job.error });

@@ -53,12 +53,17 @@ const gateway = createGateway({
   upstreams,
   publicUrl: () => publicUrl,
   steel: createSteelRunner({
-    holdMs: Number(process.env["AISLE_STEEL_HOLD_MS"] ?? 15_000),
+    holdMs: Number(process.env["AISLE_STEEL_HOLD_MS"] ?? 120_000),
     screenshotsDir: join(STATE_DIR, "screenshots"),
     // This session never checks out, so it skips Steel proxies and captcha solving
     // by default (they need a paid Steel balance). AISLE_STEEL_PROXY_CAPTCHA=1 turns
     // on the full purchase-worker config from steel.md §4.1.
-    provider: process.env["AISLE_STEEL_PROXY_CAPTCHA"] === "1" ? {} : { useProxy: false, solveCaptcha: false },
+    // The viewer is read-only by default (steel.md §16.2). AISLE_STEEL_INTERACTIVE=1
+    // lets you click and type in the Steel browser, e.g. to log in to the vendor.
+    provider: {
+      ...(process.env["AISLE_STEEL_PROXY_CAPTCHA"] === "1" ? {} : { useProxy: false, solveCaptcha: false }),
+      sessionOptions: { debugConfig: { interactive: process.env["AISLE_STEEL_INTERACTIVE"] === "1" } },
+    },
   }),
   log,
   onEvent: (job, event) => {
@@ -69,6 +74,13 @@ const gateway = createGateway({
     log(`[aisle] APPROVE AT ${job.approveUrl}`);
     if (process.platform === "darwin" && process.env["AISLE_OPEN_APPROVAL"] !== "0") {
       spawn("open", [job.approveUrl], { stdio: "ignore", detached: true }).unref();
+    }
+  },
+  onSteelLive: (job) => {
+    const url = job.live?.debugUrl ?? job.live?.viewerUrl;
+    log(`[aisle] STEEL BROWSER LIVE ${url ?? "(no viewer url)"}`);
+    if (url && process.platform === "darwin" && process.env["AISLE_OPEN_VIEWER"] !== "0") {
+      spawn("open", [url], { stdio: "ignore", detached: true }).unref();
     }
   },
 });
