@@ -51,6 +51,8 @@ export type { DetectionResult, FastLaneCapability } from "./webmcp/detector.js";
 export type { WebMcpSession, WebMcpTool, WebMcpToolResult, WebMcpToolAnnotations } from "./webmcp/session.js";
 export { McpWebMcpSession, connectMcpWebMcpSession } from "./webmcp/mcp-http-session.js";
 export type { McpWebMcpSessionOptions } from "./webmcp/mcp-http-session.js";
+export { callWebMcpWithWakeup } from "./webmcp/wakeup-trigger.js";
+export type { WebMcpWakeupCall } from "./webmcp/wakeup-trigger.js";
 export { DEFAULT_VERIFY_RETRY } from "./fast-lane/verify.js";
 export type { VerifyRetryOptions } from "./fast-lane/verify.js";
 export { assertPurchaseAllowed, normalizeOrigin } from "./fast-lane/guards.js";

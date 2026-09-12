@@ -13,6 +13,12 @@ session to `runFastLane` and close it in `finally`. Provider and URL come from
 trusted configuration. The adapter supports Streamable HTTP and a transport
 override for tests; vendor capability hints travel in tool `_meta`.
 
+Task-facing WebMCP calls can use `callWebMcpWithWakeup(session, interceptor,
+call)`. It forwards successful calls unchanged and turns MCP tool errors or
+thrown HTTP 402 errors into the shared `FailureEvent` → `WakeUpManager` path.
+The call requires a config-locked origin and preserves the exact tool name,
+arguments, and tool-call ID for recovery and replay.
+
 Fast-lane balance verification accepts `verifyRetry: { attempts, delayMsBetween }`
 (default: three reads, 200ms apart). Overlapping attempts raise
 `PurchaseInFlightError`; an unconfirmed submission remains blocking until its
