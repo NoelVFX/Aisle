@@ -175,7 +175,8 @@ runs a Steel session on the locked billing origin, and then replays or reports.
 |---|---|
 | `openai__chat` | Real OpenAI chat completion with `OPENAI_API_KEY` |
 | `mockvendor__generate_image` | In-process mock that returns 402 until credited |
-| `aisle__wait_for_recovery` | Blocks again on a recovery that outlived `SAFE_BLOCK_MS` |
+| `aisle__wait_for_recovery` | Blocks again on a recovery that outlived `SAFE_BLOCK_MS` (renders the live widget in GUI clients) |
+| `aisle__watch_recovery` | Returns the watch link at once; GUI clients render the live widget |
 | `aisle__spend_report` | Spend and recoveries for this session |
 
 ```bash
@@ -198,21 +199,74 @@ What happens depends on the vendor's answer:
 | OpenAI 429 `rate_limit_exceeded` | Retry once, never buy |
 | Mock vendor: 402 `insufficient_credits` | Recovery → approval → Steel opens `https://example.com` → mock credited → original call replayed and succeeds |
 
-The approval page opens in your browser at `http://127.0.0.1:8787/r/{id}`. After you
-approve, Steel opens the vendor's billing page from `upstreams.json`, such as
-`platform.openai.com/settings/organization/billing/overview`. The live Steel browser
-opens in a new tab and is embedded on the approval page. The session stays open for up
-to 2 minutes, or until you click **End Steel session**. The viewer is read-only unless
-`AISLE_STEEL_INTERACTIVE=1`. The timeline, logs and Steel screenshots go to `.aisle/`. No real money moves: the
-gateway never runs a checkout. Its Steel session skips proxies and captcha
-solving unless `AISLE_STEEL_PROXY_CAPTCHA=1`, since those need a paid Steel balance.
+The approval page opens in your browser. After you approve, Steel opens the vendor's
+billing page from `upstreams.json`, such as
+`platform.openai.com/settings/organization/billing/overview`, and you watch it live on
+the same page. A viewing session stays open for up to 2 minutes, or until you click
+**End session**. The timeline, logs and Steel screenshots go to `.aisle/`. Steel
+sessions skip proxies and captcha solving unless `AISLE_STEEL_PROXY_CAPTCHA=1`, since
+those need a paid Steel balance.
+
+### Watch live
+
+Every recovery has one URL, `…/r/{recovery_id}?t={token}`. The terminal prints it
+when the recovery opens:
+
+```
+▶ Watch live: http://127.0.0.1:8787/r/5b0c…?t=Qm9…
+```
+
+It shows the Steel live viewer (Playwright driving the browser), the event timeline
+and, when one is pending, the approval card or the 3-DS/OTP takeover controls. GUI
+agents that support MCP Apps render the same thing inline: `aisle__wait_for_recovery`
+and `aisle__watch_recovery` point at the `ui://aisle/watch-live.html` widget, which
+has a fullscreen toggle. Both front-ends run one renderer (`src/gateway/watch-ui/`)
+over one stream:
+
+| Route | |
+|---|---|
+| `GET /r/{id}/events` | SSE: `timeline` events (id = sequence number) and `state`, the projection both surfaces render |
+| `GET /r/{id}/state` | The same projection as JSON |
+| `POST /r/{id}/approve` · `/reject` | `{ mandate_id }` binds the tap to the mandate on screen |
+| `POST /r/{id}/takeover/done` | The user cleared the challenge and hands the browser back |
+| `GET /r/{id}/replay.m3u8` | The released session's recording. The Steel key stays on the server |
+
+- **Lifecycle:** connecting → live → awaiting approval → takeover requested →
+  completed / refused / failed. When Steel releases the session the viewer swaps to
+  its replay, so the link stays useful after the run.
+- **A projection, not a client:** close or reload either surface mid-run and it
+  reconnects to the current state. EventSource resumes from the last event id.
+- **Read-only by default:** the player is embedded with `interactive=false` behind a
+  shield that swallows clicks. It becomes interactive only while a takeover is
+  pending, a state the server decides. Approve, reject and takeover go through the
+  endpoints above, never through the player.
+- **Access:** every `/r/` route needs the 192-bit token (wrong or missing: 404). The link
+  expires `AISLE_LINK_TTL_MS` (default 24h) after the recovery finishes (410). The page
+  never receives the mandate signature, nonce, a profileId or the raw player URL
+  outside the viewer. The token is never written to `.aisle/events.jsonl`.
+- **Resilience:** the viewer remounts after a network drop, when the device comes back
+  online, and when a backgrounded tab returns. A quiet captcha pause of tens of seconds
+  shows a calm note rather than an error.
+- **Phone:** set `AISLE_PUBLIC_URL` to a deployed or tunnelled gateway, or
+  `AISLE_TUNNEL=1` to start a Cloudflare quick tunnel (`cloudflared` on PATH).
+
+Slow-lane Steel sessions are created interaction-capable so a takeover can hand the
+browser over (`AISLE_STEEL_TAKEOVER=0` turns that off). Steel's player URL is
+unauthenticated by design, so view-only is enforced by the embed and the shield, and
+the URL only ever reaches holders of the tokened link.
+
+```bash
+npm run demo:watch                  # no Steel or agent: scripted run, captcha pause, 3-DS takeover, replay
+npm run demo:watch -- --replay=<id> # use a real released Steel session's recording for the replay
+```
 
 ## Not built yet (in the docs, not in this package)
 
 - **Remote HTTP gateway** (`apps/gateway`): the local gateway is stdio, one per agent
   session. Real purchases through the lanes are not wired into it yet.
-- **Control plane** (`apps/api`): durable recovery jobs and the SSE event stream. The
-  gateway keeps jobs in memory and its approval page polls.
+- **Control plane** (`apps/api`): durable recovery jobs. The gateway serves the SSE
+  event stream and watch page itself and keeps jobs in memory, so a watch link dies
+  with the gateway process.
 - **Web path** (CDP 402 detector, enrollments).
 - **Postgres** (`db/schema.sql`). Stores here are in-memory behind interfaces.
 - **Tier 1 JSON-LD / Browser Tools markdown offers, tier 3 AX-index picker, adapter

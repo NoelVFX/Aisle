@@ -1,184 +1,269 @@
 /**
- * Local approval surface (aisle-pipeline.md §12): one URL per recovery.
+ * The watch surface (aisle-pipeline.md §12): one URL per recovery. The CLI
+ * prints it, a phone opens it, and the GUI widget renders the same projection.
  *
- *   GET  /r/{id}           approval card + live Steel browser + timeline (one page)
- *   GET  /r/{id}/state     JSON the page polls
- *   POST /r/{id}/approve   { mandate_signature }  → 204
- *   POST /r/{id}/reject    { reason? }            → 204
- *   POST /r/{id}/release   end the held Steel session → 204
+ *   GET  /r/{id}?t=…                page: live Steel viewer + timeline + approval / takeover
+ *   GET  /r/{id}/events?t=…         text/event-stream: `timeline` (id = seq) and `state` (the projection)
+ *   GET  /r/{id}/state?t=…          the same projection as JSON
+ *   POST /r/{id}/approve?t=…        { mandate_id } (or { mandate_signature }) → 204
+ *   POST /r/{id}/reject?t=…         { reason? } → 204
+ *   POST /r/{id}/takeover/done?t=…  the human cleared a 3-DS/OTP challenge → 204
+ *   POST /r/{id}/release?t=…        end a held viewing session → 204
+ *   GET  /r/{id}/replay.m3u8?t=…    the released session's recording (the Steel key stays here)
+ *   GET  /assets/{watch.js,watch.css,hls.min.js}
  *
- * Every field on the card is a field in the mandate. Bound to 127.0.0.1 only.
+ * Every /r/ route needs the job's access token: a missing or wrong one is a 404,
+ * an expired link a 410. Nothing here talks to the browser; the page is a pure
+ * projection, so closing and reopening it shows the current state.
  */
 
-import { createServer, type IncomingMessage, type Server } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { RecoveryCoordinator, RecoveryJob } from "./recovery.js";
+import type { ReplaySource } from "./replay.js";
+import { DEFAULT_LINK_TTL_MS, linkExpired, tokenMatches } from "./watch-access.js";
+import { projectEvent, projectJob, type ProjectOptions } from "./watch-view.js";
+import { readAsset, renderMessagePage, renderWatchPage, watchPageCsp } from "./watch-ui.js";
 
 export interface ApprovalServer {
   url: string;
   close(): Promise<void>;
 }
 
-function view(job: RecoveryJob) {
-  const m = job.mandate;
-  return {
-    id: job.id,
-    status: job.status,
-    blocked_tool: job.checkpoint.tool,
-    blocker: job.checkpoint.blocker.type,
-    billing_origin: job.checkpoint.origin.billingOrigin,
-    quote: job.quote && { reason: job.quote.reason, price: job.quote.price, units: job.quote.unitsGranted, product: job.quote.productId },
-    mandate: m && {
-      product: m.productId,
-      units: m.unitsGranted,
-      cap: m.maximumAmount,
-      currency: m.currency,
-      billing: m.billingType,
-      auto_renew: m.autoRenew,
-      billing_origin: m.billingOrigin,
-      expires_at: m.expiresAt,
-      signature: m.signature,
-    },
-    remaining: job.remaining,
-    refusal: job.refusal && { reason: job.refusal.reason, message: job.refusal.message },
-    live: job.live,
-    steel: job.steel,
-    error: job.error,
-    events: job.events,
-  };
+export interface ApprovalServerOptions {
+  port: number;
+  /** Default 127.0.0.1. Reach it from elsewhere through AISLE_PUBLIC_URL or a tunnel. */
+  host?: string;
+  /** Try this many successive ports when one is taken. */
+  attempts?: number;
+  /** How long a finished recovery's link keeps working. */
+  linkTtlMs?: number;
+  replay?: ReplaySource;
+  /** AISLE_STEEL_INTERACTIVE=1: the operator wants an interactive viewer outside takeovers. */
+  viewerInteractive?: boolean;
+  /** Extra origins the live viewer iframe may load (the demo's stand-in player). */
+  frameOrigins?: string[];
+  heartbeatMs?: number;
 }
+
+const CORS = {
+  // The widget runs on a host sandbox origin. Auth is the token, never a cookie.
+  "access-control-allow-origin": "*",
+  "access-control-allow-headers": "content-type, last-event-id",
+  "access-control-allow-methods": "GET, POST, OPTIONS",
+  "access-control-max-age": "600",
+};
+
+const MAX_BODY_BYTES = 64 * 1024;
 
 async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
-  for await (const c of req) chunks.push(c as Buffer);
+  let size = 0;
+  for await (const c of req) {
+    size += (c as Buffer).length;
+    if (size > MAX_BODY_BYTES) return {};
+    chunks.push(c as Buffer);
+  }
   try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}") as Record<string, unknown>;
+    const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}") as unknown;
+    return parsed !== null && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
   } catch {
     return {};
   }
 }
 
-const PAGE = `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Aisle approval</title>
-<style>
-:root{--bg:#f6f5f2;--fg:#1d1d1b;--muted:#6b6a66;--card:#fff;--line:#e2e0da;--ok:#1f7a4d;--no:#a3322b;--live:#c2410c}
-@media (prefers-color-scheme:dark){:root{--bg:#161614;--fg:#eceae4;--muted:#9a988f;--card:#20201d;--line:#34332e;--ok:#4fbf86;--no:#e0736b;--live:#fb923c}}
-*{box-sizing:border-box}body{margin:0;padding:24px 16px;font:15px/1.45 system-ui,sans-serif;background:var(--bg);color:var(--fg)}
-main{max-width:1300px;margin:0 auto;display:grid;gap:16px;grid-template-columns:minmax(0,360px) minmax(0,1fr)}
-@media (max-width:860px){main{grid-template-columns:1fr}}
-section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;min-width:0}
-h1{font-size:18px;margin:0 0 4px}h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 10px}
-dl{display:grid;grid-template-columns:auto 1fr;gap:6px 12px;margin:12px 0}dt{color:var(--muted)}dd{margin:0;word-break:break-word}
-.amount{font-size:32px;font-weight:650}.status{color:var(--muted)}
-button,.btn{font:inherit;padding:10px 16px;border-radius:8px;border:1px solid var(--line);cursor:pointer;margin:0 8px 8px 0;display:inline-block;text-decoration:none;color:inherit;background:transparent}
-#approve{background:var(--ok);color:#fff;border-color:transparent}#reject{color:var(--no)}
-.livebadge{color:var(--live);font-weight:600}
-ol{margin:0;padding-left:18px;max-height:280px;overflow:auto;font:12px/1.5 ui-monospace,monospace}
-.frame{width:100%;aspect-ratio:16/9;max-width:100%;border:1px solid var(--line);border-radius:8px;background:#000;display:block}
-.note{color:var(--muted);font-size:13px}
-</style></head><body><main>
-<section><h2>Approve this transaction</h2><h1 id="tool"></h1><div class="status" id="status"></div>
-<div class="amount" id="amount"></div><div id="reason" class="note"></div>
-<dl id="fields"></dl>
-<div id="actions"><button id="approve">Approve</button><button id="reject">Reject</button></div>
-<p class="note">No real money moves in this gateway. After approval a Steel browser opens the vendor's billing page; mock vendors are credited in-process.</p>
-</section>
-<section><h2>Steel browser</h2><div id="viewer" class="note">Opens after approval.</div>
-<h2 style="margin-top:16px">Timeline</h2><ol id="timeline"></ol></section>
-</main>
-<script>
-const id = location.pathname.split("/")[2];
-const $ = (s) => document.getElementById(s);
-let signature = null, shown = null;
-function row(k, v){ const dt=document.createElement("dt"); dt.textContent=k; const dd=document.createElement("dd"); dd.textContent=v; $("fields").append(dt, dd); }
-function link(href, label){ const a=document.createElement("a"); a.href=href; a.target="_blank"; a.rel="noopener"; a.className="btn"; a.textContent=label; return a; }
-function renderViewer(s){
-  const key = s.live ? "live:"+s.live.sessionId : s.steel ? "done:"+s.steel.sessionId : null;
-  if (key === shown) return; shown = key;
-  const v = $("viewer"); v.replaceChildren();
-  if (s.live){
-    const p=document.createElement("p"); p.innerHTML='<span class="livebadge">● Live</span> '; p.append(document.createTextNode("Steel session "+s.live.sessionId)); v.append(p);
-    if (s.live.debugUrl){ const f=document.createElement("iframe"); f.className="frame"; f.src=s.live.debugUrl; f.allow="clipboard-read; clipboard-write"; v.append(f); v.append(link(s.live.debugUrl, "Open Steel browser in a new tab")); }
-    if (s.live.viewerUrl) v.append(link(s.live.viewerUrl, "Steel dashboard"));
-    const b=document.createElement("button"); b.textContent="End Steel session"; b.onclick=async()=>{ await fetch("/r/"+id+"/release",{method:"POST"}); }; v.append(b);
-  } else if (s.steel){
-    const p=document.createElement("p"); p.textContent="Session "+s.steel.sessionId+" released. It opened "+s.steel.finalUrl+(s.steel.title?" · "+s.steel.title:""); v.append(p);
-    if (s.steel.viewerUrl) v.append(link(s.steel.viewerUrl, "Replay in Steel dashboard"));
-  }
+function send(res: ServerResponse, status: number, body?: string | Buffer, type = "application/json", headers: Record<string, string> = {}): void {
+  res.writeHead(status, {
+    "content-type": type,
+    "cache-control": "no-store",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    ...CORS,
+    ...headers,
+  });
+  res.end(body);
 }
-async function refresh(){
-  const r = await fetch("/r/"+id+"/state"); if(!r.ok){ $("status").textContent="Unknown recovery"; return; }
-  const s = await r.json();
-  $("tool").textContent = s.blocked_tool + " hit " + s.blocker;
-  $("status").textContent = "Status: " + s.status + (s.refusal ? " · " + s.refusal.message : "") + (s.error ? " · " + s.error : "");
-  $("fields").replaceChildren();
-  if (s.mandate){
-    signature = s.mandate.signature;
-    $("amount").textContent = "Up to $" + s.mandate.cap.toFixed(2);
-    $("reason").textContent = s.quote ? s.quote.reason : "";
-    row("Product", s.mandate.product); row("Units", String(s.mandate.units));
-    row("Billing", s.mandate.billing); row("Auto-renew", s.mandate.auto_renew ? "on" : "off");
-    row("Billing origin", s.mandate.billing_origin); row("Expires", new Date(s.mandate.expires_at).toLocaleTimeString());
-    if (s.remaining){ row("Task ceiling left", "$"+s.remaining.task); row("Daily ceiling left", "$"+s.remaining.day); }
-  }
-  $("actions").hidden = s.status !== "awaiting_approval";
-  renderViewer(s);
-  $("timeline").replaceChildren(...s.events.map(e => { const li=document.createElement("li"); li.textContent=e.at.slice(11,19)+"  "+e.type+"  "+JSON.stringify(e.detail); return li; }));
-}
-$("approve").onclick = async () => { await fetch("/r/"+id+"/approve",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({mandate_signature:signature})}); refresh(); };
-$("reject").onclick = async () => { await fetch("/r/"+id+"/reject",{method:"POST",headers:{"content-type":"application/json"},body:"{}"}); refresh(); };
-refresh(); setInterval(refresh, 1000);
-</script></body></html>`;
 
-export function startApprovalServer(coordinator: RecoveryCoordinator, port: number, attempts = 10): Promise<ApprovalServer> {
-  const server: Server = createServer(async (req, res) => {
-    const url = new URL(req.url ?? "/", "http://127.0.0.1");
-    const parts = url.pathname.split("/").filter(Boolean);
-    const send = (status: number, body?: unknown, type = "application/json") => {
-      res.writeHead(status, { "content-type": type, "cache-control": "no-store" });
-      res.end(body === undefined ? undefined : typeof body === "string" ? body : JSON.stringify(body));
+const json = (res: ServerResponse, status: number, body: unknown) => send(res, status, JSON.stringify(body));
+
+export function startApprovalServer(
+  coordinator: RecoveryCoordinator,
+  portOrOptions: number | ApprovalServerOptions,
+  attempts = 10,
+): Promise<ApprovalServer> {
+  const options: ApprovalServerOptions = typeof portOrOptions === "number" ? { port: portOrOptions, attempts } : portOrOptions;
+  const linkTtlMs = options.linkTtlMs ?? DEFAULT_LINK_TTL_MS;
+  const projectOptions: ProjectOptions = { linkTtlMs, viewerInteractive: options.viewerInteractive === true };
+  const heartbeatMs = options.heartbeatMs ?? 15_000;
+  const pageCsp = watchPageCsp(options.frameOrigins ?? []);
+  const streams = new Set<() => void>();
+
+  function streamEvents(req: IncomingMessage, res: ServerResponse, url: URL, job: RecoveryJob): void {
+    res.writeHead(200, {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-store",
+      connection: "keep-alive",
+      "x-accel-buffering": "no",
+      ...CORS,
+    });
+
+    // EventSource resends the last id it saw on reconnect; a fresh page sends none.
+    const header = req.headers["last-event-id"];
+    const since = Number(typeof header === "string" && header !== "" ? header : (url.searchParams.get("since") ?? -1));
+    const after = Number.isInteger(since) ? since : -1;
+
+    let closed = false;
+    let statePending = false;
+    const write = (chunk: string) => {
+      if (!closed) res.write(chunk);
     };
-
-    if (req.method === "GET" && parts.length === 0) {
-      return send(200, coordinator.list().map((j) => ({ id: j.id, status: j.status, tool: j.checkpoint.tool, url: `/r/${j.id}` })));
+    const sendState = () => {
+      statePending = false;
+      if (closed) return;
+      if (linkExpired(job, linkTtlMs)) {
+        write("event: expired\ndata: {}\n\n");
+        close();
+        return;
+      }
+      write(`event: state\ndata: ${JSON.stringify(projectJob(job, projectOptions))}\n\n`);
+    };
+    const scheduleState = () => {
+      if (statePending) return;
+      statePending = true;
+      setImmediate(sendState);
+    };
+    const heartbeat = setInterval(() => {
+      write(": ping\n\n");
+      if (job.finishedAt !== undefined && linkExpired(job, linkTtlMs)) scheduleState();
+    }, heartbeatMs);
+    heartbeat.unref?.();
+    const unsubscribe = coordinator.subscribe(job.id, (_job, change) => {
+      if (change) write(`id: ${change.seq}\nevent: timeline\ndata: ${JSON.stringify(projectEvent(change.seq, change.event))}\n\n`);
+      scheduleState();
+    });
+    function close() {
+      if (closed) return;
+      closed = true;
+      clearInterval(heartbeat);
+      unsubscribe();
+      streams.delete(close);
+      res.end();
     }
-    if (parts[0] !== "r" || !parts[1]) return send(404, { error: "NOT_FOUND" });
+    streams.add(close);
+    req.on("close", close);
+
+    write("retry: 2000\n\n");
+    job.events.forEach((event, seq) => {
+      if (seq > after) write(`id: ${seq}\nevent: timeline\ndata: ${JSON.stringify(projectEvent(seq, event))}\n\n`);
+    });
+    sendState();
+  }
+
+  async function sendReplay(res: ServerResponse, job: RecoveryJob): Promise<void> {
+    if (!job.replay) return json(res, 404, { status: "unavailable", reason: job.live ? "SESSION_LIVE" : "NO_SESSION" });
+    if (!options.replay) return json(res, 404, { status: "unavailable", reason: "REPLAY_NOT_CONFIGURED" });
+    const playlist = await options.replay.playlist(job.replay.sessionId);
+    if (playlist.status === "ready") return send(res, 200, playlist.body, "application/vnd.apple.mpegurl");
+    if (playlist.status === "processing") return json(res, 202, { status: "processing" });
+    return json(res, 404, { status: "unavailable", reason: playlist.reason });
+  }
+
+  async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const url = new URL(req.url ?? "/", "http://gateway.local");
+    const parts = url.pathname.split("/").filter(Boolean);
+
+    if (req.method === "OPTIONS") {
+      res.writeHead(204, CORS);
+      return void res.end();
+    }
+    // No listing: recovery ids are not discoverable.
+    if (req.method === "GET" && parts.length === 0) return json(res, 200, { service: "aisle-gateway", ok: true });
+    if (req.method === "GET" && parts[0] === "assets" && parts.length === 2) {
+      const asset = readAsset(parts[1]!);
+      return asset
+        ? send(res, 200, asset.body, asset.type, { "cache-control": "public, max-age=300" })
+        : json(res, 404, { error: "NOT_FOUND" });
+    }
+    if (req.method === "GET" && url.pathname === "/favicon.ico") {
+      res.writeHead(204, { "cache-control": "public, max-age=86400" });
+      return void res.end();
+    }
+    if (parts[0] !== "r" || !parts[1]) return json(res, 404, { error: "NOT_FOUND" });
+
+    const isPage = req.method === "GET" && parts.length === 2;
     const job = coordinator.get(parts[1]);
-    if (!job) return send(404, { error: "UNKNOWN_RECOVERY" });
+    if (!job || !tokenMatches(job, url.searchParams.get("t"))) {
+      return isPage
+        ? send(res, 404, renderMessagePage("This link isn't valid", "Check that you copied the whole link, including everything after ?t=."), "text/html; charset=utf-8", { "content-security-policy": pageCsp })
+        : json(res, 404, { error: "UNKNOWN_RECOVERY" });
+    }
+    if (linkExpired(job, linkTtlMs)) {
+      return isPage
+        ? send(res, 410, renderMessagePage("This link has expired", "Watch links stop working a while after the recovery finishes."), "text/html; charset=utf-8", { "content-security-policy": pageCsp })
+        : json(res, 410, { error: "LINK_EXPIRED" });
+    }
 
-    if (req.method === "GET" && parts.length === 2) return send(200, PAGE, "text/html; charset=utf-8");
-    if (req.method === "GET" && parts[2] === "state") return send(200, view(job));
-    if (req.method === "POST" && parts[2] === "approve") {
-      const body = await readJson(req);
-      const out = await coordinator.approve(job.id, String(body["mandate_signature"] ?? ""));
-      return out.ok ? send(204) : send(409, out);
+    switch (`${req.method} ${parts.slice(2).join("/")}`) {
+      case "GET ":
+        return send(res, 200, renderWatchPage(), "text/html; charset=utf-8", { "content-security-policy": pageCsp });
+      case "GET state":
+        return json(res, 200, projectJob(job, projectOptions));
+      case "GET events":
+        return streamEvents(req, res, url, job);
+      case "GET replay.m3u8":
+        return sendReplay(res, job);
+      case "POST approve": {
+        const body = await readJson(req);
+        const out =
+          typeof body["mandate_id"] === "string"
+            ? await coordinator.approveMandate(job.id, body["mandate_id"])
+            : await coordinator.approve(job.id, String(body["mandate_signature"] ?? ""));
+        return out.ok ? send(res, 204) : json(res, 409, out);
+      }
+      case "POST reject": {
+        const body = await readJson(req);
+        const out = coordinator.reject(job.id, typeof body["reason"] === "string" ? body["reason"].slice(0, 500) : undefined);
+        return out.ok ? send(res, 204) : json(res, 409, { error: "NOT_AWAITING_APPROVAL" });
+      }
+      case "POST takeover/done":
+        return coordinator.completeTakeover(job.id) ? send(res, 204) : json(res, 409, { error: "NO_PENDING_TAKEOVER" });
+      case "POST release":
+        return coordinator.releaseSteel(job.id) ? send(res, 204) : json(res, 409, { error: "NO_LIVE_STEEL_SESSION" });
+      default:
+        return json(res, 405, { error: "METHOD_NOT_ALLOWED" });
     }
-    if (req.method === "POST" && parts[2] === "reject") {
-      const body = await readJson(req);
-      const out = coordinator.reject(job.id, typeof body["reason"] === "string" ? body["reason"] : undefined);
-      return out.ok ? send(204) : send(409, { error: "NOT_AWAITING_APPROVAL" });
-    }
-    if (req.method === "POST" && parts[2] === "release") {
-      return coordinator.releaseSteel(job.id) ? send(204) : send(409, { error: "NO_LIVE_STEEL_SESSION" });
-    }
-    return send(405, { error: "METHOD_NOT_ALLOWED" });
+  }
+
+  const server: Server = createServer((req, res) => {
+    handle(req, res).catch(() => {
+      if (!res.headersSent) json(res, 500, { error: "INTERNAL" });
+      else res.end();
+    });
   });
 
   return new Promise((resolve, reject) => {
-    let current = port;
+    const host = options.host ?? "127.0.0.1";
+    const maxPort = options.port + (options.attempts ?? 10);
+    let current = options.port;
     const tryListen = () => {
       server.once("error", (err: NodeJS.ErrnoException) => {
-        if (err.code === "EADDRINUSE" && current < port + attempts) {
+        if (err.code === "EADDRINUSE" && options.port !== 0 && current < maxPort) {
           current += 1;
           tryListen();
         } else reject(err);
       });
-      server.listen(current, "127.0.0.1", () =>
+      server.listen(current, host, () => {
+        const address = server.address();
+        const port = typeof address === "object" && address ? address.port : current;
         resolve({
-          url: `http://127.0.0.1:${current}`,
-          close: () => new Promise<void>((r) => server.close(() => r())),
-        }),
-      );
+          url: `http://${host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host}:${port}`,
+          close: () =>
+            new Promise<void>((r) => {
+              for (const close of [...streams]) close();
+              server.close(() => r());
+              server.closeAllConnections?.();
+            }),
+        });
+      });
     };
     tryListen();
   });

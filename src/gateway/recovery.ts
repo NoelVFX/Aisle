@@ -10,6 +10,9 @@
  *       allowlisted, stops before submit (STAGED_NOT_SUBMITTED);
  *     - otherwise the Steel viewing session: open the billing page, credit an
  *       in-process mock (FAKE_PURCHASE), or end DRY_RUN_COMPLETE.
+ *
+ * Every change to a job is pushed to `subscribe()` listeners. The watch page and
+ * the GUI widget are projections of that one stream (aisle-pipeline.md §12, §22).
  */
 
 import { randomUUID } from "node:crypto";
@@ -20,6 +23,7 @@ import { buildQuote } from "../quote/quote.js";
 import { gate, InMemorySpendLedger, loadLimits, type SpendLedger } from "../policy/policy.js";
 import { signMandate, verifyMandate } from "../mandate/mandate.js";
 import type { UpstreamEntry, Upstreams } from "./upstreams.js";
+import { newAccessToken, watchUrl } from "./watch-access.js";
 
 export type JobStatus =
   | "awaiting_approval"
@@ -33,6 +37,9 @@ export type JobStatus =
 
 const OPEN: ReadonlySet<JobStatus> = new Set(["awaiting_approval", "running"]);
 
+/** steel.md §16.3: how long a takeover waits for the human. */
+export const DEFAULT_TAKEOVER_TIMEOUT_MS = 5 * 60_000;
+
 export interface TimelineEvent {
   at: string;
   type: string;
@@ -42,10 +49,17 @@ export interface TimelineEvent {
 /** A Steel session while it is open. Never carries a profileId. */
 export interface SteelLive {
   sessionId: string;
-  /** Live player (embeddable). */
+  /** Live player (embeddable). Unauthenticated by design: only the watch projection hands it out. */
   debugUrl: string | undefined;
   /** Steel dashboard page for the session. */
   viewerUrl: string | undefined;
+}
+
+/** A released Steel session, kept so the watch page can swap the live viewer for its replay. */
+export interface SteelReplay {
+  sessionId: string;
+  viewerUrl: string | undefined;
+  releasedAt: string;
 }
 
 /** What the Steel viewing session did. Never carries a profileId. */
@@ -81,6 +95,12 @@ export interface SteelPurchaser {
     realMoneyAllowed: boolean;
     emit: (type: string, detail?: Record<string, unknown>) => void;
     onLive: (live: SteelLive) => void;
+    /**
+     * A challenge only a human may clear (3-DS, OTP). Resolves when the user
+     * hands the browser back from the watch page, or when the takeover times out;
+     * the balance re-read then decides the outcome.
+     */
+    onTakeover: (reason: string) => Promise<void>;
   }): Promise<SteelPurchaseOutcome>;
 }
 
@@ -96,9 +116,16 @@ export interface RecoveryJob {
   mandate?: PurchaseMandate;
   refusal?: Refusal;
   remaining?: { task: number; day: number };
+  /** Capability for /r/{id}. Never put in an event, the timeline, or a persisted log. */
+  accessToken: string;
+  /** The watch + approval URL, token included. The CLI, the phone and the widget all open this one. */
   approveUrl: string;
   /** Set while a Steel session is open. */
   live?: SteelLive;
+  /** The last released Steel session. */
+  replay?: SteelReplay;
+  /** A pending human takeover. The live viewer is interactive only while this is set. */
+  takeover?: { reason: string; requestedAt: string; deadline: string };
   steel?: SteelEvidence;
   /** The checkout the slow lane staged (withheld or submitted). */
   staged?: StagedCheckout;
@@ -106,7 +133,12 @@ export interface RecoveryJob {
   error?: string;
   events: TimelineEvent[];
   createdAt: string;
+  /** When the job left the open states. The watch link expires relative to this. */
+  finishedAt?: string;
 }
+
+/** `change` is set when the update is a new timeline event; `seq` is its index in `job.events`. */
+export type JobListener = (job: RecoveryJob, change: { seq: number; event: TimelineEvent } | undefined) => void;
 
 export interface OpenRecoveryInput {
   taskId: string;
@@ -131,6 +163,8 @@ export interface CoordinatorDeps {
   userId?: string;
   mandateSecret?: string;
   pollMs?: number;
+  /** How long a takeover waits for the human before handing back anyway. */
+  takeoverTimeoutMs?: number;
   onEvent?: (job: RecoveryJob, event: TimelineEvent) => void;
   onApprovalRequested?: (job: RecoveryJob) => void;
   onSteelLive?: (job: RecoveryJob) => void;
@@ -139,6 +173,8 @@ export interface CoordinatorDeps {
 export class RecoveryCoordinator {
   private readonly jobs = new Map<string, RecoveryJob>();
   private readonly holds = new Map<string, () => void>();
+  private readonly takeovers = new Map<string, () => void>();
+  private readonly listeners = new Map<string, Set<JobListener>>();
   private readonly byRequirement = new Map<string, string>();
   private readonly approved = new Set<string>();
   private readonly spend: SpendLedger;
@@ -161,10 +197,58 @@ export class RecoveryCoordinator {
     return this.spend.get(taskId, this.userId);
   }
 
+  /** Every change to one job: new events, live/replay swaps, takeovers, status. */
+  subscribe(id: string, listener: JobListener): () => void {
+    let set = this.listeners.get(id);
+    if (!set) this.listeners.set(id, (set = new Set()));
+    set.add(listener);
+    return () => {
+      set.delete(listener);
+      if (set.size === 0) this.listeners.delete(id);
+    };
+  }
+
+  private notify(job: RecoveryJob, change?: { seq: number; event: TimelineEvent }): void {
+    for (const listener of [...(this.listeners.get(job.id) ?? [])]) {
+      try {
+        listener(job, change);
+      } catch {
+        // A broken subscriber never breaks a recovery.
+      }
+    }
+  }
+
   private emit(job: RecoveryJob, type: string, detail: Record<string, unknown> = {}): void {
     const event = { at: new Date().toISOString(), type, detail };
     job.events.push(event);
+    // Both lanes announce the release; the viewer swaps to replay at once rather
+    // than when the lane returns (the slow lane still waits for PROFILE_READY).
+    if (type === "SESSION_CLOSED") this.endLive(job, false);
     this.deps.onEvent?.(job, event);
+    this.notify(job, { seq: job.events.length - 1, event });
+  }
+
+  private setLive(job: RecoveryJob, live: SteelLive): void {
+    // The purchaser reports live asynchronously; never resurrect a released session.
+    if (job.replay?.sessionId === live.sessionId || !OPEN.has(job.status)) return;
+    job.live = live;
+    this.notify(job);
+    this.deps.onSteelLive?.(job);
+  }
+
+  private endLive(job: RecoveryJob, notify = true): void {
+    if (!job.live) return;
+    job.replay = { sessionId: job.live.sessionId, viewerUrl: job.live.viewerUrl, releasedAt: new Date().toISOString() };
+    job.live = undefined;
+    if (notify) this.notify(job);
+  }
+
+  private finish(job: RecoveryJob, status: JobStatus): void {
+    this.endLive(job, false);
+    job.takeover = undefined;
+    job.status = status;
+    job.finishedAt = new Date().toISOString();
+    this.emit(job, "RECOVERY_FINISHED", { status });
   }
 
   /** Open a recovery, or join the open one for the same (task, requirement). */
@@ -185,6 +269,7 @@ export class RecoveryCoordinator {
     }
 
     const id = randomUUID();
+    const accessToken = newAccessToken();
     const checkpoint = freezeCheckpoint({
       taskId: input.taskId,
       toolCallId: input.toolCallId,
@@ -200,7 +285,8 @@ export class RecoveryCoordinator {
       namespace: input.namespace,
       status: "awaiting_approval",
       checkpoint,
-      approveUrl: `${this.deps.publicUrl()}/r/${id}`,
+      accessToken,
+      approveUrl: watchUrl(this.deps.publicUrl(), { id, accessToken }),
       events: [],
       createdAt: new Date().toISOString(),
     };
@@ -213,7 +299,6 @@ export class RecoveryCoordinator {
     const limits = loadLimits();
     const outcome = buildQuote({ checkpoint, current: null, offers: [...upstream.offers], perPurchaseCeiling: limits.perPurchase });
     if (outcome.kind !== "QUOTE") {
-      job.status = "refused";
       job.refusal = {
         ok: false,
         reason: "NO_VIABLE_OFFER",
@@ -221,6 +306,7 @@ export class RecoveryCoordinator {
         message: "No one-time package under the per-purchase ceiling clears this shortfall.",
       };
       this.emit(job, "POLICY_REFUSED", { reason: "NO_VIABLE_OFFER" });
+      this.finish(job, "refused");
       return job;
     }
     job.quote = outcome.quote;
@@ -229,9 +315,9 @@ export class RecoveryCoordinator {
     const spend = await this.spend.get(input.taskId, this.userId);
     const verdict = gate(outcome.quote, checkpoint, spend, limits);
     if (!verdict.ok) {
-      job.status = "refused";
       job.refusal = verdict;
       this.emit(job, "POLICY_REFUSED", { reason: verdict.reason, ...verdict.detail });
+      this.finish(job, "refused");
       return job;
     }
     job.remaining = { task: limits.perTask - spend.task, day: limits.perDay - spend.day };
@@ -243,7 +329,8 @@ export class RecoveryCoordinator {
       this.deps.mandateSecret === undefined ? {} : { secret: this.deps.mandateSecret },
     );
     this.emit(job, "MANDATE_SIGNED", { cap: job.mandate.maximumAmount, expiresAt: job.mandate.expiresAt });
-    this.emit(job, "APPROVAL_REQUESTED", { url: job.approveUrl });
+    // The timeline carries the path only; the tokened URL goes to the user, not the log.
+    this.emit(job, "APPROVAL_REQUESTED", { url: `${this.deps.publicUrl().replace(/\/+$/, "")}/r/${id}` });
     this.deps.onApprovalRequested?.(job);
     return job;
   }
@@ -258,9 +345,9 @@ export class RecoveryCoordinator {
     try {
       verifyMandate(job.mandate, this.deps.mandateSecret === undefined ? {} : { secret: this.deps.mandateSecret });
     } catch (err) {
-      job.status = "failed";
       job.error = String((err as Error).message);
       this.emit(job, "APPROVAL_FAILED", { error: job.error });
+      this.finish(job, "failed");
       return { ok: false, error: job.error };
     }
 
@@ -272,21 +359,62 @@ export class RecoveryCoordinator {
     return { ok: true };
   }
 
+  /**
+   * Approval from the watch page, which never sees the signature: the tokened
+   * link authorizes the request, the mandate id binds it to the mandate shown.
+   */
+  async approveMandate(id: string, mandateId: string): Promise<{ ok: boolean; error?: string }> {
+    const job = this.jobs.get(id);
+    if (!job?.mandate) return { ok: false, error: "NO_MANDATE" };
+    if (mandateId !== job.mandate.mandateId) return { ok: false, error: "MANDATE_ID_MISMATCH" };
+    return this.approve(id, job.mandate.signature);
+  }
+
   reject(id: string, reason?: string): { ok: boolean } {
     const job = this.jobs.get(id);
     if (!job || job.status !== "awaiting_approval") return { ok: false };
-    job.status = "rejected";
     this.emit(job, "APPROVAL_REJECTED", reason ? { reason } : {});
+    this.finish(job, "rejected");
     return { ok: true };
   }
 
-  /** End a held Steel viewing session early ("End Steel session"). */
+  /** End a held Steel viewing session early ("End session"). */
   releaseSteel(id: string): boolean {
     const release = this.holds.get(id);
     if (!release) return false;
     this.holds.delete(id);
     release();
     return true;
+  }
+
+  /** POST /r/{id}/takeover/done: the human cleared the challenge and hands the browser back. */
+  completeTakeover(id: string): boolean {
+    const handBack = this.takeovers.get(id);
+    if (!handBack) return false;
+    this.takeovers.delete(id);
+    handBack();
+    return true;
+  }
+
+  private async awaitTakeover(job: RecoveryJob, reason: string): Promise<void> {
+    const timeoutMs = this.deps.takeoverTimeoutMs ?? DEFAULT_TAKEOVER_TIMEOUT_MS;
+    const requestedAt = new Date();
+    job.takeover = { reason, requestedAt: requestedAt.toISOString(), deadline: new Date(requestedAt.getTime() + timeoutMs).toISOString() };
+    this.notify(job);
+
+    const by = await new Promise<"user" | "timeout">((resolve) => {
+      const timer = setTimeout(() => {
+        this.takeovers.delete(job.id);
+        resolve("timeout");
+      }, timeoutMs);
+      timer.unref?.();
+      this.takeovers.set(job.id, () => {
+        clearTimeout(timer);
+        resolve("user");
+      });
+    });
+    job.takeover = undefined;
+    this.emit(job, "TAKEOVER_HANDED_BACK", { by });
   }
 
   private async execute(job: RecoveryJob): Promise<void> {
@@ -307,31 +435,27 @@ export class RecoveryCoordinator {
         upstream,
         realMoneyAllowed,
         emit: (type, detail = {}) => this.emit(job, type, detail),
-        onLive: (live) => {
-          job.live = live;
-          this.deps.onSteelLive?.(job);
-        },
+        onLive: (live) => this.setLive(job, live),
+        onTakeover: (reason) => this.awaitTakeover(job, reason),
       });
-      job.live = undefined;
 
       if (out.outcome === "withheld") {
         job.staged = out.staged;
-        job.status = "staged_not_submitted";
+        this.finish(job, "staged_not_submitted");
         return;
       }
       const r = out.result;
       job.purchase = { purchaseId: r.purchaseId, balance: r.verifiedEntitlement.balance, alreadyCovered: r.alreadyCovered };
       if (!r.alreadyCovered) await this.spend.addSpend(job.taskId, this.userId, quote.price);
-      job.status = "resolved";
+      this.finish(job, "resolved");
     } catch (err) {
-      job.live = undefined;
-      job.status = "failed";
       const code = (err as { code?: unknown }).code;
       job.error = err instanceof Error ? err.message : String(err);
       if (code === "NOT_AUTHENTICATED") {
         job.error += ` Log the Steel profile in once with: npm run steel:login -- ${job.namespace}`;
       }
       this.emit(job, "RECOVERY_FAILED", { error: job.error, ...(typeof code === "string" ? { code } : {}) });
+      this.finish(job, "failed");
     }
   }
 
@@ -348,30 +472,25 @@ export class RecoveryCoordinator {
         billingUrl: upstream?.billingUrl ?? job.checkpoint.origin.billingOrigin,
         jobId: job.id,
         emit: (type, detail = {}) => this.emit(job, type, detail),
-        onLive: (live) => {
-          job.live = live;
-          this.deps.onSteelLive?.(job);
-        },
+        onLive: (live) => this.setLive(job, live),
         hold,
       });
       this.holds.delete(job.id);
-      job.live = undefined;
 
       if (this.deps.fakeCredit(job.namespace, quote.unitsGranted)) {
         await this.spend.addSpend(job.taskId, this.userId, quote.price);
         this.emit(job, "PURCHASE_COMPLETED", { stub: true, amount: quote.price, units: quote.unitsGranted });
         this.emit(job, "ENTITLEMENT_VERIFIED", { units: quote.unitsGranted });
-        job.status = "resolved";
+        this.finish(job, "resolved");
       } else {
         this.emit(job, "PURCHASE_SKIPPED", { reason: "DRY_RUN: this vendor has no slow-lane purchase wired" });
-        job.status = "dry_run_complete";
+        this.finish(job, "dry_run_complete");
       }
     } catch (err) {
       this.holds.delete(job.id);
-      job.live = undefined;
-      job.status = "failed";
       job.error = err instanceof Error ? err.message : String(err);
       this.emit(job, "RECOVERY_FAILED", { error: job.error });
+      this.finish(job, "failed");
     }
   }
 

@@ -62,13 +62,16 @@ async function main(): Promise<void> {
   console.log("first result:", body?.["status"] ?? firstText(result).slice(0, 300));
 
   if (body?.["status"] === "AWAITING_APPROVAL") {
-    const approveUrl = String(body["approve_url"]);
-    const state = (await (await fetch(`${approveUrl}/state`)).json()) as { mandate?: { signature: string; cap: number }; quote?: { reason: string } };
+    // The watch URL carries its token as ?t=; every route under it needs that token.
+    const watch = new URL(String(body["watch_url"]));
+    const route = (path: string) => `${watch.origin}${watch.pathname}/${path}${watch.search}`;
+    console.log("watch:", String(body["display"]));
+    const state = (await (await fetch(route("state"))).json()) as { mandate?: { mandate_id: string; cap: number }; quote?: { reason: string } };
     console.log("quote:", state.quote?.reason, "· cap $" + state.mandate?.cap);
-    const res = await fetch(`${approveUrl}/approve`, {
+    const res = await fetch(route("approve"), {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ mandate_signature: state.mandate?.signature }),
+      body: JSON.stringify({ mandate_id: state.mandate?.mandate_id }),
     });
     console.log("approve →", res.status);
 

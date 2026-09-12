@@ -38,7 +38,7 @@ export function createSteelPurchaser(options: SteelPurchaserOptions): SteelPurch
   const env = options.env ?? process.env;
 
   return {
-    async purchase({ job, upstream, realMoneyAllowed, emit, onLive }) {
+    async purchase({ job, upstream, realMoneyAllowed, emit, onLive, onTakeover }) {
       const cfg = upstream.purchase;
       if (!cfg) throw new Error(`Upstream '${job.namespace}' has no purchase config.`);
       if (!job.quote || !job.mandate) throw new Error("Recovery has no approved mandate.");
@@ -81,6 +81,8 @@ export function createSteelPurchaser(options: SteelPurchaserOptions): SteelPurch
             ...(agent ? { agent } : {}),
             store: options.store,
             stopBeforeSubmit: !realMoneyAllowed,
+            // 3-DS / OTP: the watch page hands the live browser to the user, then back.
+            onTakeover: (ctx) => onTakeover(ctx.reason),
             ...(options.mandateSecret ? { mandateSecret: options.mandateSecret } : {}),
             emit: (event: SlowLaneEvent) => {
               const { type, ...rest } = event;

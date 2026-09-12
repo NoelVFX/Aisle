@@ -36,7 +36,8 @@ export function createSteelRunner(opts: SteelRunnerOptions): SteelRunner {
           debugUrl: details?.debugUrl,
           viewerUrl: session.sessionViewerUrl,
         };
-        emit("STEEL_SESSION_CREATED", { ...live });
+        // The debug URL is an unauthenticated player; it reaches users only through the watch projection.
+        emit("STEEL_SESSION_CREATED", { sessionId: live.sessionId, viewerUrl: live.viewerUrl });
         onLive(live);
 
         await session.page.goto(billingUrl);

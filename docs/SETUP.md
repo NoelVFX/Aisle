@@ -34,9 +34,11 @@ hostname.
 Forget this and the policy gate refuses with `ORIGIN_VIOLATION` — which is the
 system working correctly, and will waste twenty minutes if you don't expect it.
 
-**Second tunnel, only if you want the phone tap:** the approval page at
-`localhost:8787` needs to be reachable from your phone. Tunnel it too, or
-demo the approval on the laptop.
+**Second tunnel, only if you want the phone tap:** the watch/approval page at
+`localhost:8787` needs to be reachable from your phone. Start the gateway with
+`AISLE_TUNNEL=1` (Cloudflare quick tunnel, needs `cloudflared`) or point
+`AISLE_PUBLIC_URL` at your own tunnel, and the printed `▶ Watch live` link opens
+there. Or demo the approval on the laptop.
 
 ## 2. The Steel browser isn't logged in
 

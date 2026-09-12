@@ -18,6 +18,7 @@ import {
   type SteelRunner,
   type TimelineEvent,
 } from "./recovery.js";
+import { redactDetail } from "./watch-view.js";
 import {
   MockImageVendor,
   mockVendorHttpTool,
@@ -70,6 +71,11 @@ export interface GatewayOptions {
   onApprovalRequested?: (job: RecoveryJob) => void;
   onSteelLive?: (job: RecoveryJob) => void;
   log?: (message: string) => void;
+  /**
+   * Prints the "▶ Watch live: <url>" line to the user's terminal. The URL carries
+   * the link token, so this must not feed a persisted log.
+   */
+  announce?: (line: string) => void;
 }
 
 export type Progress = (message: string) => Promise<void>;
@@ -81,6 +87,8 @@ export function createGateway(options: GatewayOptions) {
   const mock = options.mockVendor ?? new MockImageVendor(Number(env["AISLE_MOCK_START_BALANCE"] ?? 0) || 0);
   const safeBlockMs = options.safeBlockMs ?? (Number(env["SAFE_BLOCK_MS"]) || 50_000);
   const mockToolUrl = options.upstreams["mockvendor"]?.toolUrl;
+  const announce = options.announce ?? ((line: string) => console.error(line));
+  const announced = new Set<string>();
 
   const tools: VendorTool[] = [
     openAiChatTool(env, fetchImpl),
@@ -108,6 +116,24 @@ export function createGateway(options: GatewayOptions) {
   const text = (value: unknown, isError = false): CallToolResult => ({
     content: [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }],
     isError,
+  });
+
+  /** The one clickable line CLI agents show (aisle-pipeline.md §12). */
+  const watchLine = (job: RecoveryJob) => `▶ Watch live: ${job.approveUrl}`;
+
+  /** What the in-app widget needs to mount the live viewer for this recovery. */
+  const withWatch = (result: CallToolResult, job: RecoveryJob): CallToolResult => ({
+    ...result,
+    structuredContent: {
+      ...(result.structuredContent ?? {}),
+      watch: {
+        recovery_id: job.id,
+        status: job.status,
+        url: job.approveUrl,
+        base_url: job.approveUrl.slice(0, job.approveUrl.indexOf("/r/")),
+        token: job.accessToken,
+      },
+    },
   });
 
   /** Ordinary errors go back exactly as the vendor sent them. */
@@ -176,14 +202,19 @@ export function createGateway(options: GatewayOptions) {
       arguments: args,
       blocker: classified.blocker,
     });
-    await progress(`Blocked on ${ns} (${classified.classification}). Aisle opened a recovery. Approve here: ${job.approveUrl}`);
+    log(`[aisle] recovery ${job.id} for ${name}`);
+    if (!announced.has(job.id)) {
+      announced.add(job.id);
+      announce(watchLine(job));
+    }
+    await progress(watchLine(job));
     return block(job, progress);
   }
 
   async function block(job: RecoveryJob, progress: Progress): Promise<CallToolResult> {
     const final = await coordinator.wait(job.id, safeBlockMs, (j) => {
       const last = j.events[j.events.length - 1];
-      return progress(last ? `${last.type} ${JSON.stringify(last.detail)}` : j.status);
+      return progress(last ? `${last.type} ${JSON.stringify(redactDetail(last.detail))}` : j.status);
     });
     return finish(final);
   }
@@ -192,13 +223,21 @@ export function createGateway(options: GatewayOptions) {
     switch (job.status) {
       case "awaiting_approval":
       case "running":
-        return text({
-          status: job.status === "running" ? "RECOVERY_RUNNING" : "AWAITING_APPROVAL",
-          recovery_id: job.id,
-          approve_url: job.approveUrl,
-          quote: job.quote?.reason,
-          next: "Call aisle__wait_for_recovery with this recovery_id. Do NOT re-run the original tool.",
-        });
+        return withWatch(
+          text({
+            status: job.status === "running" ? "RECOVERY_RUNNING" : "AWAITING_APPROVAL",
+            recovery_id: job.id,
+            display: watchLine(job),
+            watch_url: job.approveUrl,
+            approve_url: job.approveUrl,
+            quote: job.quote?.reason,
+            next:
+              `Show the user this line exactly as written: ${watchLine(job)} . They approve and watch the live browser there (it also opens on a phone). ` +
+              "Then call aisle__wait_for_recovery with this recovery_id. Do NOT re-run the original tool. " +
+              "In a GUI client, call aisle__watch_recovery to embed the live browser in the conversation.",
+          }),
+          job,
+        );
 
       case "resolved": {
         // Replay the EXACT same call. Never regenerate the request.
@@ -212,9 +251,10 @@ export function createGateway(options: GatewayOptions) {
       }
 
       case "dry_run_complete":
-        return text({
+        return withWatch(text({
           status: "DRY_RUN_COMPLETE",
           recovery_id: job.id,
+          watch_url: job.approveUrl,
           blocked_tool: job.checkpoint.tool,
           blocker: job.checkpoint.blocker.type,
           would_buy: job.quote && { product: job.quote.productId, price: job.quote.price, currency: job.quote.currency, reason: job.quote.reason },
@@ -222,12 +262,13 @@ export function createGateway(options: GatewayOptions) {
           note:
             "Aisle detected the billing wall and opened a Steel browser session on the locked billing origin. " +
             "No purchase was made, so the original call was not replayed and will still fail. Tell the user.",
-        });
+        }), job);
 
       case "staged_not_submitted":
-        return text({
+        return withWatch(text({
           status: "STAGED_NOT_SUBMITTED",
           recovery_id: job.id,
+          watch_url: job.approveUrl,
           blocked_tool: job.checkpoint.tool,
           staged: job.staged,
           cap: job.mandate?.maximumAmount,
@@ -235,23 +276,39 @@ export function createGateway(options: GatewayOptions) {
             "Aisle staged the checkout in a Steel browser and it matched the approved mandate, but real-money submit is " +
             "not enabled for this vendor (AISLE_REAL_PURCHASE_PROVIDERS). Nothing was charged and the original call was " +
             "not replayed. Tell the user.",
-        });
+        }), job);
 
       case "refused":
-        return text({ status: "REFUSED", recovery_id: job.id, reason: job.refusal?.reason, message: job.refusal?.message, detail: job.refusal?.detail });
+        return withWatch(text({ status: "REFUSED", recovery_id: job.id, reason: job.refusal?.reason, message: job.refusal?.message, detail: job.refusal?.detail }), job);
 
       case "rejected":
-        return text({ status: "REJECTED", recovery_id: job.id, message: "The user declined the purchase. Do not retry the original tool." });
+        return withWatch(text({ status: "REJECTED", recovery_id: job.id, message: "The user declined the purchase. Do not retry the original tool." }), job);
 
       case "failed":
-        return text({ status: "RECOVERY_FAILED", recovery_id: job.id, error: job.error }, true);
+        return withWatch(text({ status: "RECOVERY_FAILED", recovery_id: job.id, watch_url: job.approveUrl, error: job.error }, true), job);
     }
   }
 
   async function waitForRecovery(recoveryId: string, progress?: Progress): Promise<CallToolResult> {
     const job = coordinator.get(recoveryId);
     if (!job) return text(`Unknown recovery_id: ${recoveryId}`, true);
-    return block(job, progress ?? (async () => {}));
+    return withWatch(await block(job, progress ?? (async () => {})), job);
+  }
+
+  /** Returns at once with what the widget needs; the widget does the watching. */
+  function watchRecovery(recoveryId: string): CallToolResult {
+    const job = coordinator.get(recoveryId);
+    if (!job) return text(`Unknown recovery_id: ${recoveryId}`, true);
+    return withWatch(
+      text({
+        recovery_id: job.id,
+        status: job.status,
+        display: watchLine(job),
+        watch_url: job.approveUrl,
+        note: "The user sees the live browser, the timeline and the approval card. Call aisle__wait_for_recovery to wait for the outcome.",
+      }),
+      job,
+    );
   }
 
   async function spendReport(taskId: string): Promise<CallToolResult> {
@@ -264,7 +321,7 @@ export function createGateway(options: GatewayOptions) {
     });
   }
 
-  return { tools, coordinator, callTool, waitForRecovery, spendReport, mock };
+  return { tools, coordinator, callTool, waitForRecovery, watchRecovery, spendReport, mock };
 }
 
 export type Gateway = ReturnType<typeof createGateway>;
