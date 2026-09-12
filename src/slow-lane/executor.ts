@@ -1,45 +1,38 @@
 /**
- * Slow-lane orchestrator (the BrowserPurchaseWorker).
+ * Slow lane — the browser purchase worker (steel.md §20, aisle-pipeline.md §15, §18).
  *
- * Runs when the fast lane isn't viable (no WebMCP purchase tool). It drives a
- * real browser (Steel Cloud + Playwright over CDP) through the vendor's
- * checkout, then converges on the SAME outcome as the fast lane: a verified
- * entitlement + a resume token.
+ *   open session (restore profile) → navigate to the LOCKED billing origin →
+ *   guard → liveness probe → entitlement check → discover offers → stage →
+ *   Gate 1 (staged vs mandate) → claim + consume mandate → deterministic submit →
+ *   verify by balance delta (Gate 2) → save profile → receipts → resume record
  *
- *   open session (resume profile) → origin lock → discover offers →
- *   stage purchase → confirm (transactional) → verify entitlement →
- *   save profile → resume token
- *
- * Every deterministic step can fall back to the host-injected computer-use
- * agent when the page shape defeats the scripted selectors.
+ * A model is never in the submit, the gate, the origin decision, the mandate
+ * comparison, or the verification (§16.1). The computer-use resolver may only
+ * recover discovery and staging, within a per-job budget (§16.6).
  */
 
-import type {
-  Entitlement,
-  FastLaneRequest,
-  PurchaseVerification,
-  RecoveryResult,
-  Requirement,
-} from "../types.js";
+import type { RecoveryRequest, RecoveryResult, StagedCheckout } from "../types.js";
 import { assertPurchaseAllowed } from "../fast-lane/guards.js";
 import {
   InMemoryIdempotencyStore,
-  purchaseKey,
+  blocksNewPurchase,
+  purchaseKeyFor,
   type IdempotencyStore,
+  type PurchaseRecord,
 } from "../fast-lane/idempotency.js";
-import { buildResumeToken } from "../resume/resume-token.js";
+import { assertBalanceDelta } from "../fast-lane/verify.js";
+import { assertMatchesMandate } from "../mandate/mandate.js";
+import { loadLimits } from "../policy/policy.js";
+import { makeEntitlement, makeResult, resolveRequirement } from "../core/outcome.js";
 import {
   MandateRejectedError,
   PurchaseFailedError,
   PurchaseVerificationError,
+  ResolutionExhaustedError,
   TakeoverRequiredError,
 } from "../errors.js";
 import { originOf, type BrowserProvider, type BrowserSession } from "./browser.js";
-import {
-  DeterministicStepError,
-  selectOffer,
-  type VendorPurchaseAdapter,
-} from "./vendor-adapter.js";
+import { DeterministicStepError, selectOffer, type VendorPurchaseAdapter } from "./vendor-adapter.js";
 import type { ComputerUseAgent } from "./computer-use.js";
 import type { ProfileStore } from "./profiles.js";
 
@@ -48,206 +41,271 @@ export interface SlowLaneDeps {
   adapter: VendorPurchaseAdapter;
   /** Persisted auth profiles (Steel session context). Optional. */
   profiles?: ProfileStore;
-  /** Host-injected computer-use fallback (e.g. the OpenRouter agent). Optional. */
+  /** Computer-use resolver for discovery/staging only. Never used for submit. */
   agent?: ComputerUseAgent;
   /**
-   * Allow the computer-use agent to recover the FINAL confirm/pay step on a
-   * DeterministicStepError. Defaults to true (the tier-2 fallback covers every
-   * step). Set false for strict compliance where only deterministic code may
-   * submit. Either way, Gate 1 (staged-vs-mandate) and Gate 2 (balance delta)
-   * still run, so a wrong click can't become a wrong purchase.
+   * Max resolver model calls for this job (§16.6). Defaults to
+   * MAX_RESOLVER_CALLS_PER_JOB (5). Exceeded → RESOLUTION_EXHAUSTED.
    */
-  allowComputerUseOnConfirm?: boolean;
+  resolverBudget?: number;
   /**
    * Human-in-the-loop takeover for challenges the automation must not clear
-   * (3-DS, OTP, bank verification). Called with the live session; resolve once
-   * the human has cleared it, then verification decides the outcome.
+   * (3-DS, OTP, bank verification). Resolve once the human has cleared it; the
+   * balance re-read then decides the outcome.
    */
   onTakeover?: (ctx: TakeoverContext) => Promise<void>;
   store?: IdempotencyStore;
   emit?: (event: SlowLaneEvent) => void;
   now?: () => Date;
+  /** HMAC secret for mandate verification; defaults to process.env.MANDATE_SECRET. */
+  mandateSecret?: string;
 }
 
 export interface TakeoverContext {
   session: BrowserSession;
   taskId: string;
   reason: string;
-  sessionViewerUrl?: string;
+  sessionViewerUrl?: string | undefined;
 }
 
 export type SlowLaneEvent =
-  | { type: "STEEL_SESSION_CREATED"; sessionId: string; sessionViewerUrl?: string }
-  | { type: "PROFILE_LOADED"; provider: string }
+  | { type: "STEEL_SESSION_CREATED"; sessionId: string; sessionViewerUrl?: string | undefined }
   | { type: "PAGE_OPENED"; url: string }
   | { type: "PURCHASE_GUARDED" }
-  | { type: "ALREADY_COVERED"; balance: number }
-  | { type: "TAKEOVER_REQUESTED"; reason: string; sessionViewerUrl?: string }
-  | { type: "RECEIPT_CAPTURED"; count: number }
+  | { type: "PROFILE_RESTORED"; provider: string; fromSavedProfile: boolean; loggedIn: boolean | undefined }
+  | { type: "ENTITLEMENT_CHECKED"; balance: number; required: number }
+  | { type: "ALREADY_COVERED"; balance: number; required: number }
+  | { type: "PURCHASE_SKIPPED_DUPLICATE"; purchaseId: string; status: PurchaseRecord["status"] }
   | { type: "OFFERS_DISCOVERED"; count: number }
   | { type: "OFFER_SELECTED"; productId: string; price: number }
-  | { type: "PURCHASE_STAGED"; observedTotal: number }
-  | { type: "COMPUTER_USE_INVOKED"; instruction: string }
+  | { type: "RESOLVER_CALLED"; profile: "VISION"; instruction: string; callsUsed: number; budget: number }
+  | ({ type: "CHECKOUT_STAGED" } & StagedCheckout)
+  | { type: "MANDATE_COMPARISON_PASSED"; staged: number; cap: number }
+  | { type: "PURCHASE_STARTED"; lane: "slow" }
   | { type: "PURCHASE_SUBMITTED" }
-  | { type: "PURCHASE_SKIPPED_DUPLICATE"; purchaseId: string }
-  | { type: "PURCHASE_RESULT_UNKNOWN" }
-  | { type: "PURCHASE_COMPLETED"; transactionId?: string }
-  | { type: "ENTITLEMENT_VERIFIED"; balance?: number }
+  | { type: "TAKEOVER_REQUESTED"; reason: string; sessionViewerUrl?: string | undefined }
+  | { type: "TAKEOVER_RESOLVED" }
+  | { type: "PURCHASE_RESULT_UNKNOWN"; error: string }
+  | { type: "PURCHASE_COMPLETED"; transactionId?: string | undefined }
+  | { type: "ENTITLEMENT_VERIFIED"; before: number; after: number }
   | { type: "PROFILE_SAVED"; provider: string }
+  | { type: "RECEIPT_CAPTURED"; files: number }
   | { type: "RESUME_TOKEN_CREATED"; resumeTokenId: string }
   | { type: "SESSION_CLOSED" };
 
-export async function runSlowLane(
-  request: FastLaneRequest,
-  deps: SlowLaneDeps,
-): Promise<RecoveryResult> {
+export async function runSlowLane(request: RecoveryRequest, deps: SlowLaneDeps): Promise<RecoveryResult> {
   const { mandate, quote, checkpoint } = request;
   const store = deps.store ?? new InMemoryIdempotencyStore();
   const now = deps.now ?? (() => new Date());
   const emit = deps.emit ?? (() => {});
-  const requirement: Requirement =
-    request.requirement ?? { resource: "credits", amount: quote.purchase.credits };
+  const requirement = resolveRequirement(request);
+  const budget = deps.resolverBudget ?? loadLimits().maxResolverCallsPerJob;
+  let callsUsed = 0;
 
-  // Resume a saved profile so the vendor stays authenticated.
   const profile = deps.profiles ? await deps.profiles.load(mandate.provider) : undefined;
-  if (profile) emit({ type: "PROFILE_LOADED", provider: mandate.provider });
-
   const session: BrowserSession = await deps.provider.createSession(
     profile ? { provider: mandate.provider, profile } : { provider: mandate.provider },
   );
-  emit(
-    session.sessionViewerUrl === undefined
-      ? { type: "STEEL_SESSION_CREATED", sessionId: session.sessionId }
-      : {
-          type: "STEEL_SESSION_CREATED",
-          sessionId: session.sessionId,
-          sessionViewerUrl: session.sessionViewerUrl,
-        },
-  );
+  emit({ type: "STEEL_SESSION_CREATED", sessionId: session.sessionId, sessionViewerUrl: session.sessionViewerUrl });
 
-  // Run a deterministic step; on a DeterministicStepError, delegate the stuck
-  // sub-goal to the computer-use agent (if present) and retry the read once.
+  /** Run a read/staging step; on DeterministicStepError, spend resolver budget and retry once. */
   const runStep = async <T>(fn: () => Promise<T>, fallbackInstruction: string): Promise<T> => {
     try {
       return await fn();
     } catch (err) {
-      if (err instanceof DeterministicStepError && deps.agent) {
-        const instruction = err.recoveryInstruction || fallbackInstruction;
-        emit({ type: "COMPUTER_USE_INVOKED", instruction });
-        const outcome = await deps.agent.run(session.control, instruction);
-        if (!outcome.success) throw err;
-        return await fn();
+      if (!(err instanceof DeterministicStepError) || !deps.agent) throw err;
+      const remaining = budget - callsUsed;
+      if (remaining <= 0) {
+        throw new ResolutionExhaustedError(`Resolver budget of ${budget} calls exhausted: ${err.message}`);
       }
-      throw err;
+      const instruction = err.recoveryInstruction || fallbackInstruction;
+      emit({ type: "RESOLVER_CALLED", profile: "VISION", instruction, callsUsed, budget });
+      const outcome = await deps.agent.run(session.control, instruction, { maxSteps: remaining });
+      callsUsed += Math.max(1, outcome.steps);
+      if (!outcome.success) {
+        if (callsUsed >= budget) {
+          throw new ResolutionExhaustedError(`Resolver budget of ${budget} calls exhausted: ${err.message}`);
+        }
+        throw err;
+      }
+      return await fn();
     }
   };
 
+  const readBalance = async (): Promise<{ balance: number | undefined; accountId: string | undefined; resource: string; transactionId: string | undefined }> => {
+    const v = await deps.adapter.verifyEntitlement(session.page, requirement);
+    return {
+      balance: v.balanceAfter,
+      accountId: v.accountId,
+      resource: v.resource ?? requirement.resource,
+      transactionId: v.transactionId,
+    };
+  };
+
+  const finish = async (
+    reading: { balance: number; accountId: string | undefined; resource: string },
+    pid: string | null,
+    alreadyCovered: boolean,
+  ): Promise<RecoveryResult> => {
+    const entitlement = makeEntitlement(mandate, reading, now());
+    const result = makeResult({ lane: "slow", purchaseId: pid, entitlement, request, requirement, alreadyCovered, now: now() });
+
+    // Persist the authenticated identity only on a verified outcome.
+    if (deps.profiles) {
+      await deps.profiles.save(await session.saveProfile());
+      emit({ type: "PROFILE_SAVED", provider: mandate.provider });
+    }
+    if (session.listReceiptFiles && !alreadyCovered) {
+      const files = await session.listReceiptFiles().catch(() => [] as string[]);
+      if (files.length > 0) {
+        result.receiptFileIds = files;
+        emit({ type: "RECEIPT_CAPTURED", files: files.length });
+      }
+    }
+    if (session.sessionViewerUrl) result.sessionViewerUrl = session.sessionViewerUrl;
+    emit({ type: "RESUME_TOKEN_CREATED", resumeTokenId: result.resumeToken.id });
+    return result;
+  };
+
   try {
-    // 1. Open the task-authorized origin. The origin comes from the mandate,
-    //    never from tool output or page content.
-    await session.page.goto(mandate.origin);
+    // 1. Navigate to the LOCKED billing origin — from the checkpoint's config,
+    //    never from a 402 body, a page link, or a model.
+    await session.page.goto(checkpoint.origin.billingOrigin);
     emit({ type: "PAGE_OPENED", url: session.page.currentUrl() });
 
-    // 2. Origin lock + provider + ceiling guards (shared with the fast lane).
+    // 2. Guards: signature, expiry, origin lock (redirect away ⇒ reject), cap.
     assertPurchaseAllowed({
+      checkpoint,
       mandate,
       quote,
       actualOrigin: originOf(session.page.currentUrl()),
       actualProvider: session.provider,
+      lane: "slow",
       now: now(),
+      ...(deps.mandateSecret === undefined ? {} : { mandateSecret: deps.mandateSecret }),
     });
     if (!deps.adapter.canHandle(session.page.currentUrl())) {
-      throw new PurchaseFailedError(
-        `Adapter '${deps.adapter.provider}' cannot handle ${session.page.currentUrl()}.`,
-      );
+      throw new PurchaseFailedError(`Adapter '${deps.adapter.provider}' cannot handle ${session.page.currentUrl()}.`);
     }
     emit({ type: "PURCHASE_GUARDED" });
 
-    // 3. Read the current balance first. Enables the §8 ALREADY_COVERED
-    //    short-circuit AND anchors the §17 Gate-2 delta check below.
-    const beforeCheck = await deps.adapter.verifyEntitlement(session.page, requirement);
-    const balanceBefore = beforeCheck.balanceAfter;
-    if (balanceBefore !== undefined && balanceBefore >= requirement.amount) {
-      emit({ type: "ALREADY_COVERED", balance: balanceBefore });
-      return await finish({ pid: `pur_${mandate.mandateId}`, verification: beforeCheck, sufficient: true });
+    // 3. Liveness probe BEFORE anything that matters (§15.2).
+    const loggedIn = deps.adapter.ensureLoggedIn ? await deps.adapter.ensureLoggedIn(session.page) : undefined;
+    if (profile || loggedIn !== undefined) {
+      emit({ type: "PROFILE_RESTORED", provider: mandate.provider, fromSavedProfile: profile !== undefined, loggedIn });
+    }
+    if (loggedIn === false) {
+      throw new PurchaseFailedError("Not authenticated with the vendor and re-authentication failed.", "NOT_AUTHENTICATED");
     }
 
-    // 4. Discover offers and bind execution to the approved product.
+    const key = purchaseKeyFor(mandate, requirement);
+    const purchaseId = `pur_${mandate.mandateId}`;
+
+    const resolveExisting = async (existing: PurchaseRecord): Promise<RecoveryResult> => {
+      emit({ type: "PURCHASE_SKIPPED_DUPLICATE", purchaseId: existing.purchaseId, status: existing.status });
+      const current = await readBalance();
+      if (current.balance === undefined || current.balance < requirement.amount) {
+        throw new PurchaseVerificationError(
+          `A previous purchase attempt (${existing.status}) exists for this requirement but the balance ` +
+            `(${current.balance ?? "unreadable"}) does not cover ${requirement.amount}. Not buying again; needs human review.`,
+        );
+      }
+      if (existing.status !== "VERIFIED") await store.update(key, { status: "VERIFIED" });
+      return finish({ ...current, balance: current.balance }, existing.purchaseId, false);
+    };
+
+    const existing = await store.get(key);
+    if (blocksNewPurchase(existing)) return await resolveExisting(existing);
+
+    // 4. Entitlement check. Also the Gate 2 baseline, so it must be readable.
+    const before = await readBalance();
+    if (before.balance === undefined) {
+      throw new PurchaseFailedError(
+        "Could not read the balance before purchasing; verification would be impossible, so nothing was bought.",
+        "BALANCE_READ_FAILED",
+      );
+    }
+    const balanceBefore = before.balance;
+    emit({ type: "ENTITLEMENT_CHECKED", balance: balanceBefore, required: requirement.amount });
+    if (balanceBefore >= requirement.amount) {
+      emit({ type: "ALREADY_COVERED", balance: balanceBefore, required: requirement.amount });
+      return await finish({ ...before, balance: balanceBefore }, null, true);
+    }
+
+    // 5. Discover offers and bind to the approved purchase.
     const offers = await runStep(
       () => deps.adapter.discoverOffers(session.page, requirement),
-      "Open the pricing page and list the available credit packages.",
+      "Open the pricing page and make the available credit packages visible.",
     );
     emit({ type: "OFFERS_DISCOVERED", count: offers.length });
 
-    const offer = selectOffer(offers, quote, requirement);
+    const offer = selectOffer(offers, mandate, requirement);
     if (!offer) {
       throw new PurchaseFailedError(
-        `No offer grants the required ${requirement.amount} ${requirement.resource}.`,
+        `No one-time offer grants the required ${requirement.amount} ${requirement.resource}.`,
+        "NO_VIABLE_OFFER",
       );
     }
-    // Never spend above the mandate ceiling, and never above what was approved.
-    if (offer.price > mandate.maximumAmount) {
+    if (offer.price > quote.price || offer.price > mandate.maximumAmount) {
       throw new MandateRejectedError(
-        `Selected price ${offer.price} exceeds mandate maximum ${mandate.maximumAmount}.`,
+        `Selected price ${offer.price} exceeds the approved quote ${quote.price} or the mandate cap ${mandate.maximumAmount}.`,
+        "AMOUNT_EXCEEDS_MANDATE",
       );
     }
-    if (offer.price > quote.purchase.price) {
-      throw new MandateRejectedError(
-        `Selected price ${offer.price} exceeds the approved quote ${quote.purchase.price}.`,
-      );
+    if (offer.currency !== mandate.currency) {
+      throw new MandateRejectedError("Selected offer currency does not match the mandate.", "CURRENCY_MISMATCH");
     }
     emit({ type: "OFFER_SELECTED", productId: offer.productId, price: offer.price });
 
-    // 4. Stage the checkout (do not confirm). Re-check the observed total in case
-    //    the checkout page inflates the price.
+    // 6. Stage the checkout. Do not submit.
     const staged = await runStep(
       () => deps.adapter.stagePurchase(session.page, offer),
-      `Select the '${offer.label}' package and proceed to checkout.`,
+      `Select the '${offer.label}' package and proceed to the checkout page. Do not pay.`,
     );
-    emit({ type: "PURCHASE_STAGED", observedTotal: staged.observedTotal });
-    if (staged.observedTotal > mandate.maximumAmount) {
-      throw new MandateRejectedError(
-        `Checkout total ${staged.observedTotal} exceeds mandate maximum ${mandate.maximumAmount}.`,
-      );
-    }
-
-    // 5. Idempotency: claim the purchase before confirming.
-    const key = purchaseKey(mandate, quote);
-    const purchaseId = `pur_${mandate.mandateId}`;
-    const claim = await store.putIfAbsent({
-      idempotencyKey: key,
-      mandateId: mandate.mandateId,
-      purchaseId,
-      status: "PENDING",
+    emit({
+      type: "CHECKOUT_STAGED",
+      lineItem: staged.lineItem,
+      amount: staged.amount,
+      currency: staged.currency,
+      billingPeriod: staged.billingPeriod,
+      autoRenew: staged.autoRenew,
     });
-    if (claim.status === "COMPLETED") {
-      emit({ type: "PURCHASE_SKIPPED_DUPLICATE", purchaseId: claim.purchaseId });
-      const current = await deps.adapter.verifyEntitlement(session.page, requirement);
-      const sufficient = current.confirmed || (current.balanceAfter ?? -1) >= requirement.amount;
-      return await finish({ pid: claim.purchaseId, verification: current, sufficient });
+
+    // 7. GATE 1 — staged checkout vs signed mandate, field by field. Aborts before any spend.
+    assertMatchesMandate(staged, mandate);
+    emit({ type: "MANDATE_COMPARISON_PASSED", staged: staged.amount, cap: mandate.maximumAmount });
+
+    // 8. Claim the requirement and consume the single-use mandate.
+    const claim = await store.claim({ idempotencyKey: key, mandateId: mandate.mandateId, purchaseId, status: "PENDING" });
+    if (!claim.claimed) return await resolveExisting(claim.record);
+    if (!(await store.consumeMandate(mandate.mandateId))) {
+      await store.update(key, { status: "FAILED" });
+      throw new MandateRejectedError(`Mandate ${mandate.mandateId} was already used.`, "MANDATE_ALREADY_USED");
     }
 
-    // 7. Confirm — transactional. Tier-2 fallback: on a DeterministicStepError
-    //    the (OpenRouter) computer-use agent recovers the step, unless disabled.
-    //    A challenge (3-DS/OTP) raises TakeoverRequiredError → human takeover.
+    // 9. Deterministic submit. Never the model path.
+    emit({ type: "PURCHASE_STARTED", lane: "slow" });
     emit({ type: "PURCHASE_SUBMITTED" });
-    const confirmInstruction =
-      "Click the final confirm/pay button to complete the already-authorized purchase. " +
-      "Do not change any amount or product.";
-    const allowConfirmFallback = deps.allowComputerUseOnConfirm ?? true;
     try {
-      if (allowConfirmFallback) {
-        await runStep(() => deps.adapter.confirmPurchase(session.page, staged), confirmInstruction);
-      } else {
-        await deps.adapter.confirmPurchase(session.page, staged);
-      }
+      const confirmation = await deps.adapter.confirmPurchase(session.page, staged);
+      await store.update(key, {
+        status: "SUBMITTED",
+        ...(confirmation.transactionId === undefined ? {} : { transactionId: confirmation.transactionId }),
+      });
+      emit({ type: "PURCHASE_COMPLETED", transactionId: confirmation.transactionId });
     } catch (err) {
-      if (err instanceof TakeoverRequiredError) {
-        emit(
-          session.sessionViewerUrl === undefined
-            ? { type: "TAKEOVER_REQUESTED", reason: err.message }
-            : { type: "TAKEOVER_REQUESTED", reason: err.message, sessionViewerUrl: session.sessionViewerUrl },
+      if (err instanceof DeterministicStepError) {
+        // The confirm control was never found, so nothing was submitted.
+        await store.update(key, { status: "FAILED" });
+        throw new PurchaseFailedError(
+          `Confirm control not found; nothing was submitted. The final submit is never delegated to a model. (${err.message})`,
+          "CONFIRM_NOT_FOUND",
         );
+      }
+      // From here money may have moved. Never retry; decide from observed state.
+      await store.update(key, { status: "UNKNOWN" });
+      if (err instanceof TakeoverRequiredError) {
+        emit({ type: "TAKEOVER_REQUESTED", reason: err.message, sessionViewerUrl: session.sessionViewerUrl });
         if (!deps.onTakeover) throw err;
         await deps.onTakeover({
           session,
@@ -255,94 +313,31 @@ export async function runSlowLane(
           reason: err.message,
           sessionViewerUrl: session.sessionViewerUrl,
         });
-        // Human cleared the challenge; verification below decides the outcome.
+        emit({ type: "TAKEOVER_RESOLVED" });
       } else {
-        emit({ type: "PURCHASE_RESULT_UNKNOWN" });
-        // fall through to authoritative verification
+        emit({ type: "PURCHASE_RESULT_UNKNOWN", error: String(err) });
       }
     }
 
-    // 8. Verify — §17 Gate 2: prove the balance rose by (at least) what the
-    //    selected offer grants, not merely that it now clears the requirement.
-    const after = await deps.adapter.verifyEntitlement(session.page, requirement);
-    const balanceAfter = after.balanceAfter;
-    const granted = offer.units;
-    const sufficient =
-      balanceBefore !== undefined && balanceAfter !== undefined
-        ? balanceAfter >= balanceBefore + granted // delta (preferred)
-        : balanceAfter !== undefined
-          ? balanceAfter >= requirement.amount // fallback: absolute
-          : after.confirmed; // last resort: adapter's own flag
-    return await finish({ pid: purchaseId, verification: after, sufficient, idemKey: key });
-
-    // ---- local helper ----
-    async function finish(args: {
-      pid: string;
-      verification: PurchaseVerification;
-      sufficient: boolean;
-      idemKey?: string;
-    }): Promise<RecoveryResult> {
-      const { pid, verification, sufficient, idemKey } = args;
-      if (!sufficient) {
-        if (idemKey) await store.update(idemKey, { status: "FAILED" });
-        throw new PurchaseVerificationError(
-          `Entitlement not confirmed after purchase (balance ${verification.balanceAfter ?? "unknown"}, ` +
-            `before ${balanceBefore ?? "unknown"}, need ${requirement.amount}).`,
-        );
-      }
-      if (idemKey) {
-        await store.update(
-          idemKey,
-          verification.transactionId === undefined
-            ? { status: "COMPLETED" }
-            : { status: "COMPLETED", transactionId: verification.transactionId },
-        );
-        emit({ type: "PURCHASE_COMPLETED", transactionId: verification.transactionId });
-      }
-
-      const entitlement: Entitlement = {
-        provider: mandate.provider,
-        accountId: verification.accountId ?? "unknown",
-        resource: verification.resource ?? requirement.resource,
-        balance: verification.balanceAfter ?? requirement.amount,
-        status: "active",
-        lastVerifiedAt: now().toISOString(),
-      };
-      emit({ type: "ENTITLEMENT_VERIFIED", balance: entitlement.balance });
-
-      // Persist the (now-authenticated) profile for next time.
-      if (deps.profiles) {
-        const saved = await session.saveProfile();
-        await deps.profiles.save(saved);
-        emit({ type: "PROFILE_SAVED", provider: mandate.provider });
-      }
-
-      // Capture receipt/invoice/license files from the Steel session.
-      let receiptFileIds: string[] = [];
-      if (session.listReceiptFiles) {
-        try {
-          receiptFileIds = await session.listReceiptFiles();
-        } catch {
-          receiptFileIds = [];
-        }
-        if (receiptFileIds.length > 0) {
-          emit({ type: "RECEIPT_CAPTURED", count: receiptFileIds.length });
-        }
-      }
-
-      const resumeToken = buildResumeToken(checkpoint, entitlement, requirement.amount, now());
-      emit({ type: "RESUME_TOKEN_CREATED", resumeTokenId: resumeToken.id });
-
-      const result: RecoveryResult = {
-        lane: "slow",
-        purchaseId: pid,
-        verifiedEntitlement: entitlement,
-        resumeToken,
-      };
-      if (session.sessionViewerUrl) result.sessionViewerUrl = session.sessionViewerUrl;
-      if (receiptFileIds.length > 0) result.receiptFileIds = receiptFileIds;
-      return result;
+    // 10. GATE 2 — verify by reading the balance, not the receipt.
+    const after = await readBalance();
+    if (after.balance === undefined) {
+      // Record stays SUBMITTED/UNKNOWN, which blocks any re-buy for this requirement.
+      throw new PurchaseVerificationError("Could not read the balance after purchase; result unknown. Not retrying.");
     }
+    try {
+      assertBalanceDelta(balanceBefore, after.balance, offer.unitsGranted);
+    } catch (err) {
+      await store.update(key, { status: "FAILED" });
+      throw err;
+    }
+    await store.update(key, {
+      status: "VERIFIED",
+      ...(after.transactionId === undefined ? {} : { transactionId: after.transactionId }),
+    });
+    emit({ type: "ENTITLEMENT_VERIFIED", before: balanceBefore, after: after.balance });
+
+    return await finish({ ...after, balance: after.balance }, purchaseId, false);
   } finally {
     await session.close();
     emit({ type: "SESSION_CLOSED" });

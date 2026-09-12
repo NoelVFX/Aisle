@@ -1,20 +1,16 @@
 /**
- * Shared contracts for the top-up-agent fast lane.
+ * Shared contracts — the contract between lanes.
  *
- * The top-up-agent runs *inside* a host coding agent (Hermes / Claude / Codex).
- * The host owns the user's task and the MCP transport; this module is invoked
- * only after a purchase has already been approved (mandate signed), and its job
- * is narrow:
+ * These mirror `docs/aisle-pipeline.md` §6–§11 and the scaffold's
+ * `packages/types`. Agree them once and stop renegotiating them.
  *
- *   1. Detect whether the vendor exposes WebMCP purchase tools.
- *   2. If so, call those tools to buy the minimum entitlement.
- *   3. Verify the entitlement actually landed.
- *   4. Hand back a resume token so the host can replay the failed tool call.
+ * Pipeline (aisle-pipeline.md §3):
+ *   402 → classify (Blocker) → freeze TaskCheckpoint (origin from CONFIG)
+ *   → entitlement check → Quote → policy gate → signed PurchaseMandate
+ *   → one human tap → fast lane | slow lane → verify entitlement → replay.
  */
 
-// ---------------------------------------------------------------------------
-// Failure / blocker vocabulary (classified upstream; we only consume it)
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------- blockers (§6)
 
 export type BlockerType =
   | "INSUFFICIENT_CREDITS"
@@ -24,99 +20,204 @@ export type BlockerType =
   | "PAYMENT_REQUIRED"
   | "UNKNOWN";
 
-// ---------------------------------------------------------------------------
-// Task checkpoint — the execution position we must restore
-// ---------------------------------------------------------------------------
-
-export interface ToolCall {
-  /** Stable id of the tool call that failed, used for idempotent replay. */
-  id: string;
-  tool: string;
-  arguments: unknown;
+export interface Blocker {
+  type: BlockerType;
+  /** "image_credits" | "usd_balance" | "seats" | "plan" … */
+  resource: string;
+  /** Parsed only if the vendor actually told us. */
+  required?: number;
+  /** "low" = body unavailable (e.g. evicted on the web path), classified on status alone. */
+  confidence: "high" | "low";
+  raw: unknown;
 }
 
-export interface TaskCheckpoint {
-  taskId: string;
-  agentId: string;
-  originalGoal: string;
-  /** The exact call that hit the paywall; replayed verbatim on resume. */
-  failedToolCall: ToolCall;
-  origin: PurchaseOrigin;
-  failure: {
-    type: BlockerType;
-    rawError: unknown;
-  };
-}
+// ---------------------------------------------------------------- origin (§2.3)
 
-// ---------------------------------------------------------------------------
-// Origin lock — a hard security boundary
-// ---------------------------------------------------------------------------
-
-export interface PurchaseOrigin {
+/**
+ * The single most important invariant in this codebase: origins come from
+ * configuration (upstreams.json) or from an enrollment row. NEVER from a tool
+ * result, a page, an error body, or a model.
+ */
+export interface LockedOrigin {
   provider: string;
-  /** Canonical origin authorized by task configuration, e.g. https://api.higgsfield.ai */
+  /** Where the API 402s from. */
   canonicalOrigin: string;
-  /** Only "task_configuration" is ever trusted to authorize an origin. */
-  source: "task_configuration";
+  /** Where purchases happen. The only origin money may move to. */
+  billingOrigin: string;
+  source: "task_configuration" | "enrollment";
   lockedAt: string;
 }
 
-// ---------------------------------------------------------------------------
-// Quote + Mandate (produced upstream by the quote engine / approval flow)
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------- checkpoint (§7)
+
+export interface TaskCheckpoint {
+  taskId: string;
+  agentId: string | null;
+  toolCallId: string;
+  surface: "cli" | "web";
+
+  /** null on CLI paths — you don't get it, don't fake it. */
+  originalGoal: string | null;
+  tool: string;
+  /** The EXACT arguments of the blocked call; replayed verbatim. */
+  arguments: unknown;
+  /** sha256 of canonical JSON (sorted keys, no whitespace). */
+  argumentsHash: string;
+
+  origin: LockedOrigin;
+  blocker: Blocker;
+  createdAt: string;
+}
+
+// ---------------------------------------------------------------- entitlement (§8)
+
+/** A cache, never truth. Always re-read the vendor before and after buying. */
+export interface Entitlement {
+  userId: string;
+  provider: string;
+  /** Distinguishes infra-openrouter from user-openrouter (§16.5). */
+  accountId: string | null;
+  resource: string;
+  balance: number | null;
+  plan: string | null;
+  seatsUsed: number | null;
+  seatsTotal: number | null;
+  status: "active" | "expired" | "cancelled";
+  verifiedAt: string;
+}
+
+// ---------------------------------------------------------------- quote (§9)
+
+/** A purchasable package, from the registry, JSON-LD, or the pricing page. */
+export interface PurchaseOffer {
+  productId: string;
+  label: string;
+  unitsGranted: number;
+  price: number;
+  currency: string;
+  billing: "one_time" | "subscription";
+  autoRenew: boolean;
+}
 
 export interface Quote {
   provider: string;
-  purchase: {
-    productId: string;
-    quantity: number;
-    /** Credits (or seats/units) the purchase is expected to add. */
-    credits: number;
-    price: number;
-    currency: string;
-  };
+  /** From the LOCKED origin, never from the page. */
+  billingOrigin: string;
+  productId: string;
+  quantity: number;
+  unitsGranted: number;
+  price: number;
+  currency: string;
   billing: "one_time" | "subscription";
   autoRenew: boolean;
+  /** User-facing prose, generated in the engine not the UI. */
   reason: string;
 }
 
-/** Single-use authorization. The worker receives this, never a card number. */
+/** What the task needs, in vendor-agnostic terms, to unblock. */
+export interface Requirement {
+  resource: string;
+  /** Minimum units that must exist after the purchase. */
+  amount: number;
+}
+
+// ---------------------------------------------------------------- policy (§10)
+
+export interface Limits {
+  perPurchase: number;
+  perTask: number;
+  perDay: number;
+  maxAttemptsPerTask: number;
+  maxResolverCallsPerJob: number;
+}
+
+export interface SpendState {
+  task: number;
+  day: number;
+  attempts: number;
+}
+
+export type RefusalReason =
+  | "ORIGIN_VIOLATION"
+  | "PER_PURCHASE_CEILING"
+  | "PER_TASK_CEILING"
+  | "PER_DAY_CEILING"
+  | "CIRCUIT_OPEN"
+  | "NO_VIABLE_OFFER"
+  | "RESOLUTION_EXHAUSTED"
+  | "INFRA_BLOCKED";
+
+export interface Refusal {
+  ok: false;
+  reason: RefusalReason;
+  /** Always carries cumulative spend where relevant. "Blocked" alone is a dead end. */
+  detail: Record<string, unknown>;
+  message: string;
+}
+
+export type GateResult = { ok: true } | Refusal;
+
+// ---------------------------------------------------------------- mandate (§11)
+
+/** Single-use, HMAC-signed authorization. The worker receives this, never a card number. */
 export interface PurchaseMandate {
   mandateId: string;
   taskId: string;
-  /** Must equal the WebMCP session's origin before any purchase is made. */
-  origin: string;
+  recoveryJobId: string;
+  userId: string;
+
   provider: string;
+  billingOrigin: string;
   productId: string;
+  quantity: number;
+  unitsGranted: number;
+
+  /** A CAP, not a price. Tax and FX move the real number. */
   maximumAmount: number;
   currency: string;
   billingType: "one_time";
   autoRenew: false;
+
+  /** 10 minutes. Approval is a live decision. */
   expiresAt: string;
   nonce: string;
-  /** Opaque signature; verified by `verifyMandateSignature` (stubbed for the demo). */
+  /** HMAC-SHA256 over the canonical serialization of every other field. */
   signature: string;
 }
 
-// ---------------------------------------------------------------------------
-// Entitlement
-// ---------------------------------------------------------------------------
-
-export interface Entitlement {
-  provider: string;
-  accountId: string;
-  resource: string;
-  /** Current balance of the resource after verification. */
-  balance: number;
-  plan?: string;
-  status: "active" | "expired" | "cancelled";
-  lastVerifiedAt: string;
+/** What the checkout page says, read immediately before submit (§18 Gate 1). */
+export interface StagedCheckout {
+  lineItem: string;
+  amount: number;
+  currency: string;
+  billingPeriod: "one_time" | "subscription";
+  autoRenew: boolean;
 }
 
-// ---------------------------------------------------------------------------
-// Resume token — the handoff artifact back to the host agent
-// ---------------------------------------------------------------------------
+/** A purchase brought right up to the point of confirmation, not yet executed. */
+export interface StagedPurchase extends StagedCheckout {
+  offer: PurchaseOffer;
+  /** Opaque adapter state needed to confirm (e.g. a checkout URL). */
+  checkoutRef: string;
+}
 
+/** The result of reading authoritative account state back from the vendor. */
+export interface PurchaseVerification {
+  confirmed: boolean;
+  transactionId?: string;
+  balanceAfter?: number;
+  accountId?: string;
+  resource?: string;
+  reason?: string;
+}
+
+// ---------------------------------------------------------------- resume (§19, §20)
+
+/**
+ * Internal resume record. Per §2.2 the blocked MCP call blocks and the agent
+ * never sees this — the gateway uses it as the `resume:{taskId}:{toolCallId}`
+ * idempotency key and replays `resumeAction` with the exact same arguments.
+ */
 export interface ResumeToken {
   id: string;
   taskId: string;
@@ -135,82 +236,57 @@ export interface ResumeToken {
   expiresAt: string;
 }
 
-// ---------------------------------------------------------------------------
-// Fast-lane request / result (this module's public boundary)
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------- lanes (§13–§15)
 
-export interface FastLaneRequest {
+/** Both lanes accept the same request: an approved mandate for a frozen checkpoint. */
+export interface RecoveryRequest {
   checkpoint: TaskCheckpoint;
   quote: Quote;
   mandate: PurchaseMandate;
   /**
-   * The minimum the task actually needs (not the package size). Used by the
-   * slow lane to pick the minimum offer and to set the verification threshold.
-   * Defaults to the quoted package's units when omitted.
+   * The minimum the task actually needs (not the package size). Defaults to
+   * `{ resource: checkpoint.blocker.resource, amount: checkpoint.blocker.required ?? quote.unitsGranted }`.
    */
   requirement?: Requirement;
 }
 
-/** Both lanes accept the same request. */
-export type RecoveryRequest = FastLaneRequest;
-
-export interface FastLaneResult {
-  purchaseId: string;
-  verifiedEntitlement: Entitlement;
-  resumeToken: ResumeToken;
-}
+/** @deprecated Use `RecoveryRequest`. Kept so existing host code keeps compiling. */
+export type FastLaneRequest = RecoveryRequest;
 
 /**
  * Both lanes converge on the same result shape. The host doesn't care whether
- * recovery happened via WebMCP (fast) or a browser (slow) — it gets a verified
- * entitlement and a resume token either way.
+ * recovery happened via a purchase tool (fast) or a browser (slow).
  */
-export type RecoveryResult = FastLaneResult & {
+export interface RecoveryResult {
   lane: "fast" | "slow";
+  /** null when nothing was bought (ALREADY_COVERED). */
+  purchaseId: string | null;
+  verifiedEntitlement: Entitlement;
+  resumeToken: ResumeToken;
+  /** True when the balance already cleared the requirement and nothing was bought (§8). */
+  alreadyCovered: boolean;
   /** Steel live/replay viewer URL — part of the audit trail (slow lane). */
   sessionViewerUrl?: string;
   /** Receipt/invoice/license files captured from the Steel session (slow lane). */
   receiptFileIds?: string[];
-};
-
-// ---------------------------------------------------------------------------
-// Slow-lane (browser) domain types
-// ---------------------------------------------------------------------------
-
-/** What the task needs, in vendor-agnostic terms, to unblock. */
-export interface Requirement {
-  resource: string;
-  /** Minimum units (credits/seats/etc.) that must exist after the purchase. */
-  amount: number;
 }
 
-/** A purchasable package discovered on the vendor's pricing surface. */
-export interface PurchaseOffer {
-  productId: string;
-  label: string;
-  /** Units the package grants (credits, seats, …). */
-  units: number;
-  price: number;
-  currency: string;
-  billing: "one_time" | "subscription";
-}
+/** @deprecated Use `RecoveryResult`. */
+export type FastLaneResult = RecoveryResult;
 
-/** A purchase brought right up to the point of confirmation, not yet executed. */
-export interface StagedPurchase {
-  offer: PurchaseOffer;
-  /** Opaque adapter state needed to confirm (e.g. a checkout URL / element ref). */
-  checkoutRef: string;
-  /** What the vendor's checkout currently says the total is. */
-  observedTotal: number;
-  observedCurrency: string;
-}
+// ---------------------------------------------------------------- events (§22)
 
-/** The result of confirming the purchase actually landed on the account. */
-export interface PurchaseVerification {
-  confirmed: boolean;
-  transactionId?: string;
-  balanceAfter?: number;
-  accountId?: string;
-  resource?: string;
-  reason?: string;
-}
+export type AisleEventType =
+  | "TASK_CREATED" | "TOOL_CALL_STARTED" | "TOOL_CALL_FAILED"
+  | "RECOVERY_CREATED" | "CHECKPOINT_FROZEN"
+  | "ENTITLEMENT_CHECK_STARTED" | "ENTITLEMENT_CHECKED" | "ALREADY_COVERED"
+  | "QUOTE_CREATED" | "POLICY_PASSED" | "POLICY_REFUSED"
+  | "MANDATE_SIGNED" | "APPROVAL_REQUESTED" | "APPROVAL_GRANTED" | "APPROVAL_REJECTED"
+  | "PURCHASE_STARTED" | "STEEL_SESSION_CREATED" | "PROFILE_RESTORED"
+  | "RESOLVER_CALLED" | "CHECKOUT_STAGED" | "MANDATE_COMPARISON_PASSED"
+  | "PURCHASE_SUBMITTED" | "TAKEOVER_REQUESTED" | "TAKEOVER_RESOLVED"
+  | "PURCHASE_COMPLETED" | "PURCHASE_RESULT_UNKNOWN" | "RECEIPT_CAPTURED"
+  | "ENTITLEMENT_VERIFIED" | "TRACE_EXPORTED"
+  | "TOOL_CALL_RETRIED" | "TOOL_CALL_SUCCEEDED" | "TASK_RESUMED"
+  | "ADAPTER_RECORDED" | "INFRA_CREDITS_EXHAUSTED"
+  | "VIEWER_FROZEN" | "VIEWER_UNFROZEN" | "ENROLLMENT_SUGGESTED";

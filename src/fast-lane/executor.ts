@@ -1,140 +1,157 @@
 /**
- * Fast-lane orchestrator.
+ * Fast lane (aisle-pipeline.md §13, §14).
  *
- * The whole of this module's responsibility, in order:
+ *   detect purchase tools → guard → entitlement check (§8) → claim + consume
+ *   mandate → purchase → verify by balance delta (§18) → resume record
  *
- *   detect WebMCP  →  guard  →  (idempotency)  →  purchase  →  verify  →  resume token
- *
- * If WebMCP isn't available it throws `NoFastLaneError` so the host can fall
- * back to the slow lane (Steel + Playwright), which lives elsewhere.
+ * Seconds, not minutes — but the fast lane does not get to skip verification.
+ * If no purchase tool exists it throws `NoFastLaneError` so the router falls
+ * back to the slow lane.
  */
 
-import type { FastLaneRequest, FastLaneResult } from "../types.js";
+import type { RecoveryRequest, RecoveryResult } from "../types.js";
 import type { WebMcpSession } from "../webmcp/session.js";
-import { detectWebMcp } from "../webmcp/detector.js";
+import { detectWebMcp, type FastLaneCapability } from "../webmcp/detector.js";
 import { assertPurchaseAllowed } from "./guards.js";
 import { executePurchase, readBalance } from "./purchase.js";
-import { verifyEntitlement } from "./verify.js";
-import { buildResumeToken } from "../resume/resume-token.js";
+import { assertBalanceDelta } from "./verify.js";
 import {
   InMemoryIdempotencyStore,
-  purchaseKey,
+  blocksNewPurchase,
+  purchaseKeyFor,
   type IdempotencyStore,
+  type PurchaseRecord,
 } from "./idempotency.js";
-import { NoFastLaneError } from "../errors.js";
+import { MandateRejectedError, NoFastLaneError, PurchaseFailedError, PurchaseVerificationError } from "../errors.js";
+import { makeEntitlement, makeResult, resolveRequirement } from "../core/outcome.js";
 
 export interface FastLaneDeps {
-  /** Live WebMCP connection to the vendor, supplied by the host agent. */
+  /** Live connection to the vendor's purchase tools, supplied by the gateway/host. */
   session: WebMcpSession;
-  /** Idempotency persistence. Defaults to in-memory (demo only). */
+  /** Idempotency + mandate consumption. Defaults to in-memory (demo only). */
   store?: IdempotencyStore;
-  /** Optional event sink for the shared timeline / UI. */
+  /** Event sink for the shared timeline. */
   emit?: (event: FastLaneEvent) => void;
   now?: () => Date;
+  /** HMAC secret for mandate verification; defaults to process.env.MANDATE_SECRET. */
+  mandateSecret?: string;
 }
 
 export type FastLaneEvent =
   | { type: "WEBMCP_DETECTED"; tools: string[]; viable: boolean; reason: string }
   | { type: "PURCHASE_GUARDED" }
-  | { type: "PURCHASE_SKIPPED_DUPLICATE"; purchaseId: string }
+  | { type: "ENTITLEMENT_CHECKED"; balance: number; required: number }
+  | { type: "ALREADY_COVERED"; balance: number; required: number }
+  | { type: "PURCHASE_SKIPPED_DUPLICATE"; purchaseId: string; status: PurchaseRecord["status"] }
   | { type: "PURCHASE_STARTED"; lane: "fast"; tool: string }
-  | { type: "PURCHASE_COMPLETED"; transactionId: string }
-  | { type: "ENTITLEMENT_VERIFIED"; balance: number }
+  | { type: "PURCHASE_SUBMITTED" }
+  | { type: "PURCHASE_COMPLETED"; transactionId: string | undefined }
+  | { type: "PURCHASE_RESULT_UNKNOWN"; error: string }
+  | { type: "ENTITLEMENT_VERIFIED"; before: number; after: number }
   | { type: "RESUME_TOKEN_CREATED"; resumeTokenId: string };
 
-export async function runFastLane(
-  request: FastLaneRequest,
-  deps: FastLaneDeps,
-): Promise<FastLaneResult> {
+export async function runFastLane(request: RecoveryRequest, deps: FastLaneDeps): Promise<RecoveryResult> {
   const { session } = deps;
+  const { mandate, quote, checkpoint } = request;
   const store = deps.store ?? new InMemoryIdempotencyStore();
   const now = deps.now ?? (() => new Date());
   const emit = deps.emit ?? (() => {});
+  const requirement = resolveRequirement(request);
 
-  // 1. Detect WebMCP -----------------------------------------------------------
+  // 1. Detect ------------------------------------------------------------------
   const detection = await detectWebMcp(session);
-  emit({
-    type: "WEBMCP_DETECTED",
-    tools: detection.discoveredTools,
-    viable: detection.viable,
-    reason: detection.reason,
-  });
-  if (!detection.viable || !detection.capability) {
-    throw new NoFastLaneError(detection.reason);
-  }
+  emit({ type: "WEBMCP_DETECTED", tools: detection.discoveredTools, viable: detection.viable, reason: detection.reason });
+  if (!detection.viable || !detection.capability) throw new NoFastLaneError(detection.reason);
   const capability = detection.capability;
 
-  // 2. Guard (origin lock, amount ceiling, signature, single-use) --------------
+  // 2. Guard (signature, expiry, origin lock, provider, cap) -------------------
   assertPurchaseAllowed({
-    mandate: request.mandate,
-    quote: request.quote,
+    checkpoint,
+    mandate,
+    quote,
     actualOrigin: session.origin,
     actualProvider: session.provider,
+    lane: "fast",
     now: now(),
+    ...(deps.mandateSecret === undefined ? {} : { mandateSecret: deps.mandateSecret }),
   });
   emit({ type: "PURCHASE_GUARDED" });
 
-  // 3. Idempotency: claim the purchase before calling the tool -----------------
-  const key = purchaseKey(request.mandate, request.quote);
-  const purchaseId = `pur_${request.mandate.mandateId}`;
-  const claim = await store.putIfAbsent({
-    idempotencyKey: key,
-    mandateId: request.mandate.mandateId,
-    purchaseId,
-    status: "PENDING",
-  });
+  const key = purchaseKeyFor(mandate, requirement);
+  const purchaseId = `pur_${mandate.mandateId}`;
 
-  if (claim.status === "COMPLETED") {
-    // Already bought in a prior attempt — re-read current state and re-issue the
-    // resume token. We do NOT apply the delta check here: the balance already
-    // reflects the completed purchase, so there is no "before" to compare.
-    emit({ type: "PURCHASE_SKIPPED_DUPLICATE", purchaseId: claim.purchaseId });
+  const finish = (balance: { balance: number; accountId: string | undefined; resource: string }, pid: string | null, alreadyCovered: boolean) => {
+    const entitlement = makeEntitlement(mandate, balance, now());
+    const result = makeResult({ lane: "fast", purchaseId: pid, entitlement, request, requirement, alreadyCovered, now: now() });
+    emit({ type: "RESUME_TOKEN_CREATED", resumeTokenId: result.resumeToken.id });
+    return result;
+  };
+
+  // A prior attempt that may have moved money: decide from observed state, never re-buy.
+  const resolveExisting = async (existing: PurchaseRecord): Promise<RecoveryResult> => {
+    emit({ type: "PURCHASE_SKIPPED_DUPLICATE", purchaseId: existing.purchaseId, status: existing.status });
     const current = await readBalance(session, capability);
-    const entitlementDup = {
-      provider: capability.provider,
-      accountId: current.accountId,
-      resource: current.resource,
-      balance: current.balance,
-      status: "active" as const,
-      lastVerifiedAt: now().toISOString(),
-    };
-    emit({ type: "ENTITLEMENT_VERIFIED", balance: entitlementDup.balance });
-    const resumeToken = buildResumeToken(
-      request.checkpoint,
-      entitlementDup,
-      request.quote.purchase.credits,
-      now(),
-    );
-    emit({ type: "RESUME_TOKEN_CREATED", resumeTokenId: resumeToken.id });
-    return { purchaseId: claim.purchaseId, verifiedEntitlement: entitlementDup, resumeToken };
+    if (current.balance < requirement.amount) {
+      throw new PurchaseVerificationError(
+        `A previous purchase attempt (${existing.status}) exists for this requirement but the balance ` +
+          `${current.balance} does not cover ${requirement.amount}. Not buying again; needs human review.`,
+      );
+    }
+    if (existing.status !== "VERIFIED") await store.update(key, { status: "VERIFIED" });
+    return finish(current, existing.purchaseId, false);
+  };
+
+  const existing = await store.get(key);
+  if (blocksNewPurchase(existing)) return resolveExisting(existing);
+
+  // 3. Entitlement check — the moment Aisle sometimes DOESN'T buy (§8) ----------
+  const before = await readBalance(session, capability);
+  emit({ type: "ENTITLEMENT_CHECKED", balance: before.balance, required: requirement.amount });
+  if (before.balance >= requirement.amount) {
+    emit({ type: "ALREADY_COVERED", balance: before.balance, required: requirement.amount });
+    return finish(before, null, true);
   }
 
-  // 4. Purchase ----------------------------------------------------------------
-  const before = await readBalance(session, capability);
-  emit({ type: "PURCHASE_STARTED", lane: "fast", tool: capability.purchaseTool.name });
+  // 4. Claim the requirement, then consume the single-use mandate ---------------
+  const claim = await store.claim({ idempotencyKey: key, mandateId: mandate.mandateId, purchaseId, status: "PENDING" });
+  if (!claim.claimed) return resolveExisting(claim.record);
+  if (!(await store.consumeMandate(mandate.mandateId))) {
+    await store.update(key, { status: "FAILED" });
+    throw new MandateRejectedError(`Mandate ${mandate.mandateId} was already used.`, "MANDATE_ALREADY_USED");
+  }
 
-  let outcome;
+  // 5. Purchase ----------------------------------------------------------------
+  emit({ type: "PURCHASE_STARTED", lane: "fast", tool: capability.purchaseTool.name });
+  emit({ type: "PURCHASE_SUBMITTED" });
   try {
-    outcome = await executePurchase(session, capability, request.quote, request.mandate);
+    const outcome = await executePurchase(session, capability, mandate, key);
+    await store.update(key, {
+      status: "SUBMITTED",
+      ...(outcome.transactionId === undefined ? {} : { transactionId: outcome.transactionId }),
+    });
+    emit({ type: "PURCHASE_COMPLETED", transactionId: outcome.transactionId });
+  } catch (err) {
+    if (err instanceof PurchaseFailedError) {
+      await store.update(key, { status: "FAILED" });
+      throw err;
+    }
+    // Response lost: we genuinely don't know if we were charged. NEVER retry.
+    await store.update(key, { status: "UNKNOWN" });
+    emit({ type: "PURCHASE_RESULT_UNKNOWN", error: String(err) });
+  }
+
+  // 6. Verify by reading the balance, not the receipt ---------------------------
+  const after = await readBalance(session, capability);
+  try {
+    assertBalanceDelta(before.balance, after.balance, mandate.unitsGranted);
   } catch (err) {
     await store.update(key, { status: "FAILED" });
     throw err;
   }
-  await store.update(key, { status: "COMPLETED", transactionId: outcome.transactionId });
-  emit({ type: "PURCHASE_COMPLETED", transactionId: outcome.transactionId });
+  await store.update(key, { status: "VERIFIED" });
+  emit({ type: "ENTITLEMENT_VERIFIED", before: before.balance, after: after.balance });
 
-  // 5. Verify entitlement ------------------------------------------------------
-  const entitlement = await verifyEntitlement(session, capability, before, request.quote);
-  emit({ type: "ENTITLEMENT_VERIFIED", balance: entitlement.balance });
-
-  // 6. Resume token ------------------------------------------------------------
-  const resumeToken = buildResumeToken(
-    request.checkpoint,
-    entitlement,
-    request.quote.purchase.credits,
-    now(),
-  );
-  emit({ type: "RESUME_TOKEN_CREATED", resumeTokenId: resumeToken.id });
-
-  return { purchaseId, verifiedEntitlement: entitlement, resumeToken };
+  return finish(after, purchaseId, false);
 }
+
+export type { FastLaneCapability };

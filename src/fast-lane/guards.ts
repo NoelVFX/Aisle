@@ -1,84 +1,106 @@
 /**
- * Pre-flight guards. These run BEFORE any purchase tool is called; every one
- * of them is a hard gate. The governing principle: a vendor (or any web
- * content) may *describe* a purchase, but only task configuration — expressed
- * through the signed mandate — can *authorize* one.
+ * Pre-flight guards, shared by both lanes. Every one is a hard gate that runs
+ * BEFORE any purchase tool is called or any checkout is touched.
+ *
+ * A vendor (or any web content) may *describe* a purchase; only task
+ * configuration — frozen into the checkpoint and bound by the signed mandate —
+ * can *authorize* one.
  */
 
-import type { PurchaseMandate, Quote } from "../types.js";
+import type { PurchaseMandate, Quote, TaskCheckpoint } from "../types.js";
 import { MandateRejectedError } from "../errors.js";
-
-/**
- * Verify the mandate signature. Stubbed for the demo (the signing authority is
- * owned by the approval/policy layer); swap in real verification before real
- * money moves.
- */
-export function verifyMandateSignature(mandate: PurchaseMandate): boolean {
-  return typeof mandate.signature === "string" && mandate.signature.length > 0;
-}
+import { verifyMandate } from "../mandate/mandate.js";
+import { canonicalize, sameOrigin } from "../policy/policy.js";
 
 export interface GuardContext {
+  checkpoint: TaskCheckpoint;
   mandate: PurchaseMandate;
   quote: Quote;
   /**
-   * The origin we are ACTUALLY about to transact against — the WebMCP session's
-   * origin (fast lane) or the browser's current page origin (slow lane).
+   * The origin we are ACTUALLY about to transact against: the purchase-tool
+   * session's origin (fast lane) or the browser's current page origin (slow lane).
    */
   actualOrigin: string;
-  /** The provider of the live connection (session / browser). */
+  /** Provider of the live connection (session / browser). */
   actualProvider: string;
+  /**
+   * Fast lane may transact on the upstream API origin or the billing origin
+   * (native MCP tool vs WebMCP on the billing page, §13). The slow lane only
+   * ever spends on the billing origin.
+   */
+  lane: "fast" | "slow";
   now?: Date;
+  /** HMAC secret; defaults to process.env.MANDATE_SECRET. */
+  mandateSecret?: string;
 }
 
-/**
- * Assert every invariant required to safely execute the purchase. Throws
- * `MandateRejectedError` on the first violation. Shared by both lanes.
- */
+const reject = (message: string, code = "MANDATE_REJECTED"): never => {
+  throw new MandateRejectedError(message, code);
+};
+
 export function assertPurchaseAllowed(ctx: GuardContext): void {
-  const { mandate, quote, actualOrigin, actualProvider } = ctx;
-  const now = ctx.now ?? new Date();
+  const { checkpoint, mandate, quote, actualOrigin, actualProvider, lane } = ctx;
 
-  if (!verifyMandateSignature(mandate)) {
-    throw new MandateRejectedError("Mandate signature is missing or invalid.");
+  // Signature, expiry (NaN fails closed), one_time, no auto-renew.
+  verifyMandate(mandate, {
+    ...(ctx.mandateSecret === undefined ? {} : { secret: ctx.mandateSecret }),
+    ...(ctx.now === undefined ? {} : { now: ctx.now }),
+  });
+
+  const locked = checkpoint.origin;
+
+  // Origin lock. The anchor is the checkpoint's config-locked origin, never the
+  // mandate's or quote's own claim, and never anything a vendor returned.
+  if (!sameOrigin(mandate.billingOrigin, locked.billingOrigin)) {
+    reject(
+      `Origin lock violation: mandate billing origin '${mandate.billingOrigin}' is not the task-authorized ` +
+        `'${locked.billingOrigin}'.`,
+      "ORIGIN_VIOLATION",
+    );
   }
-
-  if (new Date(mandate.expiresAt).getTime() <= now.getTime()) {
-    throw new MandateRejectedError(`Mandate ${mandate.mandateId} has expired.`);
+  if (!sameOrigin(quote.billingOrigin, locked.billingOrigin)) {
+    reject(`Origin lock violation: quote billing origin '${quote.billingOrigin}' is not authorized.`, "ORIGIN_VIOLATION");
   }
-
-  // Origin lock: we must be transacting against the exact origin the task
-  // authorized. Never trust an origin that came from tool output or a page.
-  if (normalizeOrigin(actualOrigin) !== normalizeOrigin(mandate.origin)) {
-    throw new MandateRejectedError(
-      `Origin lock violation: actual origin '${actualOrigin}' != mandate origin '${mandate.origin}'.`,
+  const allowed = lane === "fast" ? [locked.canonicalOrigin, locked.billingOrigin] : [locked.billingOrigin];
+  if (!allowed.some((o) => sameOrigin(actualOrigin, o))) {
+    reject(
+      `Origin lock violation: actual origin '${actualOrigin}' is not in the authorized set ` +
+        `[${allowed.join(", ")}].`,
+      "ORIGIN_VIOLATION",
     );
   }
 
-  if (mandate.provider !== quote.provider || mandate.provider !== actualProvider) {
-    throw new MandateRejectedError("Provider mismatch between mandate, quote, and connection.");
+  if (mandate.taskId !== checkpoint.taskId) {
+    reject("Mandate was issued for a different task.");
+  }
+  if (
+    mandate.provider !== quote.provider ||
+    mandate.provider !== locked.provider ||
+    mandate.provider !== actualProvider
+  ) {
+    reject("Provider mismatch between mandate, quote, checkpoint, and connection.");
+  }
+  if (mandate.productId !== quote.productId || mandate.quantity !== quote.quantity) {
+    reject("Mandate product/quantity does not match the quote.");
+  }
+  if (mandate.unitsGranted !== quote.unitsGranted) {
+    reject("Mandate units do not match the quote.");
   }
 
-  if (mandate.productId !== quote.purchase.productId) {
-    throw new MandateRejectedError("Mandate productId does not match the quoted product.");
+  // Cap, not price: quote.price <= maximumAmount. NaN fails closed.
+  if (!Number.isFinite(quote.price) || quote.price < 0 || quote.price > mandate.maximumAmount) {
+    reject(`Quoted price ${quote.price} exceeds mandate maximum ${mandate.maximumAmount}.`, "AMOUNT_EXCEEDS_MANDATE");
   }
-
-  // Per-purchase ceiling: the quoted price must not exceed what was authorized.
-  if (quote.purchase.price > mandate.maximumAmount) {
-    throw new MandateRejectedError(
-      `Quoted price ${quote.purchase.price} exceeds mandate maximum ${mandate.maximumAmount}.`,
-    );
+  if (quote.currency !== mandate.currency) {
+    reject("Currency mismatch between quote and mandate.", "CURRENCY_MISMATCH");
   }
-
-  if (quote.purchase.currency !== mandate.currency) {
-    throw new MandateRejectedError("Currency mismatch between quote and mandate.");
+  if (quote.billing !== "one_time") {
+    reject("A recovery purchase must be one-time.", "UNEXPECTED_SUBSCRIPTION");
   }
-
-  if (mandate.autoRenew !== false || quote.autoRenew !== false) {
-    throw new MandateRejectedError("Auto-renew is not permitted for a recovery purchase.");
+  if (quote.autoRenew !== false) {
+    reject("Auto-renew is not permitted for a recovery purchase.", "AUTO_RENEW_ENABLED");
   }
 }
 
-/** Lowercase + strip a trailing slash so origin comparison is stable. */
-export function normalizeOrigin(origin: string): string {
-  return origin.trim().toLowerCase().replace(/\/+$/, "");
-}
+/** @deprecated Use `canonicalize` from the policy module. */
+export const normalizeOrigin = canonicalize;

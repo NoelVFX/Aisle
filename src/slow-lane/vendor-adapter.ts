@@ -1,21 +1,17 @@
 /**
- * Vendor purchase adapters.
+ * Vendor purchase adapters (build-checklist Phase 5, aisle-pipeline.md §17).
  *
- * There is no single browser agent that "figures out" every checkout. Each
- * vendor gets a small adapter that knows the site's predictable mechanics:
- * where pricing lives, how to stage a checkout, how to confirm, and how to read
- * the balance back. The worker orchestrates; the adapter knows the vendor.
- *
- * Adapter methods should use the deterministic `PageLike` path. When a step
- * genuinely can't be completed deterministically they throw
- * `DeterministicStepError`; the worker then (optionally) hands that sub-goal to
- * the computer-use agent and retries the read once.
+ * The worker orchestrates; the adapter knows the vendor. Adapter methods use the
+ * deterministic `PageLike` path. When a READ or STAGING step can't be completed
+ * deterministically they throw `DeterministicStepError`, and the worker may hand
+ * that sub-goal to the computer-use resolver. The final submit is never handed
+ * to a model (§16.1): `confirmPurchase` failures are never recovered by the agent.
  */
 
 import type { PageLike } from "./browser.js";
 import type {
+  PurchaseMandate,
   PurchaseOffer,
-  Quote,
   PurchaseVerification,
   Requirement,
   StagedPurchase,
@@ -27,18 +23,33 @@ export interface VendorPurchaseAdapter {
   /** True if this adapter handles the given (already origin-locked) URL. */
   canHandle(url: string): boolean;
 
+  /**
+   * Liveness probe before checkout (§15.2). Return true when logged in, after
+   * attempting re-authentication (Steel Credentials API) if needed.
+   * Discovering you're logged out at the card step is the worst place to find out.
+   */
+  ensureLoggedIn?(page: PageLike): Promise<boolean>;
+
   /** Navigate to pricing and read the purchasable packages. */
   discoverOffers(page: PageLike, requirement: Requirement): Promise<PurchaseOffer[]>;
 
-  /** Bring a chosen offer up to the confirmation step — do NOT confirm yet. */
+  /**
+   * Bring a chosen offer up to the confirmation step — do NOT confirm. Must read
+   * back the staged line item, amount, currency, billing period and auto-renew
+   * flag from the checkout page for the Gate 1 comparison.
+   */
   stagePurchase(page: PageLike, offer: PurchaseOffer): Promise<StagedPurchase>;
 
-  /** Click the final confirm control. Returns what the page reports. */
+  /**
+   * Click the final confirm control. Deterministic code only. Throw
+   * `DeterministicStepError` ONLY when nothing was clicked (control not found).
+   */
   confirmPurchase(page: PageLike, staged: StagedPurchase): Promise<PurchaseVerification>;
 
   /**
-   * Re-read authoritative account state (balance/plan). Used both to verify a
-   * completed purchase and to resolve an UNKNOWN result without re-buying.
+   * Re-read authoritative account state. Used before buying (ALREADY_COVERED,
+   * Gate 2 baseline), after buying, and to resolve an UNKNOWN result without
+   * re-buying.
    */
   verifyEntitlement(page: PageLike, requirement: Requirement): Promise<PurchaseVerification>;
 }
@@ -47,7 +58,7 @@ export interface VendorPurchaseAdapter {
 export class DeterministicStepError extends Error {
   constructor(
     message: string,
-    /** An instruction the computer-use agent can act on to recover this step. */
+    /** An instruction the computer-use resolver can act on to recover this step. */
     readonly recoveryInstruction: string,
   ) {
     super(message);
@@ -55,32 +66,32 @@ export class DeterministicStepError extends Error {
   }
 }
 
+const quotable = (o: PurchaseOffer): boolean =>
+  o.billing === "one_time" && o.autoRenew === false && Number.isFinite(o.price) && Number.isFinite(o.unitsGranted);
+
 /**
- * Choose the cheapest offer that still satisfies the requirement. This is the
- * "buy the minimum" principle: optimize for task completion, not vendor revenue.
+ * The cheapest one-time, non-renewing offer that still satisfies the
+ * requirement — "buy the minimum": optimize for task completion, not vendor revenue.
  */
-export function chooseMinimumOffer(
-  offers: PurchaseOffer[],
-  requirement: Requirement,
-): PurchaseOffer | undefined {
+export function chooseMinimumOffer(offers: PurchaseOffer[], requirement: Requirement): PurchaseOffer | undefined {
   return offers
-    .filter((o) => o.units >= requirement.amount)
+    .filter(quotable)
+    .filter((o) => o.unitsGranted >= requirement.amount)
     .sort((a, b) => a.price - b.price)[0];
 }
 
 /**
- * Pick the offer to actually buy. Prefers an exact match to the approved
- * quote's product id (deterministic adapters), and otherwise falls back to the
- * cheapest offer that satisfies the requirement (generic adapters that synthesize
- * ids from the page). Vendor-agnostic, so one generic adapter works across sites.
+ * Pick the offer to actually buy. Prefers the mandate's exact product (adapters
+ * that read real product ids), otherwise the cheapest offer that satisfies the
+ * requirement (generic adapters that synthesize ids). Either way the executor
+ * re-checks price against the quote and the mandate cap before staging.
  */
 export function selectOffer(
   offers: PurchaseOffer[],
-  quote: Quote,
+  mandate: Pick<PurchaseMandate, "productId">,
   requirement: Requirement,
 ): PurchaseOffer | undefined {
-  // Prefer the approved product, but only if it actually satisfies the need.
-  const exact = offers.find((o) => o.productId === quote.purchase.productId);
-  if (exact && exact.units >= requirement.amount) return exact;
+  const exact = offers.find((o) => o.productId === mandate.productId);
+  if (exact && quotable(exact) && exact.unitsGranted >= requirement.amount) return exact;
   return chooseMinimumOffer(offers, requirement);
 }

@@ -1,79 +1,91 @@
 /**
- * Generic vendor adapter — one adapter for MOST vendor sites.
+ * Generic vendor adapter — one adapter for most vendor sites.
  *
- * The whole point of the fast/slow design is that we don't hand-write a class
- * per vendor. This adapter uses site-agnostic heuristics for the predictable
- * majority — guess the pricing/billing paths, read prices and unit counts out of
- * the page text, click buy/confirm controls by common labels, read the balance
- * back — and throws `DeterministicStepError` the moment a step is ambiguous, so
- * the worker hands that sub-goal to the host-injected computer-use agent. Easy
- * sites go fast and cheap; hard ones (canvas, closed shadow DOM, odd layouts)
- * fall through to the model. Tune a vendor by passing config, not new code.
+ * Site-agnostic heuristics for the predictable majority: guess the pricing and
+ * account paths, read prices and unit counts out of the page text, click the
+ * CHOSEN package by its own label, read the staged checkout back for Gate 1, and
+ * read the balance from a line that actually says "balance". The moment a step is
+ * ambiguous it throws `DeterministicStepError` so the worker can hand discovery
+ * or staging to the resolver. Ambiguity at confirm or verification fails closed.
  *
- * Only the parsing heuristics live here; the pure functions are exported so they
- * can be unit-tested without a browser.
+ * The docs prefer structured inputs where available (JSON-LD `Offer`, Browser
+ * Tools markdown, §13/§17 tier 1). This text heuristic is the fallback.
  */
 
 import type { PageLike } from "../browser.js";
-import {
-  DeterministicStepError,
-  type VendorPurchaseAdapter,
-} from "../vendor-adapter.js";
-import type {
-  PurchaseOffer,
-  PurchaseVerification,
-  Requirement,
-  StagedPurchase,
-} from "../../types.js";
+import { DeterministicStepError, type VendorPurchaseAdapter } from "../vendor-adapter.js";
+import { PurchaseFailedError } from "../../errors.js";
+import type { PurchaseOffer, PurchaseVerification, Requirement, StagedPurchase } from "../../types.js";
 
 export interface GenericAdapterConfig {
   provider: string;
-  /** Canonical vendor origin (same as the mandate origin). */
+  /** Locked billing origin (same as checkpoint.origin.billingOrigin). */
   origin: string;
-  /** Paths to try for the pricing/packages page. */
   pricingPaths?: string[];
-  /** Paths to try when reading the balance back. */
   accountPaths?: string[];
-  /** Candidate labels for "select this package / buy" controls. */
-  buyButtonTexts?: string[];
   /** Candidate labels for the final confirm/pay control. */
   confirmButtonTexts?: string[];
   /** Matches a price like `$20` or `$19.99`; capture group 1 is the number. */
   priceRegex?: RegExp;
-  /** Matches `5,000 credits` / `5000 tokens`; capture group 1 is the amount. */
+  /** Matches `5,000 credits`; capture group 1 is the amount. */
   unitsRegex?: RegExp;
+  /** A line that states the current balance. */
+  balanceLineRegex?: RegExp;
   currency?: string;
 }
 
 const DEFAULTS = {
   pricingPaths: ["/pricing", "/billing", "/plans", "/credits", "/account/billing", "/settings/billing"],
   accountPaths: ["/account", "/billing", "/dashboard", "/settings/billing", "/account/usage"],
-  buyButtonTexts: ["Buy", "Purchase", "Select", "Choose", "Get", "Subscribe", "Upgrade", "Add credits", "Top up", "Top-up"],
-  confirmButtonTexts: ["Pay", "Confirm", "Place order", "Complete purchase", "Complete order", "Buy now", "Authorize", "Checkout"],
+  confirmButtonTexts: ["Complete purchase", "Complete order", "Place order", "Pay", "Confirm", "Buy now", "Authorize"],
   priceRegex: /\$\s?(\d+(?:\.\d{1,2})?)/,
   unitsRegex: /([\d,]+)\s*(?:credits?|tokens?|units?|generations?)/i,
+  balanceLineRegex: /\b(balance|remaining|available)\b/i,
   currency: "USD",
 };
 
+const SUBSCRIPTION_RE = /(\/\s*(mo|month|yr|year)\b|per\s+(month|year)|monthly|yearly|annual(ly)?|subscription|recurring)/i;
+const AUTO_RENEW_ON_RE = /(auto[- ]?renew(s|al)?\s*[:=]?\s*(on|enabled|yes|true)|renews automatically)/i;
+const AUTO_RENEW_OFF_RE = /(no auto[- ]?renew|auto[- ]?renew(s|al)?\s*[:=]?\s*(off|disabled|no|false))/i;
+
 const num = (s: string): number => Number(s.replace(/,/g, ""));
 
-/** First price found in a text blob, or undefined. */
 export function extractPrice(text: string, priceRegex = DEFAULTS.priceRegex): number | undefined {
   const m = priceRegex.exec(text);
   return m?.[1] === undefined ? undefined : num(m[1]);
 }
 
-/** First unit count found in a text blob, or undefined. */
 export function extractUnits(text: string, unitsRegex = DEFAULTS.unitsRegex): number | undefined {
   const m = unitsRegex.exec(text);
   return m?.[1] === undefined ? undefined : num(m[1]);
 }
 
-/**
- * Parse purchasable offers out of a page's visible text, one candidate per line
- * that carries both a price and a unit count. Synthesizes a stable productId
- * from units+price. Pure — unit-testable without a browser.
- */
+export function detectBillingPeriod(text: string): "one_time" | "subscription" {
+  return SUBSCRIPTION_RE.test(text) ? "subscription" : "one_time";
+}
+
+export function detectAutoRenew(text: string): boolean {
+  if (AUTO_RENEW_OFF_RE.test(text)) return false;
+  return AUTO_RENEW_ON_RE.test(text);
+}
+
+/** Balance from a line that names it, never from the first "N credits" on the page. */
+export function extractBalance(
+  text: string,
+  unitsRegex = DEFAULTS.unitsRegex,
+  balanceLineRegex = DEFAULTS.balanceLineRegex,
+): number | undefined {
+  for (const line of text.split(/\r?\n/)) {
+    if (!balanceLineRegex.test(line)) continue;
+    const units = extractUnits(line, unitsRegex);
+    if (units !== undefined) return units;
+    const bare = /(-?[\d,]+(?:\.\d+)?)/.exec(line.replace(balanceLineRegex, ""));
+    if (bare?.[1] !== undefined) return num(bare[1]);
+  }
+  return undefined;
+}
+
+/** Offers from visible text, one per line carrying both a price and a unit count. */
 export function parseOffersFromText(
   text: string,
   cfg: Pick<GenericAdapterConfig, "priceRegex" | "unitsRegex" | "currency"> = {},
@@ -93,7 +105,15 @@ export function parseOffersFromText(
     const productId = `gen_${units}_${price}`;
     if (seen.has(productId)) continue;
     seen.add(productId);
-    offers.push({ productId, label: line, units, price, currency, billing: "one_time" });
+    offers.push({
+      productId,
+      label: line,
+      unitsGranted: units,
+      price,
+      currency,
+      billing: detectBillingPeriod(line),
+      autoRenew: detectAutoRenew(line),
+    });
   }
   return offers.sort((a, b) => a.price - b.price);
 }
@@ -105,10 +125,10 @@ export class GenericVendorAdapter implements VendorPurchaseAdapter {
     this.cfg = {
       pricingPaths: DEFAULTS.pricingPaths,
       accountPaths: DEFAULTS.accountPaths,
-      buyButtonTexts: DEFAULTS.buyButtonTexts,
       confirmButtonTexts: DEFAULTS.confirmButtonTexts,
       priceRegex: DEFAULTS.priceRegex,
       unitsRegex: DEFAULTS.unitsRegex,
+      balanceLineRegex: DEFAULTS.balanceLineRegex,
       currency: DEFAULTS.currency,
       ...cfg,
     };
@@ -119,7 +139,11 @@ export class GenericVendorAdapter implements VendorPurchaseAdapter {
   }
 
   canHandle(url: string): boolean {
-    return this.cfg.origin === "*" || url.startsWith(this.cfg.origin);
+    try {
+      return new URL(url).origin === new URL(this.cfg.origin).origin;
+    } catch {
+      return false;
+    }
   }
 
   async discoverOffers(page: PageLike, _requirement: Requirement): Promise<PurchaseOffer[]> {
@@ -130,14 +154,15 @@ export class GenericVendorAdapter implements VendorPurchaseAdapter {
     }
     throw new DeterministicStepError(
       "No pricing packages found via known paths.",
-      "Navigate to the vendor's pricing or billing page and make the purchasable credit packages visible.",
+      "Navigate to the vendor's pricing or billing page and make the purchasable credit packages visible. Do not buy anything.",
     );
   }
 
   async stagePurchase(page: PageLike, offer: PurchaseOffer): Promise<StagedPurchase> {
-    const candidates = [offer.label, ...this.cfg.buyButtonTexts];
+    // Only controls that identify THIS package. A generic "Buy" could be any package.
+    const labels = [offer.label, `${offer.unitsGranted.toLocaleString("en-US")} credits`, `${offer.unitsGranted} credits`];
     let clicked = false;
-    for (const label of candidates) {
+    for (const label of labels) {
       if (await page.tryClickByText(label)) {
         clicked = true;
         break;
@@ -146,53 +171,52 @@ export class GenericVendorAdapter implements VendorPurchaseAdapter {
     if (!clicked) {
       throw new DeterministicStepError(
         "Could not select the chosen package.",
-        `Select the package labelled '${offer.label}' and continue to the checkout page.`,
+        `Select the package labelled '${offer.label}' and continue to the checkout page. Do not pay.`,
       );
     }
-    const total = extractPrice(await page.innerText(), this.cfg.priceRegex);
-    if (total === undefined) {
-      throw new DeterministicStepError(
-        "Checkout total not visible.",
-        "Open the checkout page so the order total is shown.",
+
+    const text = await page.innerText();
+    const amount = extractPrice(text, this.cfg.priceRegex);
+    if (amount === undefined) {
+      throw new DeterministicStepError("Checkout total not visible.", "Open the checkout page so the order total is shown. Do not pay.");
+    }
+    const stagedUnits = extractUnits(text, this.cfg.unitsRegex);
+    if (stagedUnits !== undefined && stagedUnits !== offer.unitsGranted) {
+      throw new PurchaseFailedError(
+        `Checkout shows ${stagedUnits} units but the selected package grants ${offer.unitsGranted}. Aborting before submit.`,
+        "LINE_ITEM_MISMATCH",
       );
     }
     return {
       offer,
       checkoutRef: page.currentUrl(),
-      observedTotal: total,
-      observedCurrency: this.cfg.currency,
+      lineItem: offer.label,
+      amount,
+      currency: this.cfg.currency,
+      billingPeriod: detectBillingPeriod(text),
+      autoRenew: detectAutoRenew(text),
     };
   }
 
   async confirmPurchase(page: PageLike, _staged: StagedPurchase): Promise<PurchaseVerification> {
     for (const label of this.cfg.confirmButtonTexts) {
-      if (await page.tryClickByText(label)) {
-        return { confirmed: true };
-      }
+      if (await page.tryClickByText(label)) return { confirmed: true };
     }
     throw new DeterministicStepError(
       "Could not find a confirm/pay control.",
-      "Click the final Pay/Confirm button to complete the already-authorized purchase. Do not change any amount or product.",
+      "Confirm control not found. The final submit is never delegated to a model.",
     );
   }
 
   async verifyEntitlement(page: PageLike, requirement: Requirement): Promise<PurchaseVerification> {
     for (const path of this.cfg.accountPaths) {
       await page.goto(this.cfg.origin + path);
-      const balance = extractUnits(await page.innerText(), this.cfg.unitsRegex);
+      const balance = extractBalance(await page.innerText(), this.cfg.unitsRegex, this.cfg.balanceLineRegex);
       if (balance !== undefined) {
-        return {
-          confirmed: balance >= requirement.amount,
-          balanceAfter: balance,
-          resource: requirement.resource,
-          accountId: "unknown",
-        };
+        return { confirmed: balance >= requirement.amount, balanceAfter: balance, resource: requirement.resource };
       }
     }
     // Safe failure: better to fail verification than to falsely resume the task.
-    return {
-      confirmed: false,
-      reason: "Could not read an authoritative balance from the account pages.",
-    };
+    return { confirmed: false, reason: "Could not read an authoritative balance from the account pages." };
   }
 }

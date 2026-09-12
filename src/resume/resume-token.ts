@@ -1,32 +1,35 @@
 /**
- * Resume token — the handoff artifact the host agent uses to continue the task
- * exactly where it stopped. It carries the ORIGINAL failed tool call so the
- * host replays it verbatim rather than regenerating a new request.
+ * Resume record (aisle-pipeline.md §2.2, §19).
+ *
+ * The blocked tool call blocks; the agent never receives this. The gateway uses
+ * `id` (= `resume:{taskId}:{failedToolCallId}`) as its idempotency key and
+ * replays `resumeAction` with the EXACT same arguments object. Do not regenerate
+ * the request. Do not "improve" the arguments.
  */
 
 import type { Entitlement, ResumeToken, TaskCheckpoint } from "../types.js";
+import { resumeKey } from "../core/hash.js";
 
-const DEFAULT_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const DEFAULT_TTL_MS = 10 * 60 * 1000;
 
 export function buildResumeToken(
   checkpoint: TaskCheckpoint,
   entitlement: Entitlement,
-  quotedCredits: number,
+  minimumAmount: number,
   now: Date = new Date(),
 ): ResumeToken {
   return {
-    // Deterministic id so re-issuing for the same failed call is idempotent.
-    id: `resume:${checkpoint.taskId}:${checkpoint.failedToolCall.id}`,
+    id: resumeKey(checkpoint.taskId, checkpoint.toolCallId),
     taskId: checkpoint.taskId,
-    failedToolCallId: checkpoint.failedToolCall.id,
+    failedToolCallId: checkpoint.toolCallId,
     resumeAction: {
-      tool: checkpoint.failedToolCall.tool,
-      arguments: checkpoint.failedToolCall.arguments,
+      tool: checkpoint.tool,
+      arguments: checkpoint.arguments,
     },
     entitlementRequirement: {
       provider: entitlement.provider,
       resource: entitlement.resource,
-      minimumAmount: quotedCredits,
+      minimumAmount,
     },
     createdAt: now.toISOString(),
     expiresAt: new Date(now.getTime() + DEFAULT_TTL_MS).toISOString(),
@@ -34,5 +37,6 @@ export function buildResumeToken(
 }
 
 export function isResumeTokenExpired(token: ResumeToken, now: Date = new Date()): boolean {
-  return new Date(token.expiresAt).getTime() <= now.getTime();
+  const expiry = new Date(token.expiresAt).getTime();
+  return !Number.isFinite(expiry) || expiry <= now.getTime();
 }

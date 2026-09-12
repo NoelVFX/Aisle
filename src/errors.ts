@@ -10,7 +10,7 @@ export class FastLaneError extends Error {
   }
 }
 
-/** Fast lane isn't viable (no WebMCP tools) — host should try the slow lane. */
+/** Fast lane isn't viable (no purchase tools) — route to the slow lane. */
 export class NoFastLaneError extends FastLaneError {
   constructor(message: string) {
     super(message, "NO_FAST_LANE");
@@ -19,15 +19,29 @@ export class NoFastLaneError extends FastLaneError {
 
 /** A pre-flight guard rejected the purchase before any money moved. */
 export class MandateRejectedError extends FastLaneError {
-  constructor(message: string) {
-    super(message, "MANDATE_REJECTED");
+  constructor(message: string, code = "MANDATE_REJECTED") {
+    super(message, code);
   }
 }
 
-/** The vendor's purchase tool reported a failure. */
+/**
+ * §18 Gate 1: the staged checkout does not match the signed mandate.
+ * `reason` is one of AMOUNT_EXCEEDS_MANDATE | CURRENCY_MISMATCH |
+ * UNEXPECTED_SUBSCRIPTION | AUTO_RENEW_ENABLED. Always raised BEFORE submit.
+ */
+export class MandateMismatchError extends MandateRejectedError {
+  constructor(
+    readonly reason: string,
+    readonly detail: Record<string, unknown>,
+  ) {
+    super(`MANDATE_MISMATCH:${reason}`, "MANDATE_MISMATCH");
+  }
+}
+
+/** The vendor explicitly reported a failure; no money moved. */
 export class PurchaseFailedError extends FastLaneError {
-  constructor(message: string) {
-    super(message, "PURCHASE_FAILED");
+  constructor(message: string, code = "PURCHASE_FAILED") {
+    super(message, code);
   }
 }
 
@@ -46,5 +60,22 @@ export class PurchaseVerificationError extends FastLaneError {
 export class TakeoverRequiredError extends FastLaneError {
   constructor(message: string) {
     super(message, "TAKEOVER_REQUIRED");
+  }
+}
+
+/** §16.6: the resolver budget for this job is spent. Never falls back to "try clicking things". */
+export class ResolutionExhaustedError extends FastLaneError {
+  constructor(message: string) {
+    super(message, "RESOLUTION_EXHAUSTED");
+  }
+}
+
+/**
+ * §16.5: Aisle's OWN resolver credits are exhausted. The recovery layer cannot
+ * recover itself. Fail loud; this must never open a recovery job.
+ */
+export class InfraBlockedError extends FastLaneError {
+  constructor(message = "Resolver credits exhausted. Aisle cannot recover its own resolver. Top up manually.") {
+    super(message, "INFRA_BLOCKED");
   }
 }
