@@ -37,6 +37,38 @@ export type { IdempotencyStore, PurchaseRecord } from "./fast-lane/idempotency.j
 
 export { buildResumeToken, isResumeTokenExpired } from "./resume/resume-token.js";
 
+// ---- Slow lane (Steel + Playwright + CDP, computer-use fallback) ----------
+export { runSlowLane } from "./slow-lane/executor.js";
+export type { SlowLaneDeps, SlowLaneEvent } from "./slow-lane/executor.js";
+export { SteelBrowserProvider } from "./slow-lane/steel-provider.js";
+export type { SteelProviderOptions } from "./slow-lane/steel-provider.js";
+export { InMemoryProfileStore, FileProfileStore } from "./slow-lane/profiles.js";
+export type { ProfileStore } from "./slow-lane/profiles.js";
+export {
+  DeterministicStepError,
+  chooseMinimumOffer,
+} from "./slow-lane/vendor-adapter.js";
+export type { VendorPurchaseAdapter } from "./slow-lane/vendor-adapter.js";
+export {
+  ScriptedComputerUseAgent,
+  createAnthropicComputerUseAgent,
+} from "./slow-lane/computer-use.js";
+export type {
+  ComputerUseAgent,
+  ComputerUseAction,
+  ComputerUseOutcome,
+  AnthropicLike,
+} from "./slow-lane/computer-use.js";
+export { originOf } from "./slow-lane/browser.js";
+export type {
+  BrowserProvider,
+  BrowserSession,
+  BrowserProfile,
+  PageLike,
+  ControlSurface,
+  CreateSessionOptions,
+} from "./slow-lane/browser.js";
+
 export {
   FastLaneError,
   NoFastLaneError,

@@ -6,7 +6,6 @@
  */
 
 import type { PurchaseMandate, Quote } from "../types.js";
-import type { WebMcpSession } from "../webmcp/session.js";
 import { MandateRejectedError } from "../errors.js";
 
 /**
@@ -21,16 +20,22 @@ export function verifyMandateSignature(mandate: PurchaseMandate): boolean {
 export interface GuardContext {
   mandate: PurchaseMandate;
   quote: Quote;
-  session: WebMcpSession;
+  /**
+   * The origin we are ACTUALLY about to transact against — the WebMCP session's
+   * origin (fast lane) or the browser's current page origin (slow lane).
+   */
+  actualOrigin: string;
+  /** The provider of the live connection (session / browser). */
+  actualProvider: string;
   now?: Date;
 }
 
 /**
  * Assert every invariant required to safely execute the purchase. Throws
- * `MandateRejectedError` on the first violation.
+ * `MandateRejectedError` on the first violation. Shared by both lanes.
  */
 export function assertPurchaseAllowed(ctx: GuardContext): void {
-  const { mandate, quote, session } = ctx;
+  const { mandate, quote, actualOrigin, actualProvider } = ctx;
   const now = ctx.now ?? new Date();
 
   if (!verifyMandateSignature(mandate)) {
@@ -41,16 +46,16 @@ export function assertPurchaseAllowed(ctx: GuardContext): void {
     throw new MandateRejectedError(`Mandate ${mandate.mandateId} has expired.`);
   }
 
-  // Origin lock: the WebMCP session must be connected to the exact origin the
-  // task authorized. Never trust an origin that came from tool output or a page.
-  if (normalizeOrigin(session.origin) !== normalizeOrigin(mandate.origin)) {
+  // Origin lock: we must be transacting against the exact origin the task
+  // authorized. Never trust an origin that came from tool output or a page.
+  if (normalizeOrigin(actualOrigin) !== normalizeOrigin(mandate.origin)) {
     throw new MandateRejectedError(
-      `Origin lock violation: session origin '${session.origin}' != mandate origin '${mandate.origin}'.`,
+      `Origin lock violation: actual origin '${actualOrigin}' != mandate origin '${mandate.origin}'.`,
     );
   }
 
-  if (mandate.provider !== quote.provider || mandate.provider !== session.provider) {
-    throw new MandateRejectedError("Provider mismatch between mandate, quote, and session.");
+  if (mandate.provider !== quote.provider || mandate.provider !== actualProvider) {
+    throw new MandateRejectedError("Provider mismatch between mandate, quote, and connection.");
   }
 
   if (mandate.productId !== quote.purchase.productId) {

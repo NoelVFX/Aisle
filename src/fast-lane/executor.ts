@@ -65,7 +65,13 @@ export async function runFastLane(
   const capability = detection.capability;
 
   // 2. Guard (origin lock, amount ceiling, signature, single-use) --------------
-  assertPurchaseAllowed({ mandate: request.mandate, quote: request.quote, session, now: now() });
+  assertPurchaseAllowed({
+    mandate: request.mandate,
+    quote: request.quote,
+    actualOrigin: session.origin,
+    actualProvider: session.provider,
+    now: now(),
+  });
   emit({ type: "PURCHASE_GUARDED" });
 
   // 3. Idempotency: claim the purchase before calling the tool -----------------

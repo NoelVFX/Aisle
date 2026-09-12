@@ -10,7 +10,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "demo": "tsx src/demo.ts"
+    "demo": "tsx src/demo.ts",
+    "demo:slow": "tsx src/slow-lane-demo.ts"
   },
   "keywords": [
     "webmcp",
@@ -22,11 +23,16 @@
   ],
   "license": "MIT",
   "dependencies": {
+    "playwright-core": "^1.48.2",
+    "steel-sdk": "^0.8.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
     "tsx": "^4.19.2",
     "typescript": "^5.6.3",
     "vitest": "^2.1.8"
+  },
+  "optionalDependencies": {
+    "@anthropic-ai/sdk": "^0.32.1"
   }
 }

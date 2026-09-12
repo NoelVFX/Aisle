@@ -143,10 +143,68 @@ export interface FastLaneRequest {
   checkpoint: TaskCheckpoint;
   quote: Quote;
   mandate: PurchaseMandate;
+  /**
+   * The minimum the task actually needs (not the package size). Used by the
+   * slow lane to pick the minimum offer and to set the verification threshold.
+   * Defaults to the quoted package's units when omitted.
+   */
+  requirement?: Requirement;
 }
+
+/** Both lanes accept the same request. */
+export type RecoveryRequest = FastLaneRequest;
 
 export interface FastLaneResult {
   purchaseId: string;
   verifiedEntitlement: Entitlement;
   resumeToken: ResumeToken;
+}
+
+/**
+ * Both lanes converge on the same result shape. The host doesn't care whether
+ * recovery happened via WebMCP (fast) or a browser (slow) — it gets a verified
+ * entitlement and a resume token either way.
+ */
+export type RecoveryResult = FastLaneResult & { lane: "fast" | "slow" };
+
+// ---------------------------------------------------------------------------
+// Slow-lane (browser) domain types
+// ---------------------------------------------------------------------------
+
+/** What the task needs, in vendor-agnostic terms, to unblock. */
+export interface Requirement {
+  resource: string;
+  /** Minimum units (credits/seats/etc.) that must exist after the purchase. */
+  amount: number;
+}
+
+/** A purchasable package discovered on the vendor's pricing surface. */
+export interface PurchaseOffer {
+  productId: string;
+  label: string;
+  /** Units the package grants (credits, seats, …). */
+  units: number;
+  price: number;
+  currency: string;
+  billing: "one_time" | "subscription";
+}
+
+/** A purchase brought right up to the point of confirmation, not yet executed. */
+export interface StagedPurchase {
+  offer: PurchaseOffer;
+  /** Opaque adapter state needed to confirm (e.g. a checkout URL / element ref). */
+  checkoutRef: string;
+  /** What the vendor's checkout currently says the total is. */
+  observedTotal: number;
+  observedCurrency: string;
+}
+
+/** The result of confirming the purchase actually landed on the account. */
+export interface PurchaseVerification {
+  confirmed: boolean;
+  transactionId?: string;
+  balanceAfter?: number;
+  accountId?: string;
+  resource?: string;
+  reason?: string;
 }
