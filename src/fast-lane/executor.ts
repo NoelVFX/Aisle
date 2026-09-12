@@ -14,7 +14,7 @@ import type { WebMcpSession } from "../webmcp/session.js";
 import { detectWebMcp, type FastLaneCapability } from "../webmcp/detector.js";
 import { assertPurchaseAllowed } from "./guards.js";
 import { executePurchase, readBalance } from "./purchase.js";
-import { assertBalanceDelta } from "./verify.js";
+import { verifyBalanceDelta, type VerifyRetryOptions } from "./verify.js";
 import {
   InMemoryIdempotencyStore,
   blocksNewPurchase,
@@ -22,7 +22,7 @@ import {
   type IdempotencyStore,
   type PurchaseRecord,
 } from "./idempotency.js";
-import { MandateRejectedError, NoFastLaneError, PurchaseFailedError, PurchaseVerificationError } from "../errors.js";
+import { MandateRejectedError, NoFastLaneError, PurchaseFailedError, PurchaseInFlightError, PurchaseVerificationError } from "../errors.js";
 import { makeEntitlement, makeResult, resolveRequirement } from "../core/outcome.js";
 
 export interface FastLaneDeps {
@@ -35,6 +35,8 @@ export interface FastLaneDeps {
   now?: () => Date;
   /** HMAC secret for mandate verification; defaults to process.env.MANDATE_SECRET. */
   mandateSecret?: string;
+  /** Balance verification reads; defaults to 3 attempts, 200ms apart. */
+  verifyRetry?: VerifyRetryOptions;
 }
 
 export type FastLaneEvent =
@@ -90,6 +92,9 @@ export async function runFastLane(request: RecoveryRequest, deps: FastLaneDeps):
   // A prior attempt that may have moved money: decide from observed state, never re-buy.
   const resolveExisting = async (existing: PurchaseRecord): Promise<RecoveryResult> => {
     emit({ type: "PURCHASE_SKIPPED_DUPLICATE", purchaseId: existing.purchaseId, status: existing.status });
+    if (existing.status === "PENDING") {
+      throw new PurchaseInFlightError(`Purchase for key ${key} is already in progress.`);
+    }
     const current = await readBalance(session, capability);
     if (current.balance < requirement.amount) {
       throw new PurchaseVerificationError(
@@ -141,13 +146,9 @@ export async function runFastLane(request: RecoveryRequest, deps: FastLaneDeps):
   }
 
   // 6. Verify by reading the balance, not the receipt ---------------------------
-  const after = await readBalance(session, capability);
-  try {
-    assertBalanceDelta(before.balance, after.balance, mandate.unitsGranted);
-  } catch (err) {
-    await store.update(key, { status: "FAILED" });
-    throw err;
-  }
+  // An unconfirmed balance must keep SUBMITTED/UNKNOWN blocking new purchases.
+  // Only an explicit vendor refusal above can mark this attempt FAILED.
+  const after = await verifyBalanceDelta(session, capability, before, mandate.unitsGranted, deps.verifyRetry);
   await store.update(key, { status: "VERIFIED" });
   emit({ type: "ENTITLEMENT_VERIFIED", before: before.balance, after: after.balance });
 

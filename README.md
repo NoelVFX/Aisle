@@ -4,6 +4,20 @@ The Aisle recovery engine, as a TypeScript library. When an agent's tool call
 hits a paywall, Aisle classifies it, freezes a checkpoint, buys the minimum,
 verifies the entitlement, and replays the exact call.
 
+For host integration, shared contracts, signing, and vendor MCP requirements,
+see [INTEGRATION.md](INTEGRATION.md).
+
+The fast lane can connect to a vendor's MCP endpoint using
+`connectMcpWebMcpSession({ provider, url, headers })`. Supply the resulting
+session to `runFastLane` and close it in `finally`. Provider and URL come from
+trusted configuration. The adapter supports Streamable HTTP and a transport
+override for tests; vendor capability hints travel in tool `_meta`.
+
+Fast-lane balance verification accepts `verifyRetry: { attempts, delayMsBetween }`
+(default: three reads, 200ms apart). Overlapping attempts raise
+`PurchaseInFlightError`; an unconfirmed submission remains blocking until its
+entitlement is reconciled. See the integration guide for error handling.
+
 **North star:** the specs in [`docs/`](docs/) —
 [`aisle-pipeline.md`](docs/aisle-pipeline.md) (system) ·
 [`steel.md`](docs/steel.md) (browser) ·

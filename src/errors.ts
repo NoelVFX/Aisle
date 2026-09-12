@@ -47,6 +47,13 @@ export class PurchaseFailedError extends FastLaneError {
   }
 }
 
+/** Another attempt for the same task and requirement is still running. */
+export class PurchaseInFlightError extends FastLaneError {
+  constructor(message: string) {
+    super(message, "PURCHASE_IN_FLIGHT");
+  }
+}
+
 /** Checkout "succeeded" but the balance did not reflect the expected entitlement. */
 export class PurchaseVerificationError extends FastLaneError {
   constructor(message: string) {

@@ -7,7 +7,7 @@
  * from observed state instead.
  *
  *   PENDING → SUBMITTED → VERIFIED
- *          ↘ UNKNOWN   → VERIFIED | FAILED      (never back to SUBMITTED)
+ *          ↘ UNKNOWN   → VERIFIED              (never back to SUBMITTED)
  *          ↘ FAILED     (the vendor explicitly refused; nothing was charged)
  */
 

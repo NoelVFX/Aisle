@@ -27,6 +27,10 @@ export interface MockVendorOptions {
   simulateBalanceNotUpdated?: boolean;
   /** Charge the account, then throw as if the response was lost in transit. */
   loseResponseAfterCharge?: boolean;
+  /** Alias from the standalone fast-lane mock. */
+  simulateLostResponseOnPurchase?: boolean;
+  /** Number of post-purchase reads that still report the old balance. */
+  balanceVisibilityDelayReads?: number;
 }
 
 export const MOCK_CATALOGUE: MockCatalogueItem[] = [
@@ -39,6 +43,8 @@ export class MockWebMcpVendor implements WebMcpSession {
   readonly provider: string;
   readonly origin: string;
   balance: number;
+  private staleBalance: number | undefined;
+  private staleReadsRemaining = 0;
   private readonly accountId: string;
   private readonly opts: MockVendorOptions;
   private readonly catalogue: MockCatalogueItem[];
@@ -75,9 +81,14 @@ export class MockWebMcpVendor implements WebMcpSession {
 
   async callTool(name: string, args: Record<string, unknown>): Promise<WebMcpToolResult> {
     if (name === "get_credit_balance") {
+      let reported = this.balance;
+      if (this.staleReadsRemaining > 0) {
+        reported = this.staleBalance ?? this.balance;
+        this.staleReadsRemaining -= 1;
+      }
       return {
         isError: false,
-        structuredContent: { balance: this.balance, accountId: this.accountId, resource: "credits" },
+        structuredContent: { balance: reported, accountId: this.accountId, resource: "credits" },
       };
     }
 
@@ -95,8 +106,12 @@ export class MockWebMcpVendor implements WebMcpSession {
       this.chargeCount += 1;
       const txn = `txn_mock_${this.chargeCount}`;
       if (key !== undefined) this.seenKeys.set(key, txn);
-      if (!this.opts.simulateBalanceNotUpdated) this.balance += item.units * quantity;
-      if (this.opts.loseResponseAfterCharge) throw new Error("socket hang up");
+      if (!this.opts.simulateBalanceNotUpdated) {
+        this.staleBalance = this.balance;
+        this.staleReadsRemaining = this.opts.balanceVisibilityDelayReads ?? 0;
+        this.balance += item.units * quantity;
+      }
+      if (this.opts.loseResponseAfterCharge || this.opts.simulateLostResponseOnPurchase) throw new Error("socket hang up");
       return {
         isError: false,
         structuredContent: { transactionId: txn, creditsAdded: item.units * quantity, balance: this.balance },

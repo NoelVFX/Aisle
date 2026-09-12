@@ -6,6 +6,8 @@ import {
   MandateRejectedError,
   NoFastLaneError,
   PurchaseVerificationError,
+  PurchaseInFlightError,
+  purchaseKeyFor,
 } from "../src/index.js";
 import { makeRequest, SECRET } from "./fixtures.js";
 
@@ -106,8 +108,9 @@ describe("fast lane — verification", () => {
     const store = new InMemoryIdempotencyStore();
     const r = req();
     await expect(runFastLane(r, deps(vendor, { store }))).rejects.toBeInstanceOf(PurchaseVerificationError);
-    // Same (consumed) mandate: refused. Nothing is re-bought and no token issued.
-    await expect(runFastLane(r, deps(vendor, { store }))).rejects.toMatchObject({ code: "MANDATE_ALREADY_USED" });
+    // Unverified submission remains blocking, even with a fresh mandate.
+    await expect(runFastLane(r, deps(vendor, { store }))).rejects.toBeInstanceOf(PurchaseVerificationError);
+    await expect(runFastLane(req(), deps(vendor, { store }))).rejects.toBeInstanceOf(PurchaseVerificationError);
     expect(vendor.chargeCount).toBe(1);
   });
 
@@ -122,6 +125,55 @@ describe("fast lane — verification", () => {
 });
 
 describe("fast lane — idempotency", () => {
+  it("refuses overlapping attempts while the first purchase is running", async () => {
+    const vendor = new MockWebMcpVendor({ provider: PROVIDER, origin: ORIGIN });
+    const store = new InMemoryIdempotencyStore();
+    const original = vendor.callTool.bind(vendor);
+    let release!: () => void;
+    let started!: () => void;
+    const waiting = new Promise<void>((resolve) => { release = resolve; });
+    const purchasing = new Promise<void>((resolve) => { started = resolve; });
+    vendor.callTool = async (name, args) => {
+      if (name === "purchase_credits") {
+        started();
+        await waiting;
+      }
+      return original(name, args);
+    };
+    const first = runFastLane(req(), deps(vendor, { store }));
+    await purchasing;
+    try {
+      await expect(runFastLane(req(), deps(vendor, { store }))).rejects.toBeInstanceOf(PurchaseInFlightError);
+    } finally {
+      release();
+      await first;
+    }
+    expect(vendor.chargeCount).toBe(1);
+  });
+
+  it("refuses to resume when a previously verified balance has been spent", async () => {
+    const vendor = new MockWebMcpVendor({ provider: PROVIDER, origin: ORIGIN });
+    const store = new InMemoryIdempotencyStore();
+    await runFastLane(req(), deps(vendor, { store }));
+    vendor.balance = 0;
+    await expect(runFastLane(req(), deps(vendor, { store }))).rejects.toBeInstanceOf(PurchaseVerificationError);
+    expect(vendor.chargeCount).toBe(1);
+  });
+
+  it("allows a fresh mandate after an explicit vendor refusal", async () => {
+    const vendor = new MockWebMcpVendor({ provider: PROVIDER, origin: ORIGIN });
+    const store = new InMemoryIdempotencyStore();
+    const original = vendor.callTool.bind(vendor);
+    vendor.callTool = async (name, args) => name === "purchase_credits"
+      ? { isError: true, text: "Purchase declined; nothing charged" }
+      : original(name, args);
+    await expect(runFastLane(req(), deps(vendor, { store }))).rejects.toMatchObject({ code: "PURCHASE_FAILED" });
+    vendor.callTool = original;
+    const result = await runFastLane(req(), deps(vendor, { store }));
+    expect(result.verifiedEntitlement.balance).toBe(5000);
+    expect(vendor.chargeCount).toBe(1);
+  });
+
   it("does not buy twice for the same requirement", async () => {
     const vendor = new MockWebMcpVendor({ provider: PROVIDER, origin: ORIGIN });
     const store = new InMemoryIdempotencyStore();
@@ -138,6 +190,57 @@ describe("fast lane — idempotency", () => {
     const store = new InMemoryIdempotencyStore();
     await runFastLane(req(), deps(vendor, { store }));
     await runFastLane(req(), deps(vendor, { store }));
+    expect(vendor.chargeCount).toBe(1);
+  });
+});
+
+describe("fast lane — merged verification behavior", () => {
+  it("rejects a mandate verified with the wrong secret", async () => {
+    const vendor = new MockWebMcpVendor({ provider: PROVIDER, origin: ORIGIN });
+    await expect(runFastLane(req(), deps(vendor, { mandateSecret: "wrong-secret" }))).rejects.toBeInstanceOf(MandateRejectedError);
+    expect(vendor.purchaseCallCount).toBe(0);
+  });
+
+  it.each([false, true])("retries stale balances after purchase (lost response: %s)", async (lost) => {
+    const vendor = new MockWebMcpVendor({
+      provider: PROVIDER, origin: ORIGIN, balanceVisibilityDelayReads: 2,
+      simulateLostResponseOnPurchase: lost,
+    });
+    const result = await runFastLane(req(), deps(vendor, { verifyRetry: { attempts: 3, delayMsBetween: 0 } }));
+    expect(result.verifiedEntitlement.balance).toBe(5000);
+    expect(vendor.purchaseCallCount).toBe(1);
+  });
+
+  it.each([false, true])("keeps an unverified attempt blocking another purchase (lost response: %s)", async (lost) => {
+    const vendor = new MockWebMcpVendor({
+      provider: PROVIDER, origin: ORIGIN, balanceVisibilityDelayReads: 10,
+      simulateLostResponseOnPurchase: lost,
+    });
+    const store = new InMemoryIdempotencyStore();
+    const request = req();
+    const options = deps(vendor, { store, verifyRetry: { attempts: 2, delayMsBetween: 0 } });
+    await expect(runFastLane(request, options)).rejects.toBeInstanceOf(PurchaseVerificationError);
+    const key = purchaseKeyFor(request.mandate, { resource: "credits", amount: 3200 });
+    expect((await store.get(key))?.status).toBe(lost ? "UNKNOWN" : "SUBMITTED");
+    await expect(runFastLane(req(), options)).rejects.toBeInstanceOf(PurchaseVerificationError);
+    expect(vendor.purchaseCallCount).toBe(1);
+    // When the vendor finally exposes the credit, recover without purchasing.
+    vendor.callTool = async () => ({ isError: false, structuredContent: { balance: 5000, resource: "credits" } });
+    expect((await runFastLane(request, options)).verifiedEntitlement.balance).toBe(5000);
+    expect((await store.get(key))?.status).toBe("VERIFIED");
+  });
+
+  it.each(["accountId", "resource"])("rejects verification when %s changes after purchase", async (field) => {
+    const vendor = new MockWebMcpVendor({ provider: PROVIDER, origin: ORIGIN });
+    const original = vendor.callTool.bind(vendor);
+    vendor.callTool = async (name, args) => {
+      const result = await original(name, args);
+      if (name === "get_credit_balance" && vendor.chargeCount > 0 && result.structuredContent) {
+        result.structuredContent[field] = "different";
+      }
+      return result;
+    };
+    await expect(runFastLane(req(), deps(vendor))).rejects.toBeInstanceOf(PurchaseVerificationError);
     expect(vendor.chargeCount).toBe(1);
   });
 });

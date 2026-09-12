@@ -49,6 +49,10 @@ export type { FastLaneDeps, FastLaneEvent } from "./fast-lane/executor.js";
 export { detectWebMcp } from "./webmcp/detector.js";
 export type { DetectionResult, FastLaneCapability } from "./webmcp/detector.js";
 export type { WebMcpSession, WebMcpTool, WebMcpToolResult, WebMcpToolAnnotations } from "./webmcp/session.js";
+export { McpWebMcpSession, connectMcpWebMcpSession } from "./webmcp/mcp-http-session.js";
+export type { McpWebMcpSessionOptions } from "./webmcp/mcp-http-session.js";
+export { DEFAULT_VERIFY_RETRY } from "./fast-lane/verify.js";
+export type { VerifyRetryOptions } from "./fast-lane/verify.js";
 export { assertPurchaseAllowed, normalizeOrigin } from "./fast-lane/guards.js";
 export type { GuardContext } from "./fast-lane/guards.js";
 export { InMemoryIdempotencyStore, blocksNewPurchase, purchaseKeyFor } from "./fast-lane/idempotency.js";
@@ -121,6 +125,7 @@ export {
   MandateRejectedError,
   NoFastLaneError,
   PurchaseFailedError,
+  PurchaseInFlightError,
   PurchaseVerificationError,
   ResolutionExhaustedError,
   SubmitWithheldError,
