@@ -31,10 +31,36 @@ import type {
 export interface SteelProviderOptions {
   /** Defaults to process.env.STEEL_API_KEY. */
   apiKey?: string;
-  /** Extra options forwarded to sessions.create (proxy, captcha, dimensions, …). */
-  sessionOptions?: SessionCreateParams;
   /** Navigation default timeout (ms). */
   navigationTimeoutMs?: number;
+
+  // ---- First-class below-the-protocol Steel features -----------------------
+
+  /** Route the session through Steel's residential proxy pool. */
+  useProxy?: boolean;
+  /** Bring-your-own proxy (overrides useProxy). http(s)://user:pass@host:port */
+  proxyUrl?: string;
+  /** Enable Steel's automatic CAPTCHA solving. */
+  solveCaptcha?: boolean;
+  /** Steel stealth / anti-fingerprint options (set before the socket exists). */
+  stealth?: SessionCreateParams["stealthConfig"];
+  /** Block ads/trackers in the session. */
+  blockAds?: boolean;
+  /** Region to start the browser in (latency / geo). */
+  region?: SessionCreateParams["region"];
+  /** Viewport dimensions. */
+  dimensions?: SessionCreateParams["dimensions"];
+  /**
+   * Enable Steel CREDENTIAL INJECTION for the session. Steel types stored
+   * secrets straight into the page, so the card/login never enters this process
+   * or a model prompt. This flag carries NO secret — the value must be stored in
+   * Steel out-of-band (dashboard or `client.credentials.create`), keyed to the
+   * vendor origin. This agent never handles the plaintext secret itself.
+   */
+  credentials?: SessionCreateParams["credentials"];
+
+  /** Escape hatch: raw sessions.create params, merged under the named options. */
+  sessionOptions?: SessionCreateParams;
 }
 
 class PlaywrightPage implements PageLike {
@@ -66,6 +92,20 @@ class PlaywrightPage implements PageLike {
   }
   async waitForSelector(selector: string, timeoutMs?: number): Promise<void> {
     await this.page.waitForSelector(selector, timeoutMs === undefined ? {} : { timeout: timeoutMs });
+  }
+  async innerText(): Promise<string> {
+    // Playwright API (not evaluate) — read-only, so isTrusted is irrelevant here.
+    return this.page.locator("body").innerText();
+  }
+  async tryClickByText(text: string): Promise<boolean> {
+    const loc = this.page.getByText(text, { exact: false }).first();
+    if ((await loc.count()) === 0) return false;
+    try {
+      await loc.click({ timeout: 4000 });
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
 
@@ -137,7 +177,17 @@ export class SteelBrowserProvider implements BrowserProvider {
   async createSession(opts: CreateSessionOptions): Promise<BrowserSession> {
     const client = new Steel({ steelAPIKey: this.apiKey });
 
-    const body: SessionCreateParams = { ...this.options.sessionOptions };
+    // Named options win over the raw escape hatch.
+    const o = this.options;
+    const body: SessionCreateParams = { ...o.sessionOptions };
+    if (o.useProxy !== undefined) body.useProxy = o.useProxy;
+    if (o.proxyUrl !== undefined) body.proxyUrl = o.proxyUrl;
+    if (o.solveCaptcha !== undefined) body.solveCaptcha = o.solveCaptcha;
+    if (o.stealth !== undefined) body.stealthConfig = o.stealth;
+    if (o.blockAds !== undefined) body.blockAds = o.blockAds;
+    if (o.region !== undefined) body.region = o.region;
+    if (o.dimensions !== undefined) body.dimensions = o.dimensions;
+    if (o.credentials !== undefined) body.credentials = o.credentials;
     if (opts.profile?.context !== undefined) {
       // Resume saved auth (cookies/localStorage) for this vendor.
       body.sessionContext = opts.profile.context as SessionCreateParams["sessionContext"];

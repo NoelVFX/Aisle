@@ -37,6 +37,8 @@ export interface MockVendorConfig {
   failDiscoverUntilAssisted?: boolean;
   /** Simulate the vendor redirecting navigation to a different origin. */
   redirectOrigin?: string;
+  /** Confirm "succeeds" but credits never post (verification must fail). */
+  dropCredits?: boolean;
 }
 
 const DEFAULT_OFFERS: PurchaseOffer[] = [
@@ -59,6 +61,7 @@ export class MockVendorSite {
   discoverUnlocked: boolean;
   purchaseClicks = 0;
   readonly redirectOrigin?: string;
+  readonly dropCredits: boolean;
 
   constructor(cfg: MockVendorConfig = {}) {
     this.provider = cfg.provider ?? "mock-slow-vendor";
@@ -69,6 +72,7 @@ export class MockVendorSite {
     this.url = this.origin + "/";
     this.discoverUnlocked = !cfg.failDiscoverUntilAssisted;
     this.redirectOrigin = cfg.redirectOrigin;
+    this.dropCredits = cfg.dropCredits ?? false;
   }
 }
 
@@ -99,11 +103,31 @@ class MockPage implements PageLike {
     if (this.site.path === "/checkout" && /confirm|pay/i.test(text)) {
       this.site.purchaseClicks += 1;
       const offer = this.site.offers.find((o) => o.productId === this.site.stagedProductId);
-      if (offer) {
+      if (offer && !this.site.dropCredits) {
         this.site.balance += offer.units;
-        this.site.lastTxn = `txn_mock_${this.site.purchaseClicks}`;
       }
+      this.site.lastTxn = `txn_mock_${this.site.purchaseClicks}`;
     }
+  }
+  async innerText(): Promise<string> {
+    if (this.site.path === "/pricing" && this.site.discoverUnlocked) {
+      return this.site.offers
+        .map((o) => `${o.label} — $${o.price} for ${o.units} credits`)
+        .join("\n");
+    }
+    if (this.site.path === "/checkout") {
+      const offer = this.site.offers.find((o) => o.productId === this.site.stagedProductId);
+      return offer ? `Order total: $${offer.price}` : "";
+    }
+    if (this.site.path === "/account") {
+      return `Credit balance: ${this.site.balance} credits`;
+    }
+    return "";
+  }
+  async tryClickByText(text: string): Promise<boolean> {
+    const before = this.site.path;
+    await this.clickByText(text);
+    return this.site.path !== before || this.site.purchaseClicks > 0;
   }
   async clickBySelector(): Promise<void> {
     /* not used by the mock adapter */

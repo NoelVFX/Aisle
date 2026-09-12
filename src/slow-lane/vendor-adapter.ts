@@ -15,6 +15,7 @@
 import type { PageLike } from "./browser.js";
 import type {
   PurchaseOffer,
+  Quote,
   PurchaseVerification,
   Requirement,
   StagedPurchase,
@@ -65,4 +66,21 @@ export function chooseMinimumOffer(
   return offers
     .filter((o) => o.units >= requirement.amount)
     .sort((a, b) => a.price - b.price)[0];
+}
+
+/**
+ * Pick the offer to actually buy. Prefers an exact match to the approved
+ * quote's product id (deterministic adapters), and otherwise falls back to the
+ * cheapest offer that satisfies the requirement (generic adapters that synthesize
+ * ids from the page). Vendor-agnostic, so one generic adapter works across sites.
+ */
+export function selectOffer(
+  offers: PurchaseOffer[],
+  quote: Quote,
+  requirement: Requirement,
+): PurchaseOffer | undefined {
+  // Prefer the approved product, but only if it actually satisfies the need.
+  const exact = offers.find((o) => o.productId === quote.purchase.productId);
+  if (exact && exact.units >= requirement.amount) return exact;
+  return chooseMinimumOffer(offers, requirement);
 }

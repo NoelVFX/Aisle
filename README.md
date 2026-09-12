@@ -131,17 +131,53 @@ implements the same interface.
 - **Profiles.** After authenticating, the session context (cookies/localStorage)
   is saved via a `ProfileStore` (`InMemory` / `File`) and resumed next time.
 
-Real wiring:
+### One adapter for most vendors
+
+`GenericVendorAdapter` is the default: no per-vendor class. It guesses the
+pricing/billing paths, reads prices and unit counts out of the page text, clicks
+buy/confirm by common labels, and reads the balance back — and the instant a
+step is ambiguous it throws `DeterministicStepError`, so the worker hands that
+sub-goal to the computer-use agent. Easy sites go fast; hard ones (canvas,
+closed shadow DOM, unusual layouts) fall through to the model. Tune a vendor with
+config, not code.
 
 ```ts
-import { SteelBrowserProvider, FileProfileStore, createAnthropicComputerUseAgent } from "top-up-agent";
+import {
+  SteelBrowserProvider, GenericVendorAdapter,
+  FileProfileStore, createAnthropicComputerUseAgent,
+} from "top-up-agent";
 
-const provider = new SteelBrowserProvider();           // STEEL_API_KEY
+const provider = new SteelBrowserProvider({
+  useProxy: true,                 // residential proxy pool
+  solveCaptcha: true,             // Steel's CAPTCHA sidecar
+  stealth: { humanizeInteractions: true },
+  credentials: { autoSubmit: true, blurFields: true },  // enable injection (see below)
+});
+const adapter  = new GenericVendorAdapter({ provider: "acme", origin: "https://acme.example" });
 const profiles = new FileProfileStore("./.profiles");
 const agent    = createAnthropicComputerUseAgent(anthropicClient);
-const adapter  = new HiggsfieldAdapter();              // your VendorPurchaseAdapter
+
 await runSlowLane(request, { provider, adapter, profiles, agent });
 ```
+
+`SteelProviderOptions` surfaces the below-the-protocol features as first-class:
+`useProxy` / `proxyUrl`, `solveCaptcha`, `stealth`, `blockAds`, `region`,
+`dimensions`, `credentials`, plus a raw `sessionOptions` escape hatch.
+
+### Credentials injection (the card never touches this agent)
+
+Setting `credentials` on the provider enables Steel to **type stored secrets
+straight into the page** — so the card/login never enters this process or a model
+prompt. That flag carries **no secret**. The value must be stored in Steel
+out-of-band, keyed to the vendor origin, e.g. from your own code:
+
+```ts
+// Run this yourself, once, with the user's consent — NOT inside the agent loop.
+await steel.credentials.create({ origin: "https://acme.example", value: { /* card/login */ } });
+```
+
+This agent deliberately never accepts a plaintext card or types payment
+credentials itself; it only flips the injection switch.
 
 ## Commands
 
@@ -177,10 +213,11 @@ src/
 │   ├── browser.ts            PageLike / ControlSurface / BrowserProvider ports
 │   ├── steel-provider.ts     Steel Cloud + Playwright-over-CDP implementation
 │   ├── profiles.ts           ProfileStore (InMemory / File) — Steel profile saving
-│   ├── vendor-adapter.ts     VendorPurchaseAdapter interface + chooseMinimumOffer
+│   ├── vendor-adapter.ts     VendorPurchaseAdapter interface + chooseMinimumOffer/selectOffer
 │   ├── computer-use.ts       ComputerUseAgent + Scripted + Anthropic reference
 │   └── adapters/
-│       └── mock-vendor-site.ts   in-memory vendor site + adapter + browser
+│       ├── generic-vendor-adapter.ts  ONE adapter for most vendors (heuristics + fallback)
+│       └── mock-vendor-site.ts        in-memory vendor site + adapter + browser
 ├── resume/
 │   └── resume-token.ts       build/validate the handoff artifact
 ├── mock/

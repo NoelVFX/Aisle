@@ -36,6 +36,7 @@ import {
 import { originOf, type BrowserProvider, type BrowserSession } from "./browser.js";
 import {
   DeterministicStepError,
+  selectOffer,
   type VendorPurchaseAdapter,
 } from "./vendor-adapter.js";
 import type { ComputerUseAgent } from "./computer-use.js";
@@ -144,15 +145,21 @@ export async function runSlowLane(
     );
     emit({ type: "OFFERS_DISCOVERED", count: offers.length });
 
-    const offer = offers.find((o) => o.productId === quote.purchase.productId);
+    const offer = selectOffer(offers, quote, requirement);
     if (!offer) {
       throw new PurchaseFailedError(
-        `Quoted product '${quote.purchase.productId}' not found on the vendor pricing page.`,
+        `No offer grants the required ${requirement.amount} ${requirement.resource}.`,
       );
     }
+    // Never spend above the mandate ceiling, and never above what was approved.
     if (offer.price > mandate.maximumAmount) {
       throw new MandateRejectedError(
-        `Discovered price ${offer.price} exceeds mandate maximum ${mandate.maximumAmount}.`,
+        `Selected price ${offer.price} exceeds mandate maximum ${mandate.maximumAmount}.`,
+      );
+    }
+    if (offer.price > quote.purchase.price) {
+      throw new MandateRejectedError(
+        `Selected price ${offer.price} exceeds the approved quote ${quote.purchase.price}.`,
       );
     }
     emit({ type: "OFFER_SELECTED", productId: offer.productId, price: offer.price });

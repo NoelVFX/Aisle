@@ -23,6 +23,18 @@ export interface PageLike {
   /** Text content of every element matching the selector. */
   queryAllText(selector: string): Promise<string[]>;
   waitForSelector(selector: string, timeoutMs?: number): Promise<void>;
+  /**
+   * Whole-page visible text. Used by the generic adapter for heuristic price /
+   * balance extraction. Read-only (no click) so the isTrusted concern doesn't
+   * apply.
+   */
+  innerText(): Promise<string>;
+  /**
+   * Click the first element containing `text` IF present, returning whether it
+   * clicked. Never throws on absence — lets the generic adapter try a list of
+   * candidate labels. Goes through the real input pipeline (isTrusted:true).
+   */
+  tryClickByText(text: string): Promise<boolean>;
 }
 
 /** Pixel-level control, used only by the computer-use fallback. */

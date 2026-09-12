@@ -47,8 +47,16 @@ export type { ProfileStore } from "./slow-lane/profiles.js";
 export {
   DeterministicStepError,
   chooseMinimumOffer,
+  selectOffer,
 } from "./slow-lane/vendor-adapter.js";
 export type { VendorPurchaseAdapter } from "./slow-lane/vendor-adapter.js";
+export {
+  GenericVendorAdapter,
+  parseOffersFromText,
+  extractPrice,
+  extractUnits,
+} from "./slow-lane/adapters/generic-vendor-adapter.js";
+export type { GenericAdapterConfig } from "./slow-lane/adapters/generic-vendor-adapter.js";
 export {
   ScriptedComputerUseAgent,
   createAnthropicComputerUseAgent,

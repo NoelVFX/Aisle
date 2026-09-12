@@ -96,14 +96,26 @@ describe("slow lane — guards", () => {
 });
 
 describe("slow lane — verification", () => {
-  it("fails when the quoted product is present but credits never land", async () => {
-    // Requirement above what the package grants → verification threshold not met.
+  it("fails when checkout completes but credits never post", async () => {
+    const site = new MockVendorSite({
+      provider: PROVIDER,
+      origin: ORIGIN,
+      startingBalance: 0,
+      dropCredits: true,
+    });
+    await expect(
+      runSlowLane(makeRequest(), { provider: new MockBrowserProvider(site), adapter: new MockVendorAdapter(site) }),
+    ).rejects.toBeInstanceOf(PurchaseVerificationError);
+  });
+
+  it("fails early (no purchase) when no offer can satisfy the requirement", async () => {
     const site = new MockVendorSite({ provider: PROVIDER, origin: ORIGIN, startingBalance: 0 });
     const req = makeRequest();
     req.requirement = { resource: "credits", amount: 999_999 };
     await expect(
       runSlowLane(req, { provider: new MockBrowserProvider(site), adapter: new MockVendorAdapter(site) }),
-    ).rejects.toBeInstanceOf(PurchaseVerificationError);
+    ).rejects.toBeTruthy();
+    expect(site.purchaseClicks).toBe(0);
   });
 });
 
