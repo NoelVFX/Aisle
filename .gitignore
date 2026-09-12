@@ -11,3 +11,6 @@ coverage/
 # Smoke-test artifacts
 steel-smoke.png
 .profiles/
+
+# Gateway state (events, screenshots)
+.aisle/

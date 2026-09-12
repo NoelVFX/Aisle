@@ -1,0 +1,25 @@
+{
+  "openai": {
+    "description": "OpenAI API. A key on an account with no credits returns 429 insufficient_quota, a real billing wall.",
+    "canonicalOrigin": "https://api.openai.com",
+    "billingOrigin": "https://platform.openai.com",
+    "authEnv": "OPENAI_API_KEY",
+    "resource": "usd_balance",
+    "offers": [
+      { "productId": "openai_credits_5", "label": "$5 API credits", "unitsGranted": 5, "price": 5, "currency": "USD", "billing": "one_time", "autoRenew": false },
+      { "productId": "openai_credits_10", "label": "$10 API credits", "unitsGranted": 10, "price": 10, "currency": "USD", "billing": "one_time", "autoRenew": false },
+      { "productId": "openai_credits_25", "label": "$25 API credits", "unitsGranted": 25, "price": 25, "currency": "USD", "billing": "one_time", "autoRenew": false }
+    ]
+  },
+  "mockvendor": {
+    "description": "In-process mock image vendor. Starts at 0 credits and returns 402 insufficient_credits. Its billing origin is a public placeholder so the cloud Steel browser has a real page to open.",
+    "canonicalOrigin": "https://mockvendor.aisle.test",
+    "billingOrigin": "https://example.com",
+    "resource": "image_credits",
+    "offers": [
+      { "productId": "c1000", "label": "1,000 credits", "unitsGranted": 1000, "price": 5, "currency": "USD", "billing": "one_time", "autoRenew": false },
+      { "productId": "c5000", "label": "5,000 credits", "unitsGranted": 5000, "price": 20, "currency": "USD", "billing": "one_time", "autoRenew": false },
+      { "productId": "c25000", "label": "25,000 credits", "unitsGranted": 25000, "price": 80, "currency": "USD", "billing": "one_time", "autoRenew": false }
+    ]
+  }
+}

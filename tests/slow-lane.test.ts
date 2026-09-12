@@ -21,6 +21,8 @@ import {
 import { makeRequest, SECRET } from "./fixtures.js";
 
 const PROVIDER = "mock-slow-vendor";
+/** makeRequest signs mandates for this user. */
+const USER = "demo-user";
 const ORIGIN = "https://shop.mock-slow-vendor.test";
 const req = () => makeRequest({ provider: PROVIDER, origin: ORIGIN });
 
@@ -47,13 +49,59 @@ describe("slow lane — happy path", () => {
     expect(site.purchaseClicks).toBe(1);
     expect(result.verifiedEntitlement.balance).toBe(5000);
     expect(result.resumeToken.resumeAction).toEqual({ tool: "generate_image", arguments: { prompt: "hero #2" } });
-    expect(await profiles.load(PROVIDER)).toBeDefined();
+    expect(await profiles.load(USER, PROVIDER)).toBeDefined();
     const staged = events.indexOf("CHECKOUT_STAGED");
     const compared = events.indexOf("MANDATE_COMPARISON_PASSED");
     const submitted = events.indexOf("PURCHASE_SUBMITTED");
     expect(staged).toBeGreaterThan(-1);
     expect(staged).toBeLessThan(compared);
     expect(compared).toBeLessThan(submitted);
+  });
+});
+
+describe("slow lane — Steel profiles (steel.md §6)", () => {
+  it("creates a pinned profile on the first run, then restores the same profile and IP", async () => {
+    const profiles = new InMemoryProfileStore();
+    const { site, deps, events } = setup({}, { profiles });
+    const provider = new MockBrowserProvider(site, { dedicatedIpId: "fixed:ip1" });
+    deps.provider = provider;
+
+    await runSlowLane(req(), deps);
+    expect(provider.created[0]?.profile).toBeUndefined();
+    expect(events).toContain("PROFILE_CREATED");
+    const first = await profiles.load(USER, PROVIDER);
+    expect(first).toMatchObject({ userId: USER, provider: PROVIDER, profileId: "prof_mock_1", dedicatedIpId: "fixed:ip1" });
+    expect(first?.lastVerifiedAt).toBeDefined();
+
+    await runSlowLane(req(), deps);
+    expect(provider.created[1]?.profile).toMatchObject({ profileId: "prof_mock_1", dedicatedIpId: "fixed:ip1" });
+    expect(await profiles.load(USER, PROVIDER)).toMatchObject({ profileId: "prof_mock_1" });
+  });
+
+  it("waits for READY after release, only on a verified outcome", async () => {
+    const { deps, events } = setup({}, { profiles: new InMemoryProfileStore() });
+    await runSlowLane(req(), deps);
+    expect(events.indexOf("SESSION_CLOSED")).toBeLessThan(events.indexOf("PROFILE_READY"));
+    expect((deps.provider as MockBrowserProvider).awaitedProfiles).toEqual(["prof_mock_1"]);
+  });
+
+  it("binds a new profile on a failed job but never marks it verified or waits on it", async () => {
+    const profiles = new InMemoryProfileStore();
+    const { deps, events } = setup({ dropCredits: true }, { profiles });
+    await expect(runSlowLane(req(), deps)).rejects.toBeInstanceOf(PurchaseVerificationError);
+    const saved = await profiles.load(USER, PROVIDER);
+    expect(saved?.profileId).toBe("prof_mock_1");
+    expect(saved?.lastVerifiedAt).toBeUndefined();
+    expect(events).not.toContain("PROFILE_READY");
+  });
+
+  it("never puts a profileId in an event", async () => {
+    const payloads: string[] = [];
+    const { deps } = setup({}, { profiles: new InMemoryProfileStore() });
+    deps.emit = (e) => payloads.push(JSON.stringify(e));
+    await runSlowLane(req(), deps);
+    await runSlowLane(req(), deps);
+    expect(payloads.join("\n")).not.toContain("prof_mock_");
   });
 });
 

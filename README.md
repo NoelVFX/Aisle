@@ -103,7 +103,7 @@ npm run demo          # 402 → classify → checkpoint → quote → gate → m
 npm run demo:slow     # slow lane against a mock vendor site (no Steel key)
 npm test              # vitest, all suites
 npm run typecheck
-npm run smoke:steel   # real Steel session: create → assert timeout → CDP → navigate → release
+npm run smoke:steel   # real Steel: create on new profile → CDP → navigate → release → READY (timed) → restore
 ```
 
 Environment variables are listed in [`.env.example`](.env.example).
@@ -116,6 +116,32 @@ Environment variables are listed in [`.env.example`](.env.example).
 `optimizeBandwidth`. It uses the page Steel already opened and never calls
 `newContext()`, sets 90-second timeouts for captcha solves, and releases the
 session on every path, including a failed CDP connect.
+
+### Profiles: remembering a vendor login
+
+Every purchase worker runs on a Steel profile (`steel.md` §6), bound per
+`(userId, provider)` in a `ProfileStore`. The old auth-context path
+(`sessions.context` → `sessionContext`) is gone.
+
+| When | What happens |
+|---|---|
+| First run | `persistProfile: true` without a `profileId`; Steel creates the profile and the binding is stored immediately, so a failed job can't orphan it |
+| Later runs | `profileId` restores the full userDataDir (cookies, storage, IndexedDB, autofill) |
+| Session create | throws `STEEL_PROFILE_NOT_CREATED` / `STEEL_PROFILE_NOT_MOUNTED` if Steel didn't mount what was asked |
+| Verified outcome | binding gets `lastVerifiedAt`; after release the worker polls `profiles.get` until `READY` (`PROFILE_READY` event) |
+
+**Dedicated IP pin.** A profile created while a dedicated IP is configured
+(`dedicatedIpId` or `STEEL_DEDICATED_IP_ID`, a `fixed:…` id from Settings → Network)
+records it, and every later session on that profile uses
+`useProxy: { type: "fixed", id }`. A restored profile keeps its own IP even if
+the configured one changes. A `proxyUrl` that would override a pin throws
+`PROFILE_IP_PIN_CONFLICT`. Profiles with no pin still use the rotating residential
+pool; `PROFILE_RESTORED.dedicatedIp` shows which.
+
+A `profileId` is credential-tier: events and errors never include it, and
+`FileProfileStore` writes owner-only files. Trade-off versus auth context:
+Steel persists the profile on release even when the job fails, so a refused or
+failed recovery can leave state behind in the profile.
 
 ### Computer use: Steel executor, OpenRouter brain
 
@@ -139,15 +165,55 @@ Set `controlSurface: "playwright"` to execute actions through Playwright over
 CDP instead. Override the model with `OPENROUTER_VISION_MODEL` or the `model`
 option; it must accept image input. The resolver never clicks the final submit.
 
+## MCP gateway (test it from Codex or Claude Code)
+
+`src/gateway/` is a local stdio MCP server. The agent calls vendor tools through
+it; a billing wall blocks the call, opens a recovery, asks for one approval tap,
+runs a Steel session on the locked billing origin, and then replays or reports.
+
+| Tool | What it does |
+|---|---|
+| `openai__chat` | Real OpenAI chat completion with `OPENAI_API_KEY` |
+| `mockvendor__generate_image` | In-process mock that returns 402 until credited |
+| `aisle__wait_for_recovery` | Blocks again on a recovery that outlived `SAFE_BLOCK_MS` |
+| `aisle__spend_report` | Spend and recoveries for this session |
+
+```bash
+codex mcp add aisle --env SAFE_BLOCK_MS=240000 -- "$PWD/node_modules/.bin/tsx" "$PWD/src/gateway/server.ts"
+# then in ~/.codex/config.toml under [mcp_servers.aisle]:  tool_timeout_sec = 300
+npm run smoke:gateway   # same flow over stdio without Codex, approves automatically
+```
+
+Try these prompts in Codex:
+
+- *"Use the openai chat tool to ask: what is 2+2?"*
+- *"Generate a hero image with the mock vendor."*
+
+What happens depends on the vendor's answer:
+
+| Upstream answer | Aisle's behaviour |
+|---|---|
+| OpenAI with a blank key: 401 | Not a billing wall. Passed through untouched, no recovery |
+| OpenAI with a no-credit key: 429 `insufficient_quota` | Recovery → approval page → Steel opens `platform.openai.com` → `DRY_RUN_COMPLETE`, nothing bought, no replay |
+| OpenAI 429 `rate_limit_exceeded` | Retry once, never buy |
+| Mock vendor: 402 `insufficient_credits` | Recovery → approval → Steel opens `https://example.com` → mock credited → original call replayed and succeeds |
+
+The approval page opens in your browser at `http://127.0.0.1:8787/r/{id}`. The
+timeline, logs and Steel screenshots go to `.aisle/`. No real money moves: the
+gateway never runs a checkout. Its Steel session skips proxies and captcha
+solving unless `AISLE_STEEL_PROXY_CAPTCHA=1`, since those need a paid Steel balance.
+
 ## Not built yet (in the docs, not in this package)
 
-- **MCP gateway** (`apps/gateway`): namespacing, the blocking call, `SAFE_BLOCK_MS`,
-  `aisle__wait_for_recovery`, replay.
-- **Control plane** (`apps/api`): recovery jobs, SSE event stream, `/r/:id` approve/reject.
-- **Approval page** (`apps/web`) and the web path (CDP 402 detector, enrollments).
+- **Remote HTTP gateway** (`apps/gateway`): the local gateway is stdio, one per agent
+  session. Real purchases through the lanes are not wired into it yet.
+- **Control plane** (`apps/api`): durable recovery jobs and the SSE event stream. The
+  gateway keeps jobs in memory and its approval page polls.
+- **Web path** (CDP 402 detector, enrollments).
 - **Postgres** (`db/schema.sql`). Stores here are in-memory behind interfaces.
 - **Tier 1 JSON-LD / Browser Tools markdown offers, tier 3 AX-index picker, adapter
   promotion, `REPLAY_RESOLVER`.**
-- **Steel features the SDK now supports but the code doesn't use yet:** the Profiles API
-  (profiles still use session context), extension attach, and view-only viewer
-  config. Steel SDK 0.18 has no trace export.
+- **Steel features the SDK now supports but the code doesn't use yet:** extension
+  attach and view-only viewer config. Steel SDK 0.18 has no trace export.
+- **Profile READY latency is unmeasured.** `waitForProfileReady` defaults to 60s;
+  run `npm run smoke:steel` and set `profileReadyTimeoutMs` from the printed time.

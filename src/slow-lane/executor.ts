@@ -1,10 +1,11 @@
 /**
  * Slow lane — the browser purchase worker (steel.md §20, aisle-pipeline.md §15, §18).
  *
- *   open session (restore profile) → navigate to the LOCKED billing origin →
- *   guard → liveness probe → entitlement check → discover offers → stage →
- *   Gate 1 (staged vs mandate) → claim + consume mandate → deterministic submit →
- *   verify by balance delta (Gate 2) → save profile → receipts → resume record
+ *   open session on the (user, vendor) Steel profile → navigate to the LOCKED
+ *   billing origin → guard → liveness probe → entitlement check → discover
+ *   offers → stage → Gate 1 (staged vs mandate) → claim + consume mandate →
+ *   deterministic submit → verify by balance delta (Gate 2) → mark profile
+ *   verified → receipts → release → wait for profile READY → resume record
  *
  * A model is never in the submit, the gate, the origin decision, the mandate
  * comparison, or the verification (§16.1). The computer-use resolver may only
@@ -31,7 +32,13 @@ import {
   ResolutionExhaustedError,
   TakeoverRequiredError,
 } from "../errors.js";
-import { originOf, type BrowserProvider, type BrowserSession } from "./browser.js";
+import {
+  originOf,
+  type BrowserProfile,
+  type BrowserProvider,
+  type BrowserSession,
+  type ProfileReadiness,
+} from "./browser.js";
 import { DeterministicStepError, selectOffer, type VendorPurchaseAdapter } from "./vendor-adapter.js";
 import type { ComputerUseAgent } from "./computer-use.js";
 import type { ProfileStore } from "./profiles.js";
@@ -39,7 +46,7 @@ import type { ProfileStore } from "./profiles.js";
 export interface SlowLaneDeps {
   provider: BrowserProvider;
   adapter: VendorPurchaseAdapter;
-  /** Persisted auth profiles (Steel session context). Optional. */
+  /** (user, vendor) → Steel profile bindings (steel.md §6). Optional; without it every run starts cold. */
   profiles?: ProfileStore;
   /** Computer-use resolver for discovery/staging only. Never used for submit. */
   agent?: ComputerUseAgent;
@@ -68,11 +75,13 @@ export interface TakeoverContext {
   sessionViewerUrl?: string | undefined;
 }
 
+/** Events never carry a profileId: it is credential-tier (steel.md §6). */
 export type SlowLaneEvent =
   | { type: "STEEL_SESSION_CREATED"; sessionId: string; sessionViewerUrl?: string | undefined }
+  | { type: "PROFILE_CREATED"; provider: string; dedicatedIp: boolean }
   | { type: "PAGE_OPENED"; url: string }
   | { type: "PURCHASE_GUARDED" }
-  | { type: "PROFILE_RESTORED"; provider: string; fromSavedProfile: boolean; loggedIn: boolean | undefined }
+  | { type: "PROFILE_RESTORED"; provider: string; fromSavedProfile: boolean; dedicatedIp: boolean; loggedIn: boolean | undefined }
   | { type: "ENTITLEMENT_CHECKED"; balance: number; required: number }
   | { type: "ALREADY_COVERED"; balance: number; required: number }
   | { type: "PURCHASE_SKIPPED_DUPLICATE"; purchaseId: string; status: PurchaseRecord["status"] }
@@ -91,7 +100,8 @@ export type SlowLaneEvent =
   | { type: "PROFILE_SAVED"; provider: string }
   | { type: "RECEIPT_CAPTURED"; files: number }
   | { type: "RESUME_TOKEN_CREATED"; resumeTokenId: string }
-  | { type: "SESSION_CLOSED" };
+  | { type: "SESSION_CLOSED" }
+  | { type: "PROFILE_READY"; provider: string; status: ProfileReadiness | "ERROR" };
 
 export async function runSlowLane(request: RecoveryRequest, deps: SlowLaneDeps): Promise<RecoveryResult> {
   const { mandate, quote, checkpoint } = request;
@@ -102,11 +112,27 @@ export async function runSlowLane(request: RecoveryRequest, deps: SlowLaneDeps):
   const budget = deps.resolverBudget ?? loadLimits().maxResolverCallsPerJob;
   let callsUsed = 0;
 
-  const profile = deps.profiles ? await deps.profiles.load(mandate.provider) : undefined;
+  const stored = deps.profiles ? await deps.profiles.load(mandate.userId, mandate.provider) : undefined;
   const session: BrowserSession = await deps.provider.createSession(
-    profile ? { provider: mandate.provider, profile } : { provider: mandate.provider },
+    stored ? { provider: mandate.provider, profile: stored } : { provider: mandate.provider },
   );
   emit({ type: "STEEL_SESSION_CREATED", sessionId: session.sessionId, sessionViewerUrl: session.sessionViewerUrl });
+
+  /** Set once the profile is marked verified; the READY wait after release keys off it. */
+  let verifiedProfileId: string | undefined;
+
+  /** The (user, vendor) binding for the profile this session runs on. */
+  const bindingFor = (lastVerifiedAt: string | undefined): BrowserProfile | undefined => {
+    const mount = session.profile;
+    if (!mount) return undefined;
+    return {
+      userId: mandate.userId,
+      provider: mandate.provider,
+      profileId: mount.profileId,
+      ...(mount.dedicatedIpId === undefined ? {} : { dedicatedIpId: mount.dedicatedIpId }),
+      ...(lastVerifiedAt === undefined ? {} : { lastVerifiedAt }),
+    };
+  };
 
   /** Run a read/staging step; on DeterministicStepError, spend resolver budget and retry once. */
   const runStep = async <T>(fn: () => Promise<T>, fallbackInstruction: string): Promise<T> => {
@@ -150,9 +176,12 @@ export async function runSlowLane(request: RecoveryRequest, deps: SlowLaneDeps):
     const entitlement = makeEntitlement(mandate, reading, now());
     const result = makeResult({ lane: "slow", purchaseId: pid, entitlement, request, requirement, alreadyCovered, now: now() });
 
-    // Persist the authenticated identity only on a verified outcome.
-    if (deps.profiles) {
-      await deps.profiles.save(await session.saveProfile());
+    // Mark the identity good only on a verified outcome. Steel writes the
+    // userDataDir itself, on release.
+    const verified = deps.profiles ? bindingFor(now().toISOString()) : undefined;
+    if (deps.profiles && verified) {
+      await deps.profiles.save(verified);
+      verifiedProfileId = verified.profileId;
       emit({ type: "PROFILE_SAVED", provider: mandate.provider });
     }
     if (session.listReceiptFiles && !alreadyCovered) {
@@ -168,6 +197,14 @@ export async function runSlowLane(request: RecoveryRequest, deps: SlowLaneDeps):
   };
 
   try {
+    // 0. Bind a newly created profile at once. Steel persists it on release
+    //    whatever the outcome, so an unbound id is an orphaned identity.
+    const created = stored === undefined ? bindingFor(undefined) : undefined;
+    if (deps.profiles && created) {
+      await deps.profiles.save(created);
+      emit({ type: "PROFILE_CREATED", provider: mandate.provider, dedicatedIp: created.dedicatedIpId !== undefined });
+    }
+
     // 1. Navigate to the LOCKED billing origin — from the checkpoint's config,
     //    never from a 402 body, a page link, or a model.
     await session.page.goto(checkpoint.origin.billingOrigin);
@@ -191,8 +228,14 @@ export async function runSlowLane(request: RecoveryRequest, deps: SlowLaneDeps):
 
     // 3. Liveness probe BEFORE anything that matters (§15.2).
     const loggedIn = deps.adapter.ensureLoggedIn ? await deps.adapter.ensureLoggedIn(session.page) : undefined;
-    if (profile || loggedIn !== undefined) {
-      emit({ type: "PROFILE_RESTORED", provider: mandate.provider, fromSavedProfile: profile !== undefined, loggedIn });
+    if (stored || loggedIn !== undefined) {
+      emit({
+        type: "PROFILE_RESTORED",
+        provider: mandate.provider,
+        fromSavedProfile: stored !== undefined,
+        dedicatedIp: session.profile?.dedicatedIpId !== undefined,
+        loggedIn,
+      });
     }
     if (loggedIn === false) {
       throw new PurchaseFailedError("Not authenticated with the vendor and re-authentication failed.", "NOT_AUTHENTICATED");
@@ -341,5 +384,11 @@ export async function runSlowLane(request: RecoveryRequest, deps: SlowLaneDeps):
   } finally {
     await session.close();
     emit({ type: "SESSION_CLOSED" });
+    // Release starts the profile write. Don't hand back a verified result until
+    // it lands, or the next recovery on this vendor restores stale state (§6).
+    if (verifiedProfileId !== undefined && deps.provider.waitForProfileReady) {
+      const status = await deps.provider.waitForProfileReady(verifiedProfileId).catch((): "ERROR" => "ERROR");
+      emit({ type: "PROFILE_READY", provider: mandate.provider, status });
+    }
   }
 }

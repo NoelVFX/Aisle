@@ -60,11 +60,20 @@ export { runSlowLane } from "./slow-lane/executor.js";
 export type { SlowLaneDeps, SlowLaneEvent, TakeoverContext } from "./slow-lane/executor.js";
 export {
   SteelBrowserProvider,
+  assertProfileMounted,
   assertTimeoutApplied,
+  buildSessionCreateParams,
+  waitForProfileReady,
   CHECKOUT_TIMEOUT_MS,
+  PROFILE_READY_TIMEOUT_MS,
   PURCHASE_SESSION_TIMEOUT_MS,
 } from "./slow-lane/steel-provider.js";
-export type { SteelProviderOptions } from "./slow-lane/steel-provider.js";
+export type {
+  ProfileReadyOptions,
+  SessionPlan,
+  SteelProfilesClient,
+  SteelProviderOptions,
+} from "./slow-lane/steel-provider.js";
 export { InMemoryProfileStore, FileProfileStore } from "./slow-lane/profiles.js";
 export type { ProfileStore } from "./slow-lane/profiles.js";
 export { DeterministicStepError, chooseMinimumOffer, selectOffer } from "./slow-lane/vendor-adapter.js";

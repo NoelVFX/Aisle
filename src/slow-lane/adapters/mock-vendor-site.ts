@@ -6,12 +6,13 @@
  */
 
 import type {
-  BrowserProfile,
   BrowserProvider,
   BrowserSession,
   ControlSurface,
   CreateSessionOptions,
   PageLike,
+  ProfileMount,
+  ProfileReadiness,
 } from "../browser.js";
 import { DeterministicStepError, type VendorPurchaseAdapter } from "../vendor-adapter.js";
 import { TakeoverRequiredError } from "../../errors.js";
@@ -215,33 +216,52 @@ class MockBrowserSession implements BrowserSession {
   constructor(
     readonly sessionId: string,
     readonly provider: string,
-    private readonly site: MockVendorSite,
+    readonly profile: ProfileMount | undefined,
+    site: MockVendorSite,
   ) {
     this.page = new MockPage(site);
     this.control = new MockControl(site);
     this.sessionViewerUrl = `https://app.steel.dev/sessions/${sessionId}`;
   }
 
-  async saveProfile(): Promise<BrowserProfile> {
-    return {
-      provider: this.provider,
-      context: { cookies: [{ name: "session", value: "mock" }], account: this.site.accountId },
-      savedAt: new Date().toISOString(),
-    };
-  }
   async close(): Promise<void> {
     this.closed = true;
   }
 }
 
+export interface MockBrowserProviderOptions {
+  /** Dedicated IP to pin newly created profiles to, like STEEL_DEDICATED_IP_ID. */
+  dedicatedIpId?: string;
+}
+
+/** Mimics Steel's Profiles API: persistProfile without a profileId creates one. */
 export class MockBrowserProvider implements BrowserProvider {
   lastSession?: MockBrowserSession;
-  constructor(private readonly site: MockVendorSite) {}
+  /** Every createSession call, to assert what the worker asked Steel for. */
+  readonly created: CreateSessionOptions[] = [];
+  /** Profiles the worker waited on after release. */
+  readonly awaitedProfiles: string[] = [];
+  private profileSeq = 0;
+
+  constructor(
+    private readonly site: MockVendorSite,
+    private readonly options: MockBrowserProviderOptions = {},
+  ) {}
 
   async createSession(opts: CreateSessionOptions): Promise<BrowserSession> {
-    const session = new MockBrowserSession(`sess_mock_${Math.random().toString(36).slice(2, 8)}`, opts.provider, this.site);
+    this.created.push(opts);
+    const profileId = opts.profile?.profileId ?? (opts.persistProfile === false ? undefined : `prof_mock_${++this.profileSeq}`);
+    const dedicatedIpId = opts.profile?.dedicatedIpId ?? this.options.dedicatedIpId;
+    const mount: ProfileMount | undefined =
+      profileId === undefined ? undefined : dedicatedIpId === undefined ? { profileId } : { profileId, dedicatedIpId };
+    const session = new MockBrowserSession(`sess_mock_${Math.random().toString(36).slice(2, 8)}`, opts.provider, mount, this.site);
     this.lastSession = session;
     return session;
+  }
+
+  async waitForProfileReady(profileId: string): Promise<ProfileReadiness> {
+    this.awaitedProfiles.push(profileId);
+    return "READY";
   }
 }
 

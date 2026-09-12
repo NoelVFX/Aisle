@@ -12,7 +12,9 @@
     "test:watch": "vitest",
     "demo": "tsx src/demo.ts",
     "demo:slow": "tsx src/slow-lane-demo.ts",
-    "smoke:steel": "node --env-file=.env --import tsx src/steel-smoke.ts"
+    "smoke:steel": "node --env-file=.env --import tsx src/steel-smoke.ts",
+    "gateway": "tsx src/gateway/server.ts",
+    "smoke:gateway": "tsx src/gateway/smoke.ts"
   },
   "keywords": [
     "webmcp",
@@ -24,9 +26,10 @@
   ],
   "license": "MIT",
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "playwright-core": "^1.48.2",
     "steel-sdk": "^0.18.0",
-    "zod": "^3.23.8"
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "tsx": "^4.19.2",

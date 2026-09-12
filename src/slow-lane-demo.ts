@@ -55,7 +55,7 @@ async function main(): Promise<void> {
   console.log("\n── Slow lane complete ──");
   console.log("verified balance  :", result.verifiedEntitlement.balance);
   console.log("resume key        :", result.resumeToken.id);
-  console.log("saved profile     :", (await profiles.load(PROVIDER)) ? "yes" : "no");
+  console.log("saved profile     :", (await profiles.load(mandate.userId, PROVIDER)) ? "yes" : "no");
 }
 
 main().catch((err) => {
