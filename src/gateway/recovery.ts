@@ -1,32 +1,32 @@
 /**
- * Recovery jobs for the gateway (aisle-pipeline.md §7–§12, §20).
+ * Recovery jobs for the gateway (aisle-pipeline.md §7–§12, §13, §18, §20).
  *
  *   open: freeze checkpoint (origin from upstreams.json) → quote → policy gate →
  *         signed mandate → AWAITING_APPROVAL
- *   approve (one human tap, signature-checked, idempotent) → Steel session on the
- *         LOCKED billing origin → outcome
- *
- * No real money moves in this gateway yet. After the Steel session:
- *   - a mock vendor is credited in-process (the docs' FAKE_PURCHASE=1), so the
- *     gateway can replay the blocked call and the agent continues;
- *   - a real vendor ends DRY_RUN_COMPLETE: Steel opened the billing page, nothing
- *     was bought, and the original call is not replayed.
+ *   approve (one human tap, signature-checked, idempotent) → lane:
+ *     - slow lane (vendor has `purchase` config and a purchaser is wired): real
+ *       Steel browser stages the checkout with the click ladder, Gate 1, then a
+ *       deterministic submit and Gate 2 — or, for a real-money vendor that isn't
+ *       allowlisted, stops before submit (STAGED_NOT_SUBMITTED);
+ *     - otherwise the Steel viewing session: open the billing page, credit an
+ *       in-process mock (FAKE_PURCHASE), or end DRY_RUN_COMPLETE.
  */
 
 import { randomUUID } from "node:crypto";
-import type { Blocker, PurchaseMandate, Quote, Refusal, TaskCheckpoint } from "../types.js";
+import type { Blocker, PurchaseMandate, Quote, RecoveryResult, Refusal, StagedCheckout, TaskCheckpoint } from "../types.js";
 import { freezeCheckpoint, lockOrigin } from "../core/checkpoint.js";
 import { requirementHash } from "../core/hash.js";
 import { buildQuote } from "../quote/quote.js";
 import { gate, InMemorySpendLedger, loadLimits, type SpendLedger } from "../policy/policy.js";
 import { signMandate, verifyMandate } from "../mandate/mandate.js";
-import type { Upstreams } from "./upstreams.js";
+import type { UpstreamEntry, Upstreams } from "./upstreams.js";
 
 export type JobStatus =
   | "awaiting_approval"
   | "running"
   | "resolved"
   | "dry_run_complete"
+  | "staged_not_submitted"
   | "refused"
   | "rejected"
   | "failed";
@@ -48,7 +48,7 @@ export interface SteelLive {
   viewerUrl: string | undefined;
 }
 
-/** What the Steel session did. Never carries a profileId. */
+/** What the Steel viewing session did. Never carries a profileId. */
 export interface SteelEvidence extends SteelLive {
   finalUrl: string;
   title: string | undefined;
@@ -58,17 +58,30 @@ export interface SteelEvidence extends SteelLive {
 export interface SteelRunner {
   run(input: {
     provider: string;
-    /** Locked billing origin from config. */
     billingOrigin: string;
-    /** Billing page to open, validated to be on billingOrigin. */
     billingUrl: string;
     jobId: string;
     emit: (type: string, detail?: Record<string, unknown>) => void;
-    /** Called as soon as the session is live, so the user can watch it. */
     onLive: (live: SteelLive) => void;
     /** Resolves when the user ends the session from the approval page. */
     hold: Promise<void>;
   }): Promise<SteelEvidence>;
+}
+
+export type SteelPurchaseOutcome =
+  | { outcome: "verified"; result: RecoveryResult }
+  | { outcome: "withheld"; staged: StagedCheckout };
+
+/** Runs the slow lane in a real Steel browser for an approved job. */
+export interface SteelPurchaser {
+  purchase(input: {
+    job: RecoveryJob;
+    upstream: UpstreamEntry;
+    /** False for a real-money vendor that isn't allowlisted: stage + Gate 1, never submit. */
+    realMoneyAllowed: boolean;
+    emit: (type: string, detail?: Record<string, unknown>) => void;
+    onLive: (live: SteelLive) => void;
+  }): Promise<SteelPurchaseOutcome>;
 }
 
 export interface RecoveryJob {
@@ -77,15 +90,19 @@ export interface RecoveryJob {
   reqHash: string;
   namespace: string;
   status: JobStatus;
+  lane?: "slow" | "viewing";
   checkpoint: TaskCheckpoint;
   quote?: Quote;
   mandate?: PurchaseMandate;
   refusal?: Refusal;
   remaining?: { task: number; day: number };
   approveUrl: string;
-  /** Set while the Steel session is open. */
+  /** Set while a Steel session is open. */
   live?: SteelLive;
   steel?: SteelEvidence;
+  /** The checkout the slow lane staged (withheld or submitted). */
+  staged?: StagedCheckout;
+  purchase?: { purchaseId: string | null; balance: number | null; alreadyCovered: boolean };
   error?: string;
   events: TimelineEvent[];
   createdAt: string;
@@ -103,16 +120,19 @@ export interface OpenRecoveryInput {
 export interface CoordinatorDeps {
   upstreams: Upstreams;
   steel: SteelRunner;
-  /** Credit a mock vendor after the Steel session. Returns false for real vendors. */
+  /** Credit an in-process mock vendor after the viewing session. False for real vendors. */
   fakeCredit: (namespace: string, units: number) => boolean;
   publicUrl: () => string;
+  /** Slow-lane purchaser. Without it every approval runs the viewing session. */
+  purchaser?: SteelPurchaser;
+  /** Real-money vendors allowed to actually submit (AISLE_REAL_PURCHASE_PROVIDERS). */
+  realPurchaseProviders?: ReadonlySet<string>;
   spend?: SpendLedger;
   userId?: string;
   mandateSecret?: string;
   pollMs?: number;
   onEvent?: (job: RecoveryJob, event: TimelineEvent) => void;
   onApprovalRequested?: (job: RecoveryJob) => void;
-  /** The Steel session for a job is live (e.g. open its player in the browser). */
   onSteelLive?: (job: RecoveryJob) => void;
 }
 
@@ -260,7 +280,7 @@ export class RecoveryCoordinator {
     return { ok: true };
   }
 
-  /** End a held Steel session early ("End Steel session" on the approval page). */
+  /** End a held Steel viewing session early ("End Steel session"). */
   releaseSteel(id: string): boolean {
     const release = this.holds.get(id);
     if (!release) return false;
@@ -270,11 +290,58 @@ export class RecoveryCoordinator {
   }
 
   private async execute(job: RecoveryJob): Promise<void> {
+    const upstream = this.deps.upstreams[job.namespace];
+    if (upstream?.purchase && this.deps.purchaser) return this.executeSlowLane(job, upstream);
+    return this.executeViewing(job);
+  }
+
+  private async executeSlowLane(job: RecoveryJob, upstream: UpstreamEntry): Promise<void> {
+    const quote = job.quote!;
+    const realMoney = upstream.purchase?.realMoney ?? true;
+    const realMoneyAllowed = !realMoney || (this.deps.realPurchaseProviders?.has(job.namespace) ?? false);
+    job.lane = "slow";
+    try {
+      this.emit(job, "PURCHASE_STARTED", { lane: "slow", realMoney, submit: realMoneyAllowed ? "enabled" : "withheld" });
+      const out = await this.deps.purchaser!.purchase({
+        job,
+        upstream,
+        realMoneyAllowed,
+        emit: (type, detail = {}) => this.emit(job, type, detail),
+        onLive: (live) => {
+          job.live = live;
+          this.deps.onSteelLive?.(job);
+        },
+      });
+      job.live = undefined;
+
+      if (out.outcome === "withheld") {
+        job.staged = out.staged;
+        job.status = "staged_not_submitted";
+        return;
+      }
+      const r = out.result;
+      job.purchase = { purchaseId: r.purchaseId, balance: r.verifiedEntitlement.balance, alreadyCovered: r.alreadyCovered };
+      if (!r.alreadyCovered) await this.spend.addSpend(job.taskId, this.userId, quote.price);
+      job.status = "resolved";
+    } catch (err) {
+      job.live = undefined;
+      job.status = "failed";
+      const code = (err as { code?: unknown }).code;
+      job.error = err instanceof Error ? err.message : String(err);
+      if (code === "NOT_AUTHENTICATED") {
+        job.error += ` Log the Steel profile in once with: npm run steel:login -- ${job.namespace}`;
+      }
+      this.emit(job, "RECOVERY_FAILED", { error: job.error, ...(typeof code === "string" ? { code } : {}) });
+    }
+  }
+
+  private async executeViewing(job: RecoveryJob): Promise<void> {
     const quote = job.quote!;
     const upstream = this.deps.upstreams[job.namespace];
     const hold = new Promise<void>((resolve) => this.holds.set(job.id, resolve));
+    job.lane = "viewing";
     try {
-      this.emit(job, "PURCHASE_STARTED", { lane: "slow", mode: "no-real-money" });
+      this.emit(job, "PURCHASE_STARTED", { lane: "viewing", mode: "no-real-money" });
       job.steel = await this.deps.steel.run({
         provider: job.namespace,
         billingOrigin: job.checkpoint.origin.billingOrigin,
@@ -296,7 +363,7 @@ export class RecoveryCoordinator {
         this.emit(job, "ENTITLEMENT_VERIFIED", { units: quote.unitsGranted });
         job.status = "resolved";
       } else {
-        this.emit(job, "PURCHASE_SKIPPED", { reason: "DRY_RUN: real purchases are not wired into the gateway" });
+        this.emit(job, "PURCHASE_SKIPPED", { reason: "DRY_RUN: this vendor has no slow-lane purchase wired" });
         job.status = "dry_run_complete";
       }
     } catch (err) {

@@ -207,10 +207,39 @@ to 2 minutes, or until you click **End Steel session**. The viewer is read-only 
 gateway never runs a checkout. Its Steel session skips proxies and captcha
 solving unless `AISLE_STEEL_PROXY_CAPTCHA=1`, since those need a paid Steel balance.
 
+## Buying in the Steel browser: the click ladder
+
+After approval, a vendor with a `purchase` block in `upstreams.json` runs the real
+slow lane in a Steel browser. The steps follow `aisle-pipeline.md` §17 and §18:
+
+1. **Login check.** The Steel profile for that vendor is restored. A login wall stops the job with `npm run steel:login -- <vendor>`.
+2. **Balance read.** If the balance already covers the task, nothing is bought.
+3. **Tier 1.** Offers come from the page's JSON-LD `Offer` blocks, with no clicking and no model.
+4. **Tier 2.** Recorded steps replay by accessible role and name. A miss falls back to tier 3.
+5. **Tier 3.** The accessibility tree becomes a numbered list, the PICKER model returns one index, and code clicks that node. The steps that reached checkout are saved as a recorded adapter.
+6. **Gate 1.** The staged amount, currency, billing period and auto-renew are compared with the signed mandate.
+7. **Submit.** Deterministic code clicks the confirm button. A model never sees or clicks a control that pays.
+8. **Gate 2.** The balance must rise by the purchased units, then the original call is replayed.
+
+Real-money vendors stop after Gate 1 with `STAGED_NOT_SUBMITTED` unless they are
+listed in `AISLE_REAL_PURCHASE_PROVIDERS`.
+
+```bash
+npm run mock:vendor                 # mock vendor website + cloudflared tunnel; start before Codex
+npm run smoke:purchase              # real Steel purchase on it: cold run (picker), then warm run (recorded)
+npm run steel:login -- openai       # log a Steel profile in to OpenAI once, by hand
+```
+
+Recorded adapters, resolver recordings and profile bindings live in `.aisle/`.
+`REPLAY_RESOLVER=1` replays recorded picker choices instead of calling the model.
+
 ## Not built yet (in the docs, not in this package)
 
 - **Remote HTTP gateway** (`apps/gateway`): the local gateway is stdio, one per agent
-  session. Real purchases through the lanes are not wired into it yet.
+  session.
+- **OpenAI checkout is unverified.** Its billing flow needs a logged-in profile and a
+  saved card, and it has not been recorded. Real submit stays off by default.
+- **Receipt upload and trace export** from the Steel session.
 - **Control plane** (`apps/api`): durable recovery jobs and the SSE event stream. The
   gateway keeps jobs in memory and its approval page polls.
 - **Web path** (CDP 402 detector, enrollments).

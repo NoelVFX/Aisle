@@ -14,7 +14,10 @@
     "demo:slow": "tsx src/slow-lane-demo.ts",
     "smoke:steel": "node --env-file=.env --import tsx src/steel-smoke.ts",
     "gateway": "tsx src/gateway/server.ts",
-    "smoke:gateway": "tsx src/gateway/smoke.ts"
+    "smoke:gateway": "tsx src/gateway/smoke.ts",
+    "mock:vendor": "tsx src/mock-vendor/launch.ts",
+    "steel:login": "tsx src/gateway/steel-login.ts",
+    "smoke:purchase": "tsx src/gateway/purchase-smoke.ts"
   },
   "keywords": [
     "webmcp",

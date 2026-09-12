@@ -40,8 +40,11 @@ function view(job: RecoveryJob) {
     },
     remaining: job.remaining,
     refusal: job.refusal && { reason: job.refusal.reason, message: job.refusal.message },
+    lane: job.lane,
     live: job.live,
     steel: job.steel,
+    staged: job.staged,
+    purchase: job.purchase,
     error: job.error,
     events: job.events,
   };

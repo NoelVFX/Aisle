@@ -123,7 +123,17 @@ export {
   PurchaseFailedError,
   PurchaseVerificationError,
   ResolutionExhaustedError,
+  SubmitWithheldError,
   TakeoverRequiredError,
 } from "./errors.js";
+
+// ---- Click-target ladder (aisle-pipeline.md §17) -------------------------------
+export { LadderVendorAdapter, offersFromJsonLd, CONFIRM_NAME_RE } from "./slow-lane/adapters/ladder-adapter.js";
+export type { LadderAdapterConfig } from "./slow-lane/adapters/ladder-adapter.js";
+export { InMemoryAdapterRegistry, FileAdapterRegistry } from "./slow-lane/adapters/recorded-adapter.js";
+export type { AdapterRegistry, RecordedAdapter, RecordedStep } from "./slow-lane/adapters/recorded-adapter.js";
+export { createOpenRouterPicker, parsePickerReply, formatCandidates, PICKER_PROFILE } from "./slow-lane/resolver/picker.js";
+export type { CandidatePicker, OpenRouterPickerOptions, PickRequest, PickResult } from "./slow-lane/resolver/picker.js";
+export type { ActionCandidate } from "./slow-lane/browser.js";
 
 export type * from "./types.js";
