@@ -286,6 +286,25 @@ cover the shortfall and fit the per-purchase ceiling are offered as alternatives
 The rest of `src/recovery-flow/` (approval records, purchase guard, executors, resume
 requests, the standalone orchestrator) is exported as `recoveryFlow` for hosts that run it directly.
 
+### Plan selection and the recovery session
+
+Every recovery carries MO XIA's recovery session (`src/recovery-flow/`). The quote
+from `aisle-pipeline.md` stays the recommended plan; other one-time packages that
+cover the shortfall and fit the per-purchase ceiling are offered as alternatives.
+
+- The blocked tool result lists `plans.recommended`, `plans.alternatives` and `plans.selected`.
+- The approval card (and the web browser card) has a plan chooser. Picking a plan posts
+  `POST /r/{id}/select {plan_id}`: the plan is re-gated against every ceiling, the quote is
+  rebuilt and the mandate is re-signed, so the tap approves exactly the chosen plan. A plan
+  over a ceiling is refused with nothing changed. No changes after approval.
+- The session moves `PLAN_RECOMMENDED → CUSTOMER_SELECTED → AWAITING_APPROVAL → APPROVED →
+  PURCHASING → PURCHASED → ENTITLEMENT_UPDATED → READY_TO_RESUME`, or ends `PURCHASE_WITHHELD`
+  (real-money submit off), `PURCHASE_UNKNOWN` (bought but unverified — never retried) or
+  `PURCHASE_FAILED`. Each step is a `SESSION_STATUS` event and shows on the approval page.
+
+The rest of `src/recovery-flow/` (approval records, purchase guard, executors, resume
+requests, the standalone orchestrator) is exported as `recoveryFlow` for hosts that run it directly.
+
 ## Buying in the Steel browser: the click ladder
 
 After approval, a vendor with a `purchase` block in `upstreams.json` runs the real
