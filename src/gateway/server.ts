@@ -15,7 +15,7 @@
 
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -25,6 +25,9 @@ import { createGateway, type Progress } from "./gateway.js";
 import { loadUpstreams } from "./upstreams.js";
 import { startApprovalServer } from "./approval-server.js";
 import { createSteelRunner } from "./steel-runner.js";
+import { createSteelPurchaser } from "./steel-purchaser.js";
+import { InMemoryIdempotencyStore } from "../fast-lane/idempotency.js";
+import type { SteelProviderOptions } from "../slow-lane/steel-provider.js";
 
 // stdout belongs to the MCP protocol.
 console.log = console.error;
@@ -44,27 +47,54 @@ const log = (line: string) => {
   appendFileSync(EVENTS_FILE, JSON.stringify({ at: new Date().toISOString(), log: line }) + "\n");
 };
 
+// `npm run mock:vendor` records the mock website's URLs here. Operator config,
+// read once at startup — never a value from a tool result.
+const MOCK_FILE = join(STATE_DIR, "mock-vendor.json");
+if (existsSync(MOCK_FILE)) {
+  try {
+    const m = JSON.parse(readFileSync(MOCK_FILE, "utf8")) as { localUrl?: string; publicUrl?: string };
+    if (m.localUrl && !process.env["MOCK_VENDOR_URL"]) process.env["MOCK_VENDOR_URL"] = m.localUrl;
+    if (m.publicUrl && !process.env["MOCK_VENDOR_PUBLIC_URL"]) process.env["MOCK_VENDOR_PUBLIC_URL"] = m.publicUrl;
+  } catch {
+    log("[aisle] could not read .aisle/mock-vendor.json; using the in-process mock vendor");
+  }
+}
+
 /** CLI agents don't give a task id. One gateway process = one agent session (§5.3). */
 const PROCESS_TASK = `task_${randomUUID()}`;
 
+// Steel plan without paid balance: no proxies or captcha solving unless enabled.
+// The viewer is read-only unless AISLE_STEEL_INTERACTIVE=1 (steel.md §16.2).
+const steelProvider: SteelProviderOptions = {
+  ...(process.env["AISLE_STEEL_PROXY_CAPTCHA"] === "1" ? {} : { useProxy: false, solveCaptcha: false }),
+  sessionOptions: { debugConfig: { interactive: process.env["AISLE_STEEL_INTERACTIVE"] === "1" } },
+};
+
+const realPurchaseProviders = new Set(
+  (process.env["AISLE_REAL_PURCHASE_PROVIDERS"] ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
+);
+
 let publicUrl = "http://127.0.0.1:8787";
 const upstreams = loadUpstreams();
+const openInBrowser = (url: string) => {
+  if (process.platform === "darwin") spawn("open", [url], { stdio: "ignore", detached: true }).unref();
+};
+
 const gateway = createGateway({
   upstreams,
   publicUrl: () => publicUrl,
   steel: createSteelRunner({
     holdMs: Number(process.env["AISLE_STEEL_HOLD_MS"] ?? 120_000),
     screenshotsDir: join(STATE_DIR, "screenshots"),
-    // This session never checks out, so it skips Steel proxies and captcha solving
-    // by default (they need a paid Steel balance). AISLE_STEEL_PROXY_CAPTCHA=1 turns
-    // on the full purchase-worker config from steel.md §4.1.
-    // The viewer is read-only by default (steel.md §16.2). AISLE_STEEL_INTERACTIVE=1
-    // lets you click and type in the Steel browser, e.g. to log in to the vendor.
-    provider: {
-      ...(process.env["AISLE_STEEL_PROXY_CAPTCHA"] === "1" ? {} : { useProxy: false, solveCaptcha: false }),
-      sessionOptions: { debugConfig: { interactive: process.env["AISLE_STEEL_INTERACTIVE"] === "1" } },
-    },
+    provider: steelProvider,
   }),
+  ...(process.env["STEEL_API_KEY"]
+    ? { purchaser: createSteelPurchaser({ stateDir: STATE_DIR, steelProvider, store: new InMemoryIdempotencyStore() }) }
+    : {}),
+  realPurchaseProviders,
   log,
   onEvent: (job, event) => {
     appendFileSync(EVENTS_FILE, JSON.stringify({ task: job.taskId, recovery: job.id, ...event }) + "\n");
@@ -72,22 +102,21 @@ const gateway = createGateway({
   },
   onApprovalRequested: (job) => {
     log(`[aisle] APPROVE AT ${job.approveUrl}`);
-    if (process.platform === "darwin" && process.env["AISLE_OPEN_APPROVAL"] !== "0") {
-      spawn("open", [job.approveUrl], { stdio: "ignore", detached: true }).unref();
-    }
+    if (process.env["AISLE_OPEN_APPROVAL"] !== "0") openInBrowser(job.approveUrl);
   },
   onSteelLive: (job) => {
     const url = job.live?.debugUrl ?? job.live?.viewerUrl;
     log(`[aisle] STEEL BROWSER LIVE ${url ?? "(no viewer url)"}`);
-    if (url && process.platform === "darwin" && process.env["AISLE_OPEN_VIEWER"] !== "0") {
-      spawn("open", [url], { stdio: "ignore", detached: true }).unref();
-    }
+    if (url && process.env["AISLE_OPEN_VIEWER"] !== "0") openInBrowser(url);
   },
 });
 
 const approval = await startApprovalServer(gateway.coordinator, Number(process.env["AISLE_APPROVAL_PORT"] ?? 8787));
 publicUrl = approval.url;
-log(`[aisle] gateway up: ${gateway.tools.map((t) => t.name).join(", ")} · approvals at ${publicUrl}`);
+const lanes = Object.entries(upstreams)
+  .map(([ns, up]) => `${ns}=${up.purchase ? (up.purchase.realMoney ? (realPurchaseProviders.has(ns) ? "slow-lane(real submit)" : "slow-lane(submit withheld)") : "slow-lane") : "viewing"}`)
+  .join(" ");
+log(`[aisle] gateway up: ${gateway.tools.map((t) => t.name).join(", ")} · approvals at ${publicUrl} · lanes ${lanes}`);
 
 const server = new McpServer({ name: "aisle", version: "0.1.0" });
 

@@ -14,10 +14,19 @@ import { normalizeError, type NormalizedError } from "../error-normalizer.js";
 import {
   RecoveryCoordinator,
   type RecoveryJob,
+  type SteelPurchaser,
   type SteelRunner,
   type TimelineEvent,
 } from "./recovery.js";
-import { MockImageVendor, openAiChatTool, type FetchLike, type UpstreamResult, type Upstreams, type VendorTool } from "./upstreams.js";
+import {
+  MockImageVendor,
+  mockVendorHttpTool,
+  openAiChatTool,
+  type FetchLike,
+  type UpstreamResult,
+  type Upstreams,
+  type VendorTool,
+} from "./upstreams.js";
 
 /**
  * OpenAI's "no credits" bodies, both seen live:
@@ -47,6 +56,8 @@ const isOpenAiRateLimit = (ns: string, e: NormalizedError): boolean =>
 export interface GatewayOptions {
   upstreams: Upstreams;
   steel: SteelRunner;
+  purchaser?: SteelPurchaser;
+  realPurchaseProviders?: ReadonlySet<string>;
   env?: NodeJS.ProcessEnv;
   fetchImpl?: FetchLike;
   mockVendor?: MockImageVendor;
@@ -66,12 +77,14 @@ export type Progress = (message: string) => Promise<void>;
 export function createGateway(options: GatewayOptions) {
   const env = options.env ?? process.env;
   const log = options.log ?? ((m: string) => console.error(m));
+  const fetchImpl = options.fetchImpl ?? (globalThis.fetch as unknown as FetchLike);
   const mock = options.mockVendor ?? new MockImageVendor(Number(env["AISLE_MOCK_START_BALANCE"] ?? 0) || 0);
   const safeBlockMs = options.safeBlockMs ?? (Number(env["SAFE_BLOCK_MS"]) || 50_000);
+  const mockToolUrl = options.upstreams["mockvendor"]?.toolUrl;
 
   const tools: VendorTool[] = [
-    openAiChatTool(env, options.fetchImpl ?? (globalThis.fetch as unknown as FetchLike)),
-    mock.tool(),
+    openAiChatTool(env, fetchImpl),
+    mockToolUrl ? mockVendorHttpTool(mockToolUrl, fetchImpl) : mock.tool(),
   ].filter((t) => options.upstreams[t.namespace] !== undefined);
 
   const coordinator = new RecoveryCoordinator({
@@ -79,10 +92,12 @@ export function createGateway(options: GatewayOptions) {
     steel: options.steel,
     publicUrl: options.publicUrl,
     fakeCredit: (ns, units) => {
-      if (ns !== "mockvendor") return false;
+      if (ns !== "mockvendor" || mockToolUrl) return false;
       mock.credit(units);
       return true;
     },
+    ...(options.purchaser === undefined ? {} : { purchaser: options.purchaser }),
+    ...(options.realPurchaseProviders === undefined ? {} : { realPurchaseProviders: options.realPurchaseProviders }),
     ...(options.mandateSecret === undefined ? {} : { mandateSecret: options.mandateSecret }),
     ...(options.pollMs === undefined ? {} : { pollMs: options.pollMs }),
     ...(options.onEvent === undefined ? {} : { onEvent: options.onEvent }),
@@ -209,6 +224,19 @@ export function createGateway(options: GatewayOptions) {
             "No purchase was made, so the original call was not replayed and will still fail. Tell the user.",
         });
 
+      case "staged_not_submitted":
+        return text({
+          status: "STAGED_NOT_SUBMITTED",
+          recovery_id: job.id,
+          blocked_tool: job.checkpoint.tool,
+          staged: job.staged,
+          cap: job.mandate?.maximumAmount,
+          note:
+            "Aisle staged the checkout in a Steel browser and it matched the approved mandate, but real-money submit is " +
+            "not enabled for this vendor (AISLE_REAL_PURCHASE_PROVIDERS). Nothing was charged and the original call was " +
+            "not replayed. Tell the user.",
+        });
+
       case "refused":
         return text({ status: "REFUSED", recovery_id: job.id, reason: job.refusal?.reason, message: job.refusal?.message, detail: job.refusal?.detail });
 
@@ -232,7 +260,7 @@ export function createGateway(options: GatewayOptions) {
     return text({
       task_id: taskId,
       spend,
-      recoveries: jobs.map((j) => ({ id: j.id, tool: j.checkpoint.tool, status: j.status, price: j.quote?.price })),
+      recoveries: jobs.map((j) => ({ id: j.id, tool: j.checkpoint.tool, status: j.status, lane: j.lane, price: j.quote?.price })),
     });
   }
 
