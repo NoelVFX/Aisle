@@ -1,5 +1,5 @@
 {
-  "name": "the-logic-of-agent-awake",
+  "name": "top-up-agent",
   "version": "1.0.0",
   "description": "Event-driven wake-up logic for Aisle agent recovery",
   "type": "module",
