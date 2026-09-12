@@ -10,6 +10,10 @@ This package is the **fast lane** only. It runs *inside* a host coding agent
 (Hermes / Claude / Codex); the host owns the task, the quote engine, the
 approval UX, and the slow-lane browser fallback (Steel + Playwright).
 
+**Wiring this into someone else's orchestrator, quote engine, approval UI, or
+the slow lane?** See [`INTEGRATION.md`](INTEGRATION.md) (English) /
+[`INTEGRATION.zh-CN.md`](INTEGRATION.zh-CN.md) (中文).
+
 ## The workflow this implements
 
 ```
