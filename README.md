@@ -126,8 +126,17 @@ implements the same interface.
 - **Deterministic first, model second.** Each vendor has a small
   `VendorPurchaseAdapter` (scripted Playwright). When a step can't complete it
   throws `DeterministicStepError`; the worker hands that sub-goal to a
-  host-injected `ComputerUseAgent` and retries once. `createAnthropicComputerUseAgent(client)`
-  is a reference loop over an injected Anthropic client (no hard SDK dependency).
+  host-injected `ComputerUseAgent` and retries once. Two reference agents ship:
+  - `createOpenRouterComputerUseAgent({ apiKey })` — OpenAI-compatible vision +
+    a JSON action protocol, works with **free OpenRouter vision models**
+    (`OPENROUTER_API_KEY`). No Anthropic key needed. Free models are weak at
+    pixel-precise clicking — fine as a best-effort last resort.
+  - `createAnthropicComputerUseAgent(client)` — Anthropic computer-use loop over
+    an injected client (`ANTHROPIC_API_KEY`).
+
+  **The core demo needs no model at all** — the deterministic path + mock
+  vendors complete the full MVP loop. A model is only the slow-lane fallback for
+  dynamic real pages.
 - **Profiles.** After authenticating, the session context (cookies/localStorage)
   is saved via a `ProfileStore` (`InMemory` / `File`) and resumed next time.
 

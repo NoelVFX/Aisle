@@ -60,12 +60,16 @@ export type { GenericAdapterConfig } from "./slow-lane/adapters/generic-vendor-a
 export {
   ScriptedComputerUseAgent,
   createAnthropicComputerUseAgent,
+  createOpenRouterComputerUseAgent,
+  parseComputerUseAction,
 } from "./slow-lane/computer-use.js";
 export type {
   ComputerUseAgent,
   ComputerUseAction,
   ComputerUseOutcome,
   AnthropicLike,
+  OpenRouterComputerUseOptions,
+  OpenRouterFetch,
 } from "./slow-lane/computer-use.js";
 export { originOf } from "./slow-lane/browser.js";
 export type {
