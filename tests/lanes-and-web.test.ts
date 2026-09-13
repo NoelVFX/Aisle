@@ -87,7 +87,7 @@ describe("lane router (§13)", () => {
 
 describe("shared HTTP MCP gateway (§5.1)", () => {
   it("serves namespaced tools to separate agent sessions, each its own task", async () => {
-    const g = createGateway({ upstreams, steel: noViewing, extraTools: [new FakeImageVendor(0).tool()], safeBlockMs: 30, pollMs: 5, publicUrl: () => "http://x", mandateSecret: SECRET, log: () => {} });
+    const g = createGateway({ upstreams, steel: noViewing, extraTools: [new FakeImageVendor(0).tool()], env: { AISLE_INITIAL_BLOCK_MS: "1" }, safeBlockMs: 30, pollMs: 5, publicUrl: () => "http://x", mandateSecret: SECRET, log: () => {} });
     const http = await startHttpGateway({ gateway: g, log: () => {} }, { port: 0 });
     const clients: Client[] = [];
     try {

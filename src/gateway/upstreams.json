@@ -97,7 +97,7 @@
     ]
   },
   "higgsfield": {
-    "description": "Higgsfield image generation through the Higgsfield Cloud API. One-time credit packs, if offered, sit behind login and are not listed here yet.",
+    "description": "Higgsfield image generation through the Higgsfield Cloud API. The pricing page offers one-time 100, 200, and 500 image-credit packs.",
     "canonicalOrigin": "https://api.higgsfield.ai",
     "billingOrigin": "https://higgsfield.ai",
     "billingUrl": "https://higgsfield.ai/pricing",
@@ -108,9 +108,51 @@
       "realMoney": true,
       "pricingPath": "/pricing",
       "accountPath": "/pricing",
-      "loginWallPattern": "^/(login|signin|sign-in|auth)"
+      "accountPaths": [
+        "/pricing",
+        "/",
+        "/account",
+        "/dashboard"
+      ],
+      "balanceSelectors": [
+        "[data-testid*='credit' i]",
+        "[data-testid*='balance' i]",
+        "[aria-label*='credit' i]",
+        "[aria-label*='balance' i]"
+      ],
+      "loginWallPattern": "^/(login|signin|sign-in|auth)",
+      "offersFrom": "catalogue",
+      "steelCredentials": true
     },
-    "offers": []
+    "offers": [
+      {
+        "productId": "higgsfield_credits_100",
+        "label": "100 credits",
+        "unitsGranted": 100,
+        "price": 6.25,
+        "currency": "USD",
+        "billing": "one_time",
+        "autoRenew": false
+      },
+      {
+        "productId": "higgsfield_credits_200",
+        "label": "200 credits",
+        "unitsGranted": 200,
+        "price": 12,
+        "currency": "USD",
+        "billing": "one_time",
+        "autoRenew": false
+      },
+      {
+        "productId": "higgsfield_credits_500",
+        "label": "500 credits",
+        "unitsGranted": 500,
+        "price": 26,
+        "currency": "USD",
+        "billing": "one_time",
+        "autoRenew": false
+      }
+    ]
   },
   "studio": {
     "description": "Studio: a real image-credits vendor on Stripe TEST mode (npm run vendor:studio). A 402 insufficient_credits sends Aisle to /billing to buy a pack and pay on Stripe Checkout with the test card 4242.",

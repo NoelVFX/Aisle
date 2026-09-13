@@ -2,8 +2,9 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { z } from "zod";
 import { createGateway } from "../src/gateway/gateway.js";
-import { loadUpstreams, type FetchLike } from "../src/gateway/upstreams.js";
+import { loadUpstreams, type FetchLike, type VendorTool } from "../src/gateway/upstreams.js";
 import type { SteelPurchaser, SteelRunner } from "../src/gateway/recovery.js";
 import { FakeImageVendor, VENDOR_ORIGIN, creditingPurchaser, imageVendorEntry, upstreamsWith } from "./helpers/image-vendor.js";
 
@@ -40,7 +41,7 @@ function gw(opts: { fetchImpl?: FetchLike; steel?: SteelRunner; env?: NodeJS.Pro
     steel,
     extraTools: [vendor.tool()],
     ...(opts.purchase ? { purchaser: opts.purchase(vendor) } : {}),
-    env: opts.env ?? { OPENAI_API_KEY: "sk-test" },
+    env: { AISLE_INITIAL_BLOCK_MS: "1", ...(opts.env ?? { OPENAI_API_KEY: "sk-test" }) },
     ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
     safeBlockMs: 30,
     pollMs: 5,
@@ -49,6 +50,16 @@ function gw(opts: { fetchImpl?: FetchLike; steel?: SteelRunner; env?: NodeJS.Pro
     log: () => {},
   });
   return { g, vendor };
+}
+
+function higgsfield403Tool(): VendorTool {
+  return {
+    name: "higgsfield__generate_image",
+    namespace: "higgsfield",
+    description: "Test Higgsfield tool.",
+    inputShape: { prompt: z.string() },
+    call: async () => ({ ok: false, status: 403, headers: {}, body: { detail: "not_enough_credits" } }),
+  };
 }
 
 const json = (r: { content: Array<{ type: string; text?: string }> }) => JSON.parse(r.content[0]?.text ?? "{}");
@@ -100,6 +111,40 @@ describe("gateway intercept", () => {
     const first = json((await g.callTool("openai__chat", { prompt: "hi" }, { taskId: "t" })) as never);
     expect(first.status).toBe("AWAITING_APPROVAL");
     expect(g.coordinator.get(first.recovery_id)?.checkpoint.blocker).toMatchObject({ type: "INSUFFICIENT_CREDITS", resource: "usd_balance" });
+  });
+
+  it("Higgsfield 403 not_enough_credits opens a recovery", async () => {
+    const higgsfield = loadUpstreams(undefined, {})["higgsfield"]!;
+    const g = createGateway({
+      upstreams: Object.freeze({ ...upstreams, higgsfield }),
+      steel: fakeSteel().steel,
+      extraTools: [higgsfield403Tool()],
+      env: { AISLE_INITIAL_BLOCK_MS: "1" },
+      safeBlockMs: 30,
+      pollMs: 5,
+      publicUrl: () => "http://127.0.0.1:0",
+      mandateSecret: SECRET,
+      log: () => {},
+    });
+
+    const first = json((await g.callTool("higgsfield__generate_image", { prompt: "a red bicycle" }, { taskId: "t" })) as never);
+    expect(first.status).toBe("AWAITING_APPROVAL");
+    expect(g.coordinator.get(first.recovery_id)?.checkpoint.blocker).toMatchObject({ type: "INSUFFICIENT_CREDITS", resource: "image_credits" });
+  });
+
+  it("does not block if wait_for_recovery is called before approval", async () => {
+    const { g } = gw();
+    const first = json((await g.callTool("imagevendor__generate_image", { prompt: "x" }, { taskId: "t" })) as never);
+    const started = Date.now();
+    const waited = json((await g.waitForRecovery(first.recovery_id)) as never);
+
+    expect(Date.now() - started).toBeLessThan(100);
+    expect(waited).toMatchObject({
+      status: "AWAITING_APPROVAL",
+      recovery_id: first.recovery_id,
+      approve_url: expect.any(String),
+      next: expect.stringContaining("Do NOT re-run the original tool"),
+    });
   });
 
   it("opens the configured billing page, goes live, and holds Steel until the user ends it", async () => {

@@ -31,6 +31,7 @@ function inProcess() {
     steel: fastSteel,
     purchaser: creditingPurchaser(vendor),
     extraTools: [vendor.tool()],
+    env: { AISLE_INITIAL_BLOCK_MS: "1" },
     safeBlockMs: 30,
     pollMs: 5,
     publicUrl: () => "http://x",
@@ -132,7 +133,7 @@ describe("recovery session state machine", () => {
         return { outcome: "withheld", staged: { lineItem: "$5", amount: 5, currency: "USD", billingPeriod: "one_time", autoRenew: false } };
       },
     };
-    const g = createGateway({ upstreams, steel: fastSteel, purchaser, env: { OPENAI_API_KEY: "sk" }, fetchImpl, safeBlockMs: 30, pollMs: 5, publicUrl: () => "http://x", mandateSecret: SECRET, log: () => {} });
+    const g = createGateway({ upstreams, steel: fastSteel, purchaser, env: { OPENAI_API_KEY: "sk", AISLE_INITIAL_BLOCK_MS: "1" }, fetchImpl, safeBlockMs: 30, pollMs: 5, publicUrl: () => "http://x", mandateSecret: SECRET, log: () => {} });
     const first = json((await g.callTool("openai__chat", { prompt: "2+2" }, { taskId: "t" })) as never);
     const job = g.coordinator.get(first.recovery_id)!;
     await g.coordinator.approve(job.id, job.mandate!.signature);
@@ -144,7 +145,7 @@ describe("recovery session state machine", () => {
     const make = (code: string) => {
       const upstreams = upstreamsWith(imageVendorEntry({ purchase: true }));
       const purchaser: SteelPurchaser = { async purchase() { throw Object.assign(new Error(code), { code }); } };
-      return createGateway({ upstreams, steel: fastSteel, purchaser, extraTools: [new FakeImageVendor(0).tool()], safeBlockMs: 30, pollMs: 5, publicUrl: () => "http://x", mandateSecret: SECRET, log: () => {} });
+      return createGateway({ upstreams, steel: fastSteel, purchaser, extraTools: [new FakeImageVendor(0).tool()], env: { AISLE_INITIAL_BLOCK_MS: "1" }, safeBlockMs: 30, pollMs: 5, publicUrl: () => "http://x", mandateSecret: SECRET, log: () => {} });
     };
     for (const [code, expected] of [["PURCHASE_VERIFICATION_FAILED", "PURCHASE_UNKNOWN"], ["CONFIRM_NOT_FOUND", "PURCHASE_FAILED"]] as const) {
       const g = make(code);

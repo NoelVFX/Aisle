@@ -20,6 +20,10 @@ export interface PurchaseConfig {
   realMoney: boolean;
   pricingPath?: string;
   accountPath?: string;
+  /** Additional account paths to try when the vendor does not render balance on the billing page. */
+  accountPaths?: string[];
+  /** Optional vendor-specific selectors containing the authoritative balance. */
+  balanceSelectors?: string[];
   loggedInSelector?: string;
   /** Regex (pathname) of the vendor's login wall. */
   loginWallPattern?: string;

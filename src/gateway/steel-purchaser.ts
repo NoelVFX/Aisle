@@ -87,6 +87,8 @@ export function createSteelPurchaser(options: SteelPurchaserOptions): SteelPurch
         billingOrigin: upstream.billingOrigin,
         ...(cfg.pricingPath ? { pricingPath: cfg.pricingPath } : {}),
         ...(cfg.accountPath ? { accountPath: cfg.accountPath } : {}),
+        ...(cfg.accountPaths ? { accountPaths: [...cfg.accountPaths] } : {}),
+        ...(cfg.balanceSelectors ? { balanceSelectors: [...cfg.balanceSelectors] } : {}),
         ...(cfg.loggedInSelector ? { loggedInSelector: cfg.loggedInSelector } : {}),
         ...(cfg.loginWallPattern ? { loginWallPattern: new RegExp(cfg.loginWallPattern, "i") } : {}),
         ...(cfg.offersFrom === "catalogue" ? { catalogueOffers: [...upstream.offers] } : {}),

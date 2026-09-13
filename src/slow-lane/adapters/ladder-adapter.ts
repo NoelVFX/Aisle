@@ -93,6 +93,10 @@ export interface LadderAdapterConfig {
   billingOrigin: string;
   pricingPath?: string;
   accountPath?: string;
+  /** Account paths tried in order for the authoritative pre/post-purchase balance. */
+  accountPaths?: string[];
+  /** Selectors containing the authoritative balance, before falling back to page text. */
+  balanceSelectors?: string[];
   /** Any non-empty match means logged in (e.g. "[data-account-email]"). */
   loggedInSelector?: string;
   /** Pathname pattern of the vendor's login wall. */
@@ -175,6 +179,8 @@ export function offersFromJsonLd(blocks: unknown[], currency = "USD"): PurchaseO
 export class LadderVendorAdapter implements VendorPurchaseAdapter {
   private readonly pricingPath: string;
   private readonly accountPath: string;
+  private readonly accountPaths: string[];
+  private readonly balanceSelectors: string[];
   private readonly currency: string;
   private readonly maxSteps: number;
   private readonly loginWall: RegExp;
@@ -184,6 +190,15 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
   constructor(private readonly cfg: LadderAdapterConfig) {
     this.pricingPath = cfg.pricingPath ?? "/pricing";
     this.accountPath = cfg.accountPath ?? "/account";
+    this.accountPaths = [...new Set([this.accountPath, ...(cfg.accountPaths ?? [])])];
+    this.balanceSelectors = [
+      "[data-balance]",
+      '[data-testid*="balance" i]',
+      '[data-testid*="credit" i]',
+      '[aria-label*="balance" i]',
+      '[aria-label*="credit" i]',
+      ...(cfg.balanceSelectors ?? []),
+    ];
     this.currency = cfg.currency ?? "USD";
     this.maxSteps = cfg.maxStagingSteps ?? 4;
     this.loginWall = cfg.loginWallPattern ?? /^\/(login|log-in|signin|sign-in|auth)\b/i;
@@ -574,15 +589,30 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
       if (balance !== undefined) viaApi.balanceAfter = balance;
       return viaApi;
     }
-    await page.goto(this.url(this.accountPath));
-    await page.settle?.(2000);
-    const raw = await this.first(page, "[data-balance]");
-    const parsed = raw !== undefined ? Number(raw.replace(/[^0-9.-]/g, "")) : extractBalance(await page.innerText());
-    const balance = parsed !== undefined && Number.isFinite(parsed) ? parsed : undefined;
-    const out: PurchaseVerification = { confirmed: balance !== undefined && balance >= requirement.amount, resource: requirement.resource };
-    if (balance !== undefined) out.balanceAfter = balance;
-    const tx = await this.first(page, "[data-last-transaction-id]");
-    if (tx) out.transactionId = tx;
-    return out;
+    for (const path of this.accountPaths) {
+      await page.goto(this.url(path));
+      await page.settle?.(2000);
+      let parsed: number | undefined;
+      for (const selector of this.balanceSelectors) {
+        const raw = await this.first(page, selector);
+        if (raw === undefined) continue;
+        const fromLabel = extractBalance(raw) ?? (() => {
+          const labelled = /\bcredits?\b\s*[:=-]?\s*(-?[\d,]+(?:\.\d+)?)/i.exec(raw) ?? /(-?[\d,]+(?:\.\d+)?)\s*\bcredits?\b/i.exec(raw);
+          return labelled?.[1] === undefined ? undefined : Number(labelled[1].replace(/,/g, ""));
+        })();
+        const fromNumber = Number(raw.replace(/[^0-9.-]/g, ""));
+        parsed = fromLabel ?? (Number.isFinite(fromNumber) ? fromNumber : undefined);
+        if (parsed !== undefined) break;
+      }
+      if (parsed === undefined) parsed = extractBalance(await page.innerText());
+      const balance = parsed !== undefined && Number.isFinite(parsed) ? parsed : undefined;
+      if (balance !== undefined) {
+        const out: PurchaseVerification = { confirmed: balance >= requirement.amount, resource: requirement.resource, balanceAfter: balance };
+        const tx = await this.first(page, "[data-last-transaction-id]");
+        if (tx) out.transactionId = tx;
+        return out;
+      }
+    }
+    return { confirmed: false, reason: "Could not read an authoritative balance from the account pages." };
   }
 }

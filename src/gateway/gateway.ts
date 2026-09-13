@@ -57,7 +57,13 @@ registerVendorRules("openai", [
  */
 registerVendorRules("higgsfield", [
   {
-    test: (e) => e.code === "insufficient_credits" || /insufficient credits|not enough credits/i.test(e.message ?? ""),
+    test: (e) => {
+      const bodyText = e.body === undefined || e.body === null ? "" : JSON.stringify(e.body);
+      return (
+        e.code === "insufficient_credits" ||
+        /insufficient credits|not enough credits|not[_ -]?enough[_ -]?credits/i.test(`${e.message ?? ""} ${bodyText}`)
+      );
+    },
     type: "INSUFFICIENT_CREDITS",
     resource: "image_credits",
     required: (e) => {
@@ -128,6 +134,9 @@ export function createGateway(options: GatewayOptions) {
   const log = options.log ?? ((m: string) => console.error(m));
   const fetchImpl = options.fetchImpl ?? (globalThis.fetch as unknown as FetchLike);
   const safeBlockMs = options.safeBlockMs ?? (Number(env["SAFE_BLOCK_MS"]) || 50_000);
+  // Return the approval link quickly on the first call. The follow-up
+  // aisle__wait_for_recovery call uses safeBlockMs and can wait for completion.
+  const initialBlockMs = Number(env["AISLE_INITIAL_BLOCK_MS"]) || 3_000;
 
   const studioUrl = options.upstreams["studio"]?.toolUrl;
   const tools: VendorTool[] = [
@@ -228,11 +237,11 @@ export function createGateway(options: GatewayOptions) {
       blocker: classified.blocker,
     });
     await progress(`Blocked on ${ns} (${classified.classification}). Aisle opened a recovery. Approve here: ${job.approveUrl}`);
-    return block(job, progress);
+    return block(job, progress, initialBlockMs);
   }
 
-  async function block(job: RecoveryJob, progress: Progress): Promise<CallToolResult> {
-    const final = await coordinator.wait(job.id, safeBlockMs, (j) => {
+  async function block(job: RecoveryJob, progress: Progress, timeoutMs = safeBlockMs): Promise<CallToolResult> {
+    const final = await coordinator.wait(job.id, timeoutMs, (j) => {
       const last = j.events[j.events.length - 1];
       return progress(last ? `${last.type} ${JSON.stringify(last.detail)}` : j.status);
     });
@@ -309,6 +318,14 @@ export function createGateway(options: GatewayOptions) {
   async function waitForRecovery(recoveryId: string, progress?: Progress): Promise<CallToolResult> {
     const job = coordinator.get(recoveryId);
     if (!job) return text(`Unknown recovery_id: ${recoveryId}`, true);
+
+    // A model may invoke the follow-up wait tool in the same turn before the
+    // human has had a chance to open/approve the billing page. Do not hold the
+    // MCP request open in that state: return the approval envelope immediately
+    // so the URL and recovery_id reach the user. Once approval is granted,
+    // waiting is safe and will block until the recovery resolves or times out.
+    if (job.status === "awaiting_approval") return finish(job);
+
     return block(job, progress ?? (async () => {}));
   }
 

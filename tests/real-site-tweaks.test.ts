@@ -64,15 +64,36 @@ describe("real billing pages", () => {
     expect(staged).toMatchObject({ amount: 5, billingPeriod: "one_time", autoRenew: false });
   });
 
-  it("config: OpenAI uses catalogue offers; Higgsfield loads with no quotable packs", () => {
+  it("config: OpenAI and Higgsfield use catalogue offers", () => {
     const up = loadUpstreams(undefined, {});
     expect(up["openai"]?.purchase?.offersFrom).toBe("catalogue");
     expect(up["higgsfield"]?.billingOrigin).toBe("https://higgsfield.ai");
-    expect(up["higgsfield"]?.offers).toEqual([]);
+    expect(up["higgsfield"]?.purchase?.offersFrom).toBe("catalogue");
+    expect(up["higgsfield"]?.offers).toEqual([
+      expect.objectContaining({ productId: "higgsfield_credits_100", unitsGranted: 100, price: 6.25 }),
+      expect.objectContaining({ productId: "higgsfield_credits_200", unitsGranted: 200, price: 12 }),
+      expect.objectContaining({ productId: "higgsfield_credits_500", unitsGranted: 500, price: 26 }),
+    ]);
   });
 
   it("classifies the documented Higgsfield insufficient-credits body", () => {
     const r = classifyFailure({ status: 402, code: "insufficient_credits", required_credits: 3200 }, { provider: "higgsfield" });
     expect(r.blocker).toMatchObject({ type: "INSUFFICIENT_CREDITS", resource: "image_credits", required: 3200 });
+  });
+
+  it("reads a labelled SPA credit balance from a vendor-specific balance element", async () => {
+    const adapter = new LadderVendorAdapter({
+      provider: "higgsfield",
+      billingOrigin: ORIGIN,
+      accountPath: "/pricing",
+      balanceSelectors: ['[data-testid="credit-balance"]'],
+      registry: new InMemoryAdapterRegistry(),
+    });
+    const page = billingPage({ checkoutText: "", confirmVisible: false });
+    const originalQuery = page.queryAllText;
+    page.queryAllText = async (selector) =>
+      selector === '[data-testid="credit-balance"]' ? ["Credits 0"] : originalQuery(selector);
+    const result = await adapter.verifyEntitlement(page, { resource: "image_credits", amount: 1 });
+    expect(result).toMatchObject({ confirmed: false, balanceAfter: 0, resource: "image_credits" });
   });
 });
