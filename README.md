@@ -1,4 +1,4 @@
-# top-up-agent
+# aisle
 
 The Aisle recovery engine, as a TypeScript library. When an agent's tool call
 hits a paywall, Aisle classifies it, freezes a checkpoint, buys the minimum,
@@ -52,7 +52,7 @@ tool call → 402
 import {
   classifyFailure, freezeCheckpoint, lockOrigin, buildQuote, gate, loadLimits,
   signMandate, runFastLane, runSlowLane, NoFastLaneError,
-} from "top-up-agent";
+} from "aisle";
 
 const classified = classifyFailure(toolError, { provider: "openrouter" });
 const checkpoint = freezeCheckpoint({
