@@ -46,6 +46,24 @@ export const PROFILE_READY_TIMEOUT_MS = 60_000;
 const PROFILE_READY_POLL_MS = 1_000;
 const DEFAULT_DIMENSIONS = { width: 1280, height: 720 };
 
+/**
+ * Stealth identity for the purchase/login browser. Vendors increasingly reject a
+ * bare automation fingerprint with an "unsupported browser" wall — which also
+ * hides the signed-in UI, so it reads as a surprise logout. A humanized,
+ * fingerprint-injected session passes those checks.
+ *
+ * MUST be identical between the interactive login session and every later
+ * purchase session on the same profile: a fingerprint that shifts under existing
+ * cookies trips the vendor's security re-check and really does log you out. So
+ * both call this. Disable with AISLE_STEEL_STEALTH=0.
+ */
+export function stealthFromEnv(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): SessionCreateParams["stealthConfig"] | undefined {
+  if (env["AISLE_STEEL_STEALTH"] === "0") return undefined;
+  return { humanizeInteractions: true, skipFingerprintInjection: false };
+}
+
 export interface SteelProviderOptions {
   /** Defaults to process.env.STEEL_API_KEY. */
   apiKey?: string;
@@ -416,8 +434,20 @@ class PlaywrightPage implements PageLike {
   async clickByText(text: string): Promise<void> {
     await this.clickLocator(this.page.getByText(text, { exact: false }).first());
   }
-  async clickBySelector(selector: string): Promise<void> {
-    await this.page.click(selector);
+  async clickBySelector(selector: string, timeoutMs?: number): Promise<void> {
+    // `.first()` so union/proximity selectors (e.g. "a, button" or ":near(...)")
+    // don't trip Playwright strict mode; the nearest/first match is the target.
+    await this.page.locator(selector).first().click(timeoutMs === undefined ? {} : { timeout: timeoutMs });
+  }
+  async dismissOverlays(closeSelectors: string[] = []): Promise<void> {
+    // Many modals close on Escape; try it first (cheap, never blocks a read).
+    await this.page.keyboard.press("Escape").catch(() => {});
+    for (const selector of closeSelectors) {
+      const loc = this.page.locator(selector).first();
+      if ((await loc.count().catch(() => 0)) === 0) continue;
+      // Bounded: a present-but-obscured close control must not stall the 90s default.
+      await loc.click({ timeout: 2000 }).catch(() => {});
+    }
   }
   async fill(selector: string, value: string): Promise<void> {
     await this.page.fill(selector, value);

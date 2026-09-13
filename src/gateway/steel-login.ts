@@ -17,7 +17,7 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import Steel from "steel-sdk";
-import { SteelBrowserProvider } from "../slow-lane/steel-provider.js";
+import { SteelBrowserProvider, stealthFromEnv } from "../slow-lane/steel-provider.js";
 import { FileProfileStore } from "../slow-lane/profiles.js";
 import { loadUpstreams } from "./upstreams.js";
 
@@ -35,8 +35,11 @@ if (!upstream) {
 
 const store = new FileProfileStore(join(ROOT, ".aisle", "profiles"));
 const stored = await store.load(USER_ID, ns);
+const loginStealth = stealthFromEnv();
 const provider = new SteelBrowserProvider({
   ...(process.env["AISLE_STEEL_PROXY_CAPTCHA"] === "1" ? {} : { useProxy: false, solveCaptcha: false }),
+  // Same fingerprint the purchase session will restore, or the login won't hold.
+  ...(loginStealth ? { stealth: loginStealth } : {}),
   sessionTimeoutMs: 15 * 60_000,
   sessionOptions: { debugConfig: { interactive: true } },
 });

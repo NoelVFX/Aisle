@@ -26,6 +26,12 @@ export interface PurchaseConfig {
   balanceSelectors?: string[];
   /** Selector to click on the account page to reveal a menu-hidden balance (e.g. an avatar dropdown). */
   balanceRevealSelector?: string;
+  /** Close controls for blocking modals/overlays (promo popups, cookie banners) cleared before the balance read. Escape is always tried first. */
+  dismissSelectors?: string[];
+  /** Page opened to begin staging when the top-up UI isn't the pricing page (defaults to pricingPath). */
+  offerEntryPath?: string;
+  /** Controls clicked in order to reveal menu-hidden top-up packs before staging (e.g. [profile avatar, "Top-up credits" button]). */
+  offerRevealSelectors?: string[];
   loggedInSelector?: string;
   /** Regex (pathname) of the vendor's login wall. */
   loginWallPattern?: string;

@@ -103,6 +103,26 @@ export interface LadderAdapterConfig {
    * dropdown shows "Credits N left". Clicked after navigating, before reading.
    */
   balanceRevealSelector?: string;
+  /**
+   * Close controls for blocking modals/overlays (promo popups, cookie banners)
+   * cleared before the balance read. Escape is always tried first; these are the
+   * fallback close buttons — e.g. "[aria-label*='close' i]". Each is bounded and
+   * swallowed, so a selector that matches nothing is harmless.
+   */
+  dismissSelectors?: string[];
+  /**
+   * Page opened to begin staging when the top-up UI isn't the pricing page.
+   * Defaults to `pricingPath`. The avatar/header controls live on every page, so
+   * for a dropdown-based top-up the app root ("/") works.
+   */
+  offerEntryPath?: string;
+  /**
+   * Controls clicked in order (after overlays are dismissed) to REVEAL the
+   * top-up packs before staging — e.g. [profile avatar, the "Top-up credits"
+   * button in its dropdown]. Deterministic so the picker doesn't get baited by a
+   * promo/upsell instead of the top-up path. Each click is bounded and swallowed.
+   */
+  offerRevealSelectors?: string[];
   /** Any non-empty match means logged in (e.g. "[data-account-email]"). */
   loggedInSelector?: string;
   /** Pathname pattern of the vendor's login wall. */
@@ -293,14 +313,16 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
 
     let staged = false;
     if (recorded && steps && steps.length > 0) {
+      // Recorded steps begin from the open offer surface (e.g. the avatar
+      // dropdown), so reveal it before replaying too.
+      await this.openOfferSurface(page);
       this.emit("ADAPTER_REPLAY", { tier: 2, version: recorded.version, steps: steps.length });
       staged = await this.replay(page, steps, offer);
       if (!staged) this.emit("ADAPTER_MISS", { tier: 2, version: recorded.version });
     }
 
     if (!staged) {
-      await page.goto(this.url(this.pricingPath));
-      await page.settle?.(1500);
+      await this.openOfferSurface(page);
       const newSteps = await this.resolveCold(page, offer);
       // The fallback is the recording mechanism: promote tier 3 to tier 2.
       const latest = await this.cfg.registry.load(this.cfg.billingOrigin);
@@ -372,6 +394,27 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
     return this.checkoutReady(page);
   }
 
+  /**
+   * Bring the top-up packages into view before staging: open the entry page,
+   * clear promo/cookie overlays, and click the reveal control (e.g. the profile
+   * avatar) so a menu-hidden "Top-up credits" entry becomes an actionable
+   * candidate for the picker/replay. All best-effort — a vendor whose packs are
+   * already on the pricing page needs no reveal and this is a no-op nav.
+   */
+  private async openOfferSurface(page: PageLike): Promise<void> {
+    await page.goto(this.url(this.cfg.offerEntryPath ?? this.pricingPath));
+    await page.settle?.(1500);
+    await page.dismissOverlays?.(this.cfg.dismissSelectors ?? []).catch(() => {});
+    for (const selector of this.cfg.offerRevealSelectors ?? []) {
+      await page.settle?.(300);
+      await page.clickBySelector(selector, 8000).catch(() => {});
+      await page.settle?.(800);
+    }
+    if ((this.cfg.offerRevealSelectors ?? []).length > 0) {
+      this.emit("OFFER_SURFACE_REVEALED", { steps: this.cfg.offerRevealSelectors!.length });
+    }
+  }
+
   private async resolveCold(page: PageLike, offer: PurchaseOffer): Promise<RecordedStep[]> {
     if (!this.cfg.picker || !page.actionableCandidates || !page.clickCandidate) {
       throw new DeterministicStepError(
@@ -397,6 +440,7 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
       const goal =
         `Buy exactly this package: "${offer.label}" (${offer.unitsGranted} units for ${offer.currency} ${offer.price}, one-time). ` +
         `Step ${step + 1}: choose the ONE control that moves toward the checkout for this package. ` +
+        `Prefer a "top-up"/"buy credits"/"add credits" path. IGNORE promotional upsells — plan upgrades, discount/"% OFF"/"claim offer" banners, or subscription changes — unless nothing else moves toward buying this credit package. ` +
         `If a field asks for the amount, choose that field; the amount is typed for you.`;
       const pick = await this.cfg.picker.pick({
         goal,
@@ -598,9 +642,16 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
     for (const path of this.accountPaths) {
       await page.goto(this.url(path));
       await page.settle?.(2000);
+      // Clear promo/cookie overlays first — otherwise they intercept the reveal
+      // click and the avatar wait hangs on the 90s action default ("cursor stuck").
+      if (this.cfg.balanceRevealSelector || this.cfg.dismissSelectors) {
+        await page.dismissOverlays?.(this.cfg.dismissSelectors ?? []).catch(() => {});
+        await page.settle?.(400);
+      }
       // Reveal a menu-hidden balance (e.g. an avatar dropdown) WITHOUT reloading.
+      // Bounded so a still-obscured avatar fails fast instead of stalling the read.
       if (this.cfg.balanceRevealSelector) {
-        await page.clickBySelector(this.cfg.balanceRevealSelector).catch(() => {});
+        await page.clickBySelector(this.cfg.balanceRevealSelector, 8000).catch(() => {});
         await page.settle?.(800);
       }
       let parsed: number | undefined;

@@ -21,7 +21,7 @@ import { createFastPurchaser } from "./fast-purchaser.js";
 import { createBalanceReaders } from "./balances.js";
 import { isOpen, type RecoveryJob } from "./recovery.js";
 import { InMemoryIdempotencyStore } from "../fast-lane/idempotency.js";
-import type { SteelProviderOptions } from "../slow-lane/steel-provider.js";
+import { stealthFromEnv, type SteelProviderOptions } from "../slow-lane/steel-provider.js";
 import { FileEnrollmentStore } from "../web/enrollments.js";
 import { BrowsingManager, type BrowsingView } from "../web/browsing.js";
 import { BROWSE_PAGE } from "../web/browse-page.js";
@@ -84,8 +84,11 @@ export async function startAisleRuntime(): Promise<AisleRuntime> {
     useProxy: process.env["AISLE_STEEL_PROXY_CAPTCHA"] === "1",
     solveCaptcha: process.env["AISLE_STEEL_PROXY_CAPTCHA"] === "1",
   };
+  const stealth = stealthFromEnv();
   const steelProvider: SteelProviderOptions = {
     ...(process.env["AISLE_STEEL_PROXY_CAPTCHA"] === "1" ? {} : { useProxy: false, solveCaptcha: false }),
+    // Real Chrome fingerprint so vendors don't serve an "unsupported browser" wall.
+    ...(stealth ? { stealth } : {}),
     sessionOptions: { debugConfig: { interactive: process.env["AISLE_STEEL_INTERACTIVE"] === "1", systemCursor: true } },
   };
   const realPurchaseProviders = new Set(

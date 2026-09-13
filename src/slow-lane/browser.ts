@@ -17,7 +17,8 @@ export interface PageLike {
   currentUrl(): string;
   goto(url: string): Promise<void>;
   clickByText(text: string): Promise<void>;
-  clickBySelector(selector: string): Promise<void>;
+  /** `timeoutMs` bounds the wait so a click on an obscured/absent element fails fast instead of hanging on the 90s default. */
+  clickBySelector(selector: string, timeoutMs?: number): Promise<void>;
   fill(selector: string, value: string): Promise<void>;
   textContent(selector: string): Promise<string | null>;
   /** Text content of every element matching the selector. */
@@ -54,6 +55,13 @@ export interface PageLike {
   setChecked?(selector: string, checked: boolean): Promise<boolean>;
   /** Let navigation and client-side rendering settle after an action. */
   settle?(ms?: number): Promise<void>;
+  /**
+   * Best-effort clearing of blocking modals/overlays (promo popups, cookie
+   * banners) before a read. Presses Escape, then clicks any of `closeSelectors`
+   * that are present — each bounded and swallowed, so it never throws or hangs.
+   * Read-only side effect; adapters must work without it.
+   */
+  dismissOverlays?(closeSelectors?: string[]): Promise<void>;
 }
 
 /**

@@ -37,14 +37,21 @@ export interface CandidatePicker {
 }
 
 /**
- * Text-only picker profile. A fast non-reasoning model: the picker only returns an
- * index, and the free reasoning model stalled past the request timeout on live runs.
- * Measured 2026-09-12 on the picker prompt: flash-lite 0.5s, llama-3.3-70b 0.9s,
- * gpt-4.1-nano 1.7s, all correct. Override with OPENROUTER_PICKER_MODEL.
+ * Text-only picker profile. The picker only returns an index, so it needs strong
+ * instruction-following (to ignore promo/upsell bait) but NOT reasoning — a free
+ * reasoning model stalled past the request timeout on live runs, so these are all
+ * non-reasoning `:free` endpoints: $0 on the infra key regardless of its balance,
+ * and smarter than flash-lite (which took the "Upgrade 55% OFF" bait).
+ * DeepSeek V3 leads for instruction-following; Llama-70B / Qwen-72B are the
+ * fallbacks OpenRouter routes to if it's rate-limited. Override with
+ * OPENROUTER_PICKER_MODEL (e.g. a paid model if you want lower latency).
  */
 export const PICKER_PROFILE = {
-  model: "google/gemini-2.5-flash-lite",
-  models: ["meta-llama/llama-3.3-70b-instruct", "openai/gpt-4.1-nano"] as readonly string[],
+  model: "deepseek/deepseek-chat-v3-0324:free",
+  models: [
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "qwen/qwen-2.5-72b-instruct:free",
+  ] as readonly string[],
 } as const;
 
 export function formatCandidates(candidates: ActionCandidate[]): string {

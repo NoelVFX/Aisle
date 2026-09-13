@@ -121,6 +121,20 @@
         "[aria-label*='balance' i]"
       ],
       "balanceRevealSelector": "[data-testid*='avatar' i],[data-testid*='user-menu' i],[data-testid*='account' i],[aria-label*='account' i],[aria-label*='profile' i],header button:has(img)",
+      "offerEntryPath": "/",
+      "offerRevealSelectors": [
+        "[data-testid*='avatar' i],[data-testid*='user-menu' i],[data-testid*='account' i],[aria-label*='account' i],[aria-label*='profile' i],header button:has(img)",
+        "button:near(:text('Top-up credits'), 400),a:near(:text('Top-up credits'), 400),:text('Top-up credits')"
+      ],
+      "dismissSelectors": [
+        "[role='dialog'] [aria-label*='close' i]",
+        "[role='dialog'] button[aria-label*='close' i]",
+        "button[aria-label*='close' i]",
+        "[aria-label='Close']",
+        "[data-testid*='close' i]",
+        "[class*='modal' i] button[class*='close' i]",
+        "[class*='overlay' i] [aria-label*='close' i]"
+      ],
       "loginWallPattern": "^/(login|signin|sign-in|auth)",
       "offersFrom": "catalogue",
       "steelCredentials": true
