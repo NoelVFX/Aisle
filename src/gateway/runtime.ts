@@ -5,6 +5,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { join } from "node:path";
@@ -24,6 +25,7 @@ import type { SteelProviderOptions } from "../slow-lane/steel-provider.js";
 import { FileEnrollmentStore } from "../web/enrollments.js";
 import { BrowsingManager, type BrowsingView } from "../web/browsing.js";
 import { BROWSE_PAGE } from "../web/browse-page.js";
+import { ExternalActionManager, SteelExternalActionExecutor } from "../web/external-action.js";
 import { MCP_APP_MIME, RECOVERY_WIDGET_CSP, RECOVERY_WIDGET_HTML, RECOVERY_WIDGET_URI } from "./widget.js";
 
 export interface AisleRuntime {
@@ -33,6 +35,7 @@ export interface AisleRuntime {
   gateway: Gateway;
   approval: ApprovalServer;
   browsing: BrowsingManager;
+  externalActions?: ExternalActionManager;
   enrollments: FileEnrollmentStore;
   log: (line: string) => void;
   close(): Promise<void>;
@@ -146,6 +149,11 @@ export async function startAisleRuntime(): Promise<AisleRuntime> {
     steelOptions,
     log,
   });
+  const externalActions = new ExternalActionManager({
+    upstreams,
+    coordinator: gateway.coordinator,
+    executor: new SteelExternalActionExecutor(),
+  });
 
   const webRoutes = async (req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> => {
     const send = (status: number, body?: unknown, type = "application/json") => {
@@ -181,6 +189,22 @@ export async function startAisleRuntime(): Promise<AisleRuntime> {
       return send(204), true;
     }
     if (req.method === "POST" && p === "/api/browse/stop") return await browsing.stop(), send(204), true;
+    if (req.method === "POST" && p === "/api/actions") {
+      const body = await readJson(req);
+      try {
+        const prompt = typeof body["prompt"] === "string" ? body["prompt"] : "";
+        return send(200, await externalActions.execute({
+          taskId: typeof body["task_id"] === "string" ? body["task_id"] : `web_${randomUUID()}`,
+          prompt,
+          ...(typeof body["url"] === "string" ? { url: body["url"] } : {}),
+          ...(typeof body["max_steps"] === "number" ? { maxSteps: body["max_steps"] } : {}),
+        })), true;
+      } catch (err) {
+        return send(400, { error: err instanceof Error ? err.message : String(err) }), true;
+      }
+    }
+    const actionWait = p.match(/^\/api\/actions\/([^/]+)\/wait$/);
+    if (req.method === "POST" && actionWait?.[1]) return send(200, await externalActions.wait(actionWait[1])), true;
     const dismiss = p.match(/^\/api\/browse\/toasts\/([^/]+)\/dismiss$/);
     if (req.method === "POST" && dismiss?.[1]) return browsing.dismissToast(dismiss[1]), send(204), true;
     if (req.method === "GET" && p === "/api/enrollments") {
@@ -218,6 +242,7 @@ export async function startAisleRuntime(): Promise<AisleRuntime> {
     gateway,
     approval,
     browsing,
+    externalActions,
     enrollments,
     log,
     close: async () => {
@@ -269,7 +294,7 @@ function progressFor(extra: Extra, log: (line: string) => void): Progress {
 /** Register Aisle's namespaced vendor tools plus its own tools on an MCP server. */
 export function registerAisleTools(
   server: McpServer,
-  runtime: Pick<AisleRuntime, "gateway" | "log">,
+  runtime: Pick<AisleRuntime, "gateway" | "log"> & { externalActions?: ExternalActionManager },
   taskFor: (extra: { sessionId?: string }) => string,
 ): void {
   const { gateway, log } = runtime;
@@ -293,6 +318,34 @@ export function registerAisleTools(
       }),
     );
   }
+
+  server.registerTool(
+    "aisle__execute_web_action",
+    {
+      description: "Execute a prompt-driven action on a configured external service in Steel. The model never pays; billing walls use the normal Aisle top-up approval flow.",
+      inputSchema: { prompt: z.string(), url: z.string().url().optional(), max_steps: z.number().int().positive().max(20).optional() },
+      _meta: widgetMeta,
+    },
+    async ({ prompt, url, max_steps }, extra) => {
+      if (!runtime.externalActions) return { content: [{ type: "text", text: JSON.stringify({ status: "RECOVERY_FAILED", error: "EXTERNAL_ACTIONS_NOT_CONFIGURED" }) }], isError: true };
+      const result = await runtime.externalActions.execute({ taskId: taskFor(extra as unknown as Extra), prompt, ...(url === undefined ? {} : { url }), ...(max_steps === undefined ? {} : { maxSteps: max_steps }) });
+      return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result };
+    },
+  );
+
+  server.registerTool(
+    "aisle__wait_for_external_action",
+    {
+      description: "Wait for a prompt-driven external action after its top-up is approved. Do not repeat the original action.",
+      inputSchema: { recovery_id: z.string() },
+      _meta: widgetMeta,
+    },
+    async ({ recovery_id }) => {
+      if (!runtime.externalActions) return { content: [{ type: "text", text: JSON.stringify({ status: "RECOVERY_FAILED", error: "EXTERNAL_ACTIONS_NOT_CONFIGURED" }) }], isError: true };
+      const result = await runtime.externalActions.wait(recovery_id);
+      return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result };
+    },
+  );
 
   server.registerTool(
     "aisle__wait_for_recovery",
