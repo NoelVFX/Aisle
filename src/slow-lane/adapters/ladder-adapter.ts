@@ -344,7 +344,20 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
       await this.openOfferSurface(page);
       this.emit("ADAPTER_REPLAY", { tier: 2, version: recorded.version, steps: steps.length });
       staged = await this.replay(page, steps, offer);
-      if (!staged) this.emit("ADAPTER_MISS", { tier: 2, version: recorded.version });
+      if (staged) {
+        // A recording can go stale (the vendor's flow changed) and land on the
+        // wrong checkout — a total below the package price. Drop the stale steps
+        // so the NEXT run re-resolves cold, but never proceed on this run: the
+        // shared readStaged below still aborts (safety over convenience).
+        await this.waitForCheckout(page);
+        const total = await this.peekCheckoutTotal(page);
+        if (total === undefined || total + 0.005 < offer.price) {
+          this.emit("ADAPTER_STALE", { version: recorded.version, total: total ?? null, package: key });
+          await this.invalidateRecording(recorded, key);
+        }
+      } else {
+        this.emit("ADAPTER_MISS", { tier: 2, version: recorded.version });
+      }
     }
 
     if (!staged) {
@@ -518,6 +531,28 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
     const buttons = await page.queryAllText('button, [role="button"], input[type="submit"]');
     if (!buttons.some((b) => CONFIRM_NAME_RE.test(b))) return false;
     return extractPrice(await page.innerText()) !== undefined;
+  }
+
+  /** Remove one offer's stale recorded steps so the next run re-resolves it cold (keeps other offers intact). */
+  private async invalidateRecording(recorded: RecordedAdapter, key: string): Promise<void> {
+    const { [key]: _dropped, ...rest } = recorded.offers;
+    await this.cfg.registry.save({
+      ...recorded,
+      version: recorded.version + 1,
+      offers: rest,
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
+  /** The staged checkout total, read the same way as readStaged but without throwing — for the stale-recording sanity check. */
+  private async peekCheckoutTotal(page: PageLike): Promise<number | undefined> {
+    const rawAmount = await this.first(page, "[data-checkout-amount]");
+    if (rawAmount !== undefined) {
+      const n = Number(rawAmount.replace(/[^0-9.]/g, ""));
+      if (Number.isFinite(n)) return n;
+    }
+    const total = extractCheckoutTotal(await page.innerText()) ?? extractPrice(await page.innerText());
+    return total !== undefined && Number.isFinite(total) ? total : undefined;
   }
 
   private async readStaged(page: PageLike, offer: PurchaseOffer): Promise<StagedPurchase> {
