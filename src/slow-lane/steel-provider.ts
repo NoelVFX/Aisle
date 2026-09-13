@@ -36,8 +36,16 @@ import type {
 } from "./browser.js";
 import { SteelComputerControl, SteelCursor } from "./steel-computer.js";
 
-/** steel.md §11 — captcha solves take tens of seconds inside a payment flow. */
+/** steel.md §11 — captcha solves take tens of seconds inside a payment flow. Navigation only. */
 export const CHECKOUT_TIMEOUT_MS = 90_000;
+/**
+ * Default per-ACTION timeout. Kept well below navigation so an element that never
+ * settles — a perpetually-animating "loading" spinner/skeleton, which Playwright
+ * never considers stable — fails fast and the flow can retry or fall back, instead
+ * of hanging the whole recovery on one click. Bounded reveal/dismiss clicks pass
+ * their own tighter timeouts and are unaffected.
+ */
+export const ACTION_TIMEOUT_MS = 20_000;
 /** steel.md §3 — 15 minutes. `timeout` cannot be raised on a live session. */
 export const PURCHASE_SESSION_TIMEOUT_MS = 15 * 60_000;
 /** steel.md §22 — READY latency is unmeasured; allow a minute until it is. */
@@ -67,8 +75,10 @@ export function stealthFromEnv(
 export interface SteelProviderOptions {
   /** Defaults to process.env.STEEL_API_KEY. */
   apiKey?: string;
-  /** Default Playwright timeout for navigation and actions. Defaults to 90s. */
+  /** Default Playwright navigation timeout. Defaults to 90s. */
   navigationTimeoutMs?: number;
+  /** Default per-action timeout (clicks, waits). Defaults to 20s — a never-settling element fails fast instead of hanging the recovery. */
+  actionTimeoutMs?: number;
 
   // ---- Purchase-worker configuration (steel.md §4.1). Defaults follow the doc.
   /** Residential proxy. Default true. Ignored when the profile is pinned to a dedicated IP. */
@@ -308,15 +318,19 @@ class PlaywrightPage implements PageLike {
     await this.page.mouse.click(x, y);
   }
 
-  private async clickLocator(loc: ReturnType<Page["locator"]>): Promise<void> {
+  private async clickLocator(loc: ReturnType<Page["locator"]>, timeoutMs?: number): Promise<void> {
     if (this.cursor) {
-      await loc.scrollIntoViewIfNeeded().catch(() => {});
-      const box = await loc.boundingBox().catch(() => null);
+      const opts = timeoutMs === undefined ? {} : { timeout: timeoutMs };
+      await loc.scrollIntoViewIfNeeded(opts).catch(() => {});
+      const box = await loc.boundingBox(opts).catch(() => null);
       if (box && box.width > 0 && box.height > 0) {
+        // Coordinate click through the real cursor: no actionability hit-test, so
+        // a target the cursor can reach is actually clicked instead of just hovered
+        // (Playwright's loc.click() hovers and waits when it thinks the point is covered).
         return this.pointClick(box.x + box.width / 2, box.y + box.height / 2);
       }
     }
-    await loc.click();
+    await loc.click(timeoutMs === undefined ? {} : { timeout: timeoutMs });
   }
 
   private async cdpSession(): Promise<CDPSession> {
@@ -452,7 +466,26 @@ class PlaywrightPage implements PageLike {
   async clickBySelector(selector: string, timeoutMs?: number): Promise<void> {
     // `.first()` so union/proximity selectors (e.g. "a, button" or ":near(...)")
     // don't trip Playwright strict mode; the nearest/first match is the target.
-    await this.page.locator(selector).first().click(timeoutMs === undefined ? {} : { timeout: timeoutMs });
+    // Route through clickLocator so it's a real cursor coordinate click — the raw
+    // loc.click() only HOVERS a covered/animating element (e.g. a still-loading
+    // avatar) and waits out the timeout without ever clicking.
+    await this.clickLocator(this.page.locator(selector).first(), timeoutMs);
+  }
+  async hoverBySelector(selector: string, timeoutMs?: number): Promise<void> {
+    const loc = this.page.locator(selector).first();
+    const opts = timeoutMs === undefined ? {} : { timeout: timeoutMs };
+    await loc.scrollIntoViewIfNeeded(opts).catch(() => {});
+    const box = await loc.boundingBox(opts).catch(() => null);
+    if (box && box.width > 0 && box.height > 0) {
+      const x = box.x + box.width / 2;
+      const y = box.y + box.height / 2;
+      // Coordinate move via the real cursor opens a hover-menu without the
+      // actionability wait that loc.hover() imposes on a covered/animating icon.
+      if (this.cursor) return void (await this.cursor.move(x, y));
+      await this.page.mouse.move(x, y);
+      return;
+    }
+    await loc.hover(opts).catch(() => {});
   }
   async dismissOverlays(closeSelectors: string[] = []): Promise<void> {
     // Many modals close on Escape; try it first (cheap, never blocks a read).
@@ -576,7 +609,9 @@ export class SteelBrowserProvider implements BrowserProvider {
       if (!context || !page) {
         throw new Error("Steel session exposed no default context/page; refusing to create one (steel.md §5).");
       }
-      page.setDefaultTimeout(o.navigationTimeoutMs ?? CHECKOUT_TIMEOUT_MS);
+      // Navigation may be slow (proxy, captcha); a single action must not hang on
+      // a never-settling loading element, so bound actions much tighter.
+      page.setDefaultTimeout(o.actionTimeoutMs ?? ACTION_TIMEOUT_MS);
       page.setDefaultNavigationTimeout(o.navigationTimeoutMs ?? CHECKOUT_TIMEOUT_MS);
 
       const control: ControlSurface =

@@ -106,6 +106,13 @@ export interface LadderAdapterConfig {
    */
   balanceRevealSelector?: string;
   /**
+   * A control HOVERED (not clicked) to open a hover-triggered menu — e.g. the
+   * profile avatar whose dropdown shows "Credits N left" and a top-up entry.
+   * Hovered before both the balance read and the offer reveal; the cursor then
+   * glides down to click the revealed control, keeping the menu open.
+   */
+  menuHoverSelector?: string;
+  /**
    * Close controls for blocking modals/overlays (promo popups, cookie banners)
    * cleared before the balance read. Escape is always tried first; these are the
    * fallback close buttons — e.g. "[aria-label*='close' i]". Each is bounded and
@@ -444,13 +451,20 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
     await page.goto(this.url(this.cfg.offerEntryPath ?? this.pricingPath));
     await page.settle?.(1500);
     await page.dismissOverlays?.(this.cfg.dismissSelectors ?? []).catch(() => {});
+    // Step 1: HOVER the avatar so its dropdown (with the credits/top-up entry) opens.
+    // The click steps below then glide the cursor DOWN into that open menu.
+    if (this.cfg.menuHoverSelector) {
+      await page.waitForSelector(this.cfg.menuHoverSelector, 6000).catch(() => {});
+      await page.hoverBySelector?.(this.cfg.menuHoverSelector, 8000).catch(() => {});
+      await page.settle?.(700);
+      this.emit("OFFER_MENU_HOVERED", {});
+    }
     const revealSelectors = this.cfg.offerRevealSelectors ?? [];
     for (const [i, selector] of revealSelectors.entries()) {
-      // Wait for the control (e.g. the top-right avatar) to actually render, and
-      // clear overlays again, BEFORE clicking — a bare fast click on a not-yet-
-      // ready or promo-covered avatar silently misses and the menu never opens.
+      // Re-hover the trigger first so a hover-menu that closed reopens, then click
+      // the revealed control. Waiting for it to render avoids a silent miss.
+      if (this.cfg.menuHoverSelector) await page.hoverBySelector?.(this.cfg.menuHoverSelector, 4000).catch(() => {});
       await page.waitForSelector(selector, 6000).catch(() => {});
-      await page.dismissOverlays?.(this.cfg.dismissSelectors ?? []).catch(() => {});
       await page.settle?.(300);
       let clicked = true;
       await page.clickBySelector(selector, 8000).catch(() => {
@@ -728,13 +742,17 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
       for (let attempt = 0; attempt < BALANCE_READ_ATTEMPTS; attempt++) {
         // Clear promo/cookie overlays first — otherwise they intercept the reveal
         // click and the avatar wait hangs on the 90s action default ("cursor stuck").
-        if (this.cfg.balanceRevealSelector || this.cfg.dismissSelectors) {
+        if (this.cfg.balanceRevealSelector || this.cfg.menuHoverSelector || this.cfg.dismissSelectors) {
           await page.dismissOverlays?.(this.cfg.dismissSelectors ?? []).catch(() => {});
           await page.settle?.(400);
         }
         // Reveal a menu-hidden balance (e.g. an avatar dropdown) WITHOUT reloading.
-        // Bounded so a still-obscured avatar fails fast instead of stalling the read.
-        if (this.cfg.balanceRevealSelector) {
+        // Prefer HOVER (many avatar menus open on hover, not click); fall back to a
+        // click. Bounded so a still-obscured avatar fails fast instead of stalling.
+        if (this.cfg.menuHoverSelector) {
+          await page.hoverBySelector?.(this.cfg.menuHoverSelector, 8000).catch(() => {});
+          await page.settle?.(900);
+        } else if (this.cfg.balanceRevealSelector) {
           await page.clickBySelector(this.cfg.balanceRevealSelector, 8000).catch(() => {});
           await page.settle?.(900);
         }

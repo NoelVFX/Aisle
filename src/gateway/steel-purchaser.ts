@@ -90,6 +90,7 @@ export function createSteelPurchaser(options: SteelPurchaserOptions): SteelPurch
         ...(cfg.accountPaths ? { accountPaths: [...cfg.accountPaths] } : {}),
         ...(cfg.balanceSelectors ? { balanceSelectors: [...cfg.balanceSelectors] } : {}),
         ...(cfg.balanceRevealSelector ? { balanceRevealSelector: cfg.balanceRevealSelector } : {}),
+        ...(cfg.menuHoverSelector ? { menuHoverSelector: cfg.menuHoverSelector } : {}),
         ...(cfg.dismissSelectors ? { dismissSelectors: [...cfg.dismissSelectors] } : {}),
         ...(cfg.offerEntryPath ? { offerEntryPath: cfg.offerEntryPath } : {}),
         ...(cfg.offerRevealSelectors ? { offerRevealSelectors: [...cfg.offerRevealSelectors] } : {}),

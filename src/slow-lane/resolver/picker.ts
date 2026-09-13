@@ -46,16 +46,17 @@ export interface CandidatePicker {
  * fallbacks OpenRouter routes to if it's rate-limited. Override with
  * OPENROUTER_PICKER_MODEL (e.g. a paid model if you want lower latency).
  */
-// Paid high-end picker (infra key), verified 2026-09-13: Qwen 3.7 returns the
-// {"index"} JSON in ~3s. NOTE kimi-k3 was rejected here — it's a reasoning model
-// that ignores reasoning:{exclude} and spent the whole token budget thinking,
-// returning empty content after 70s. The picker needs a decisive non-stalling
-// model. A free model backs it up so a spent/again-402 infra key still resolves.
-// Override with OPENROUTER_PICKER_MODEL.
+// Paid high-end picker (infra key), verified 2026-09-13 against the live catalogue:
+// Qwen 3.8 — the flagship max plus the 2.4T-param model — return the {"index"} JSON
+// in 1–3s. NOTE kimi-k3 was rejected: it ignores reasoning:{exclude}, burns the whole
+// token budget thinking, and returns empty content after ~70s. The picker needs a
+// decisive, non-stalling model. A free model backs it up so a spent/402 infra key
+// still resolves. Override with OPENROUTER_PICKER_MODEL.
 export const PICKER_PROFILE = {
-  model: "qwen/qwen3.7-max",
+  model: "qwen/qwen3.8-max-0902",
   models: [
-    "qwen/qwen3.7-plus",
+    "qwen/qwen3.8-2.4t-a95b",
+    "qwen/qwen3.7-max",
     "nvidia/nemotron-3-super-120b-a12b:free",
   ] as readonly string[],
 } as const;

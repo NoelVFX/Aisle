@@ -26,6 +26,8 @@ export interface PurchaseConfig {
   balanceSelectors?: string[];
   /** Selector to click on the account page to reveal a menu-hidden balance (e.g. an avatar dropdown). */
   balanceRevealSelector?: string;
+  /** Selector HOVERED (not clicked) to open a hover-triggered avatar/account menu before reading balance and revealing offers. */
+  menuHoverSelector?: string;
   /** Close controls for blocking modals/overlays (promo popups, cookie banners) cleared before the balance read. Escape is always tried first. */
   dismissSelectors?: string[];
   /** Page opened to begin staging when the top-up UI isn't the pricing page (defaults to pricingPath). */

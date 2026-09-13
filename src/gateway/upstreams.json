@@ -119,10 +119,9 @@
         "[aria-label*='credit' i]",
         "[aria-label*='balance' i]"
       ],
-      "balanceRevealSelector": ":is([data-testid*='avatar' i],[data-testid*='user-menu' i],[data-testid*='account' i],[aria-label*='account' i],[aria-label*='profile' i],header button:has(img),header a:has(img),header [role='button']:has(img)) >> nth=-1",
+      "menuHoverSelector": ":is([data-testid*='avatar' i],[data-testid*='user-menu' i],[data-testid*='account' i],[aria-label*='account' i],[aria-label*='profile' i],header button:has(img),header a:has(img),header [role='button']:has(img)) >> nth=-1",
       "offerEntryPath": "/",
       "offerRevealSelectors": [
-        ":is([data-testid*='avatar' i],[data-testid*='user-menu' i],[data-testid*='account' i],[aria-label*='account' i],[aria-label*='profile' i],header button:has(img),header a:has(img),header [role='button']:has(img)) >> nth=-1",
         ":text('Credits')"
       ],
       "excludeControlsPattern": "explore all plans|all plans|view plans|see plans|compare plans|choose a plan|upgrade|premium|subscription|% off|claim",

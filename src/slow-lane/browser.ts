@@ -19,6 +19,8 @@ export interface PageLike {
   clickByText(text: string): Promise<void>;
   /** `timeoutMs` bounds the wait so a click on an obscured/absent element fails fast instead of hanging on the 90s default. */
   clickBySelector(selector: string, timeoutMs?: number): Promise<void>;
+  /** Move the cursor over an element WITHOUT clicking — to open a hover-triggered menu (e.g. a profile-avatar dropdown). */
+  hoverBySelector?(selector: string, timeoutMs?: number): Promise<void>;
   fill(selector: string, value: string): Promise<void>;
   textContent(selector: string): Promise<string | null>;
   /** Text content of every element matching the selector. */

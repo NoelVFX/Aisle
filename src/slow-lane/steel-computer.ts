@@ -65,12 +65,13 @@ export class SteelCursor {
   }
 
   /** Glide the OS cursor to a viewport point and left-click there. */
-  async click(viewportX: number, viewportY: number): Promise<void> {
+  /** Glide the cursor to a viewport point WITHOUT clicking — opens hover-triggered menus. */
+  async move(viewportX: number, viewportY: number): Promise<void> {
     const offset = await this.calibrate();
     const target = { x: Math.round(viewportX + offset.x), y: Math.round(viewportY + offset.y) };
     const from = this.last ?? target;
     const steps = this.opts.steps ?? 6;
-    for (let i = 1; i < steps; i++) {
+    for (let i = 1; i <= steps; i++) {
       const t = i / steps;
       const ease = t * t * (3 - 2 * t);
       await this.run({
@@ -78,6 +79,13 @@ export class SteelCursor {
         coordinates: [Math.round(from.x + (target.x - from.x) * ease), Math.round(from.y + (target.y - from.y) * ease)],
       });
     }
+    this.last = target;
+  }
+
+  async click(viewportX: number, viewportY: number): Promise<void> {
+    await this.move(viewportX, viewportY);
+    const offset = await this.calibrate();
+    const target = { x: Math.round(viewportX + offset.x), y: Math.round(viewportY + offset.y) };
     await this.run({ action: "click_mouse", button: "left", coordinates: [target.x, target.y] });
     this.last = target;
   }
