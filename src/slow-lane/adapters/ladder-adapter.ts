@@ -442,18 +442,27 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
    */
   private async openOfferSurface(page: PageLike): Promise<void> {
     await page.goto(this.url(this.cfg.offerEntryPath ?? this.pricingPath));
-    await page.settle?.(1200);
+    await page.settle?.(1500);
     await page.dismissOverlays?.(this.cfg.dismissSelectors ?? []).catch(() => {});
-    for (const selector of this.cfg.offerRevealSelectors ?? []) {
-      await page.clickBySelector(selector, 5000).catch(() => {});
-      await page.settle?.(500);
+    const revealSelectors = this.cfg.offerRevealSelectors ?? [];
+    for (const [i, selector] of revealSelectors.entries()) {
+      // Wait for the control (e.g. the top-right avatar) to actually render, and
+      // clear overlays again, BEFORE clicking — a bare fast click on a not-yet-
+      // ready or promo-covered avatar silently misses and the menu never opens.
+      await page.waitForSelector(selector, 6000).catch(() => {});
+      await page.dismissOverlays?.(this.cfg.dismissSelectors ?? []).catch(() => {});
+      await page.settle?.(300);
+      let clicked = true;
+      await page.clickBySelector(selector, 8000).catch(() => {
+        clicked = false;
+      });
+      this.emit("OFFER_REVEAL_STEP", { step: i + 1, clicked });
+      await page.settle?.(700);
     }
     // The pack list often sits below the fold and lazy-renders — scroll it in so
     // the picker can actually see (and choose) the target package.
     await page.revealByScrolling?.().catch(() => {});
-    if ((this.cfg.offerRevealSelectors ?? []).length > 0) {
-      this.emit("OFFER_SURFACE_REVEALED", { steps: this.cfg.offerRevealSelectors!.length });
-    }
+    if (revealSelectors.length > 0) this.emit("OFFER_SURFACE_REVEALED", { steps: revealSelectors.length });
   }
 
   private async resolveCold(page: PageLike, offer: PurchaseOffer): Promise<RecordedStep[]> {
