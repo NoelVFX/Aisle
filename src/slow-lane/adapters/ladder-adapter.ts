@@ -429,13 +429,15 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
    */
   private async openOfferSurface(page: PageLike): Promise<void> {
     await page.goto(this.url(this.cfg.offerEntryPath ?? this.pricingPath));
-    await page.settle?.(1500);
+    await page.settle?.(1200);
     await page.dismissOverlays?.(this.cfg.dismissSelectors ?? []).catch(() => {});
     for (const selector of this.cfg.offerRevealSelectors ?? []) {
-      await page.settle?.(300);
-      await page.clickBySelector(selector, 8000).catch(() => {});
-      await page.settle?.(800);
+      await page.clickBySelector(selector, 5000).catch(() => {});
+      await page.settle?.(500);
     }
+    // The pack list often sits below the fold and lazy-renders — scroll it in so
+    // the picker can actually see (and choose) the target package.
+    await page.revealByScrolling?.().catch(() => {});
     if ((this.cfg.offerRevealSelectors ?? []).length > 0) {
       this.emit("OFFER_SURFACE_REVEALED", { steps: this.cfg.offerRevealSelectors!.length });
     }
@@ -453,6 +455,8 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
       if (await this.checkoutReady(page)) return recorded;
       await this.assertNoAccountSetup(page);
 
+      // Bring below-the-fold packs/controls into the DOM before enumerating.
+      await page.revealByScrolling?.().catch(() => {});
       const all = await page.actionableCandidates();
       const candidates: ActionCandidate[] = all
         .filter(

@@ -425,6 +425,21 @@ class PlaywrightPage implements PageLike {
     await this.page.waitForTimeout(ms);
   }
 
+  async revealByScrolling(): Promise<void> {
+    // Wheel down in steps so lazy content (pack lists below the fold) renders,
+    // then wheel back to the top so the picker reads the page in order. Pure
+    // Playwright input — no page.evaluate (this project's TS has no DOM lib).
+    const vp = this.page.viewportSize() ?? { width: 1280, height: 720 };
+    const step = Math.floor(vp.height * 0.85);
+    await this.page.mouse.move(vp.width / 2, vp.height / 2).catch(() => {});
+    for (let i = 0; i < 12; i++) {
+      await this.page.mouse.wheel(0, step).catch(() => {});
+      await this.page.waitForTimeout(200);
+    }
+    await this.page.mouse.wheel(0, -step * 12).catch(() => {});
+    await this.page.waitForTimeout(200);
+  }
+
   currentUrl(): string {
     return this.page.url();
   }
@@ -444,9 +459,10 @@ class PlaywrightPage implements PageLike {
     await this.page.keyboard.press("Escape").catch(() => {});
     for (const selector of closeSelectors) {
       const loc = this.page.locator(selector).first();
-      if ((await loc.count().catch(() => 0)) === 0) continue;
-      // Bounded: a present-but-obscured close control must not stall the 90s default.
-      await loc.click({ timeout: 2000 }).catch(() => {});
+      // isVisible() resolves immediately (no auto-wait), so an absent/hidden close
+      // control costs ~nothing — the old count()+2s-click made every miss expensive.
+      if (!(await loc.isVisible().catch(() => false))) continue;
+      await loc.click({ timeout: 1200 }).catch(() => {});
     }
   }
   async fill(selector: string, value: string): Promise<void> {

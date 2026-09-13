@@ -56,6 +56,12 @@ export interface PageLike {
   /** Let navigation and client-side rendering settle after an action. */
   settle?(ms?: number): Promise<void>;
   /**
+   * Scroll the page from top to bottom in steps, so offers/packages below the
+   * fold render and become actionable candidates (many pricing pages lazy-render
+   * the pack list). Best-effort; adapters must work without it.
+   */
+  revealByScrolling?(): Promise<void>;
+  /**
    * Best-effort clearing of blocking modals/overlays (promo popups, cookie
    * banners) before a read. Presses Escape, then clicks any of `closeSelectors`
    * that are present — each bounded and swallowed, so it never throws or hangs.
