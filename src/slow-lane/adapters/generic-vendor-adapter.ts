@@ -40,7 +40,7 @@ const DEFAULTS = {
   confirmButtonTexts: ["Complete purchase", "Complete order", "Place order", "Pay", "Confirm", "Buy now", "Authorize"],
   priceRegex: /\$\s?(\d+(?:\.\d{1,2})?)/,
   unitsRegex: /([\d,]+)\s*(?:credits?|tokens?|units?|generations?)/i,
-  balanceLineRegex: /\b(balance|remaining|available)\b/i,
+  balanceLineRegex: /\b(balance|remaining|available|left)\b/i,
   currency: "USD",
 };
 

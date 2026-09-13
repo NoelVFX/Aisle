@@ -24,6 +24,8 @@ export interface PurchaseConfig {
   accountPaths?: string[];
   /** Optional vendor-specific selectors containing the authoritative balance. */
   balanceSelectors?: string[];
+  /** Selector to click on the account page to reveal a menu-hidden balance (e.g. an avatar dropdown). */
+  balanceRevealSelector?: string;
   loggedInSelector?: string;
   /** Regex (pathname) of the vendor's login wall. */
   loginWallPattern?: string;

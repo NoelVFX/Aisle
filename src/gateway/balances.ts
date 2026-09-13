@@ -53,5 +53,26 @@ export function createBalanceReaders(
     };
   }
 
+  // Higgsfield: GET the configured credits endpoint → tolerant parse of a
+  // credits/balance number. Requires HIGGSFIELD_CREDITS_URL + HIGGSFIELD_API_KEY.
+  // Without a real balance source, Aisle cannot verify a purchase and will refuse.
+  const higgsKey = upstreams["higgsfield"]?.authEnv ? env[upstreams["higgsfield"].authEnv] : undefined;
+  const higgsCreditsUrl = env["HIGGSFIELD_CREDITS_URL"];
+  if (higgsKey && higgsCreditsUrl) {
+    readers["higgsfield"] = async () => pickBalance(await get(higgsCreditsUrl, higgsKey));
+  }
+
   return readers;
+}
+
+/** Pull a credit/balance number from common JSON shapes (top-level or under `data`). */
+function pickBalance(body: unknown): number | undefined {
+  if (body === null || typeof body !== "object") return undefined;
+  const o = body as Record<string, unknown>;
+  const scope = o["data"] !== null && typeof o["data"] === "object" ? (o["data"] as Record<string, unknown>) : o;
+  for (const key of ["credits", "balance", "credits_remaining", "creditsRemaining", "total_credits", "credit_balance", "remaining"]) {
+    const v = Number(scope[key]);
+    if (Number.isFinite(v)) return v;
+  }
+  return undefined;
 }

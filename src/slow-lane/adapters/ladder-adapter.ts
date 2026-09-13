@@ -97,6 +97,12 @@ export interface LadderAdapterConfig {
   accountPaths?: string[];
   /** Selectors containing the authoritative balance, before falling back to page text. */
   balanceSelectors?: string[];
+  /**
+   * A control to click (on the account page, without reloading) to REVEAL the
+   * balance when it lives behind a menu — e.g. an account/profile avatar whose
+   * dropdown shows "Credits N left". Clicked after navigating, before reading.
+   */
+  balanceRevealSelector?: string;
   /** Any non-empty match means logged in (e.g. "[data-account-email]"). */
   loggedInSelector?: string;
   /** Pathname pattern of the vendor's login wall. */
@@ -592,6 +598,11 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
     for (const path of this.accountPaths) {
       await page.goto(this.url(path));
       await page.settle?.(2000);
+      // Reveal a menu-hidden balance (e.g. an avatar dropdown) WITHOUT reloading.
+      if (this.cfg.balanceRevealSelector) {
+        await page.clickBySelector(this.cfg.balanceRevealSelector).catch(() => {});
+        await page.settle?.(800);
+      }
       let parsed: number | undefined;
       for (const selector of this.balanceSelectors) {
         const raw = await this.first(page, selector);
