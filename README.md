@@ -104,6 +104,38 @@ How the gateway reacts:
 | **OpenAI** | `platform.openai.com` billing | Staged only: stops at Gate 1 (`STAGED_NOT_SUBMITTED`) |
 | **Higgsfield** | `higgsfield.ai` avatar menu → top-up | Navigation built, but Higgsfield only offers top-ups to **paid subscribers**; on a Free Plan the run ends `RESOLUTION_EXHAUSTED`. API credits (cloud.higgsfield.ai) may also be a separate balance |
 
+### OpenRouter in Steel
+
+<table>
+<tr>
+<td width="33%"><img src="docs/images/openrouter-credits.png" alt="OpenRouter credits page, $4.99 balance"></td>
+<td width="33%"><img src="docs/images/openrouter-pricing.png" alt="OpenRouter pricing and fees"></td>
+<td width="33%"><img src="docs/images/openrouter-purchase.png" alt="Purchase Credits dialog, $5 amount, $5.80 total"></td>
+</tr>
+<tr>
+<td>1. Steel restores the saved login and opens <code>/settings/credits</code></td>
+<td>2. OpenRouter's pricing: Stripe, 5.5% fee ($0.80 minimum)</td>
+<td>3. Amount typed, total $5.80 read and checked against the $6.25 cap</td>
+</tr>
+</table>
+
+<sub>A staged run (submit withheld, nothing bought). Account email, avatar and card details are blurred.</sub>
+
+```
+0.0s   STEEL_SESSION_CREATED
+4.5s   PROFILE_RESTORED            openrouter, loggedIn
+4.5s   ENTITLEMENT_CHECKED         balance 4.99, required 5
+6.5s   OFFER_SELECTED              openrouter_credits_5 ($5)
+14.1s  ADAPTER_REPLAY              tier 2, 4 recorded steps
+43.0s  AMOUNT_ENTERED              5
+43.6s  CHECKOUT_STAGED             $5.80 USD, one_time, autoRenew false
+43.6s  MANDATE_COMPARISON_PASSED   staged 5.80 ≤ cap 6.25
+43.6s  SUBMIT_WITHHELD             Purchase not clicked
+```
+
+With `openrouter` in `AISLE_REAL_PURCHASE_PROVIDERS`, the next step is the deterministic
+**Purchase** click and a balance check (the real run on 2026-09-12 went $0 → $5).
+
 A vendor may be paid with real money only if it's listed in `AISLE_REAL_PURCHASE_PROVIDERS`
 (e.g. `openrouter`). Everyone else stops after Gate 1. Aisle never types real card
 details: the card must already be saved on the vendor account.
