@@ -97,10 +97,11 @@
     ]
   },
   "higgsfield": {
-    "description": "Higgsfield (image/video generation). ⚠ VERIFY origins and error shape against a logged-in account. Its public pricing page sells monthly plans billed annually, which Aisle refuses; one-time credit packs, if offered, sit behind login and are not listed here yet.",
-    "canonicalOrigin": "https://platform.higgsfield.ai",
+    "description": "Higgsfield image generation through the Higgsfield Cloud API. One-time credit packs, if offered, sit behind login and are not listed here yet.",
+    "canonicalOrigin": "https://api.higgsfield.ai",
     "billingOrigin": "https://higgsfield.ai",
     "billingUrl": "https://higgsfield.ai/pricing",
+    "authEnv": "HIGGSFIELD_API_KEY_ID",
     "resource": "image_credits",
     "purchase": {
       "mode": "slow-lane",

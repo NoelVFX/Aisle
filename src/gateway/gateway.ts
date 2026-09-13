@@ -22,6 +22,7 @@ import {
 import {
   openAiChatTool,
   openRouterChatTool,
+  higgsfieldTool,
   studioImageTool,
   type FetchLike,
   type UpstreamResult,
@@ -132,6 +133,7 @@ export function createGateway(options: GatewayOptions) {
   const tools: VendorTool[] = [
     openAiChatTool(env, fetchImpl),
     openRouterChatTool(env, fetchImpl),
+    ...(((env["HIGGSFIELD_API_KEY_ID"] && env["HIGGSFIELD_API_KEY_SECRET"]) || env["HIGGSFIELD_API_KEY"]?.includes(":")) ? [higgsfieldTool(env, fetchImpl)] : []),
     ...(studioUrl ? [studioImageTool(studioUrl, env, fetchImpl)] : []),
     ...(options.extraTools ?? []),
   ].filter(

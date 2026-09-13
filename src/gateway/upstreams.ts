@@ -176,6 +176,95 @@ async function toResult(res: Awaited<ReturnType<FetchLike>>, onOk?: (text: strin
   return { ok: false, status: res.status, headers, body: safeJson(text) };
 }
 
+const HIGGSFIELD_DEFAULT_ENDPOINT = "https://api.higgsfield.ai/higgsfield-ai/soul/v2/standard";
+
+function higgsfieldAuthorization(env: NodeJS.ProcessEnv): string | undefined {
+  const id = env["HIGGSFIELD_API_KEY_ID"]?.trim();
+  const secret = env["HIGGSFIELD_API_KEY_SECRET"]?.trim();
+  if (id && secret) return `Key ${id}:${secret}`;
+  const combined = env["HIGGSFIELD_API_KEY"]?.trim();
+  return combined?.includes(":") ? `Key ${combined}` : undefined;
+}
+
+function higgsfieldEndpoint(env: NodeJS.ProcessEnv): string {
+  const configured = env["HIGGSFIELD_API_URL"]?.trim();
+  if (!configured) return HIGGSFIELD_DEFAULT_ENDPOINT;
+  const url = new URL(configured);
+  return url.pathname === "/" ? `${url.origin}/higgsfield-ai/soul/v2/standard` : url.toString();
+}
+
+function higgsfieldStatusUrl(endpoint: string, requestId: string): string {
+  return `${new URL(endpoint).origin}/requests/${encodeURIComponent(requestId)}/status`;
+}
+
+/** higgsfield__generate_image — submit a Higgsfield generation and poll it to completion. */
+export function higgsfieldTool(env: NodeJS.ProcessEnv, fetchImpl: FetchLike): VendorTool {
+  return {
+    name: "higgsfield__generate_image",
+    namespace: "higgsfield",
+    description: "Generate an image with Higgsfield (bills image credits). Returns the image URL.",
+    inputShape: { prompt: z.string().min(1).describe("What the image should show.") },
+    async call(args) {
+      const authorization = higgsfieldAuthorization(env);
+      if (!authorization) {
+        return { ok: false, status: 401, headers: {}, body: { code: "missing_credentials", message: "Higgsfield API credentials are not configured." } };
+      }
+      const endpoint = higgsfieldEndpoint(env);
+      const headers = { "Content-Type": "application/json", Authorization: authorization };
+      let submitted: Awaited<ReturnType<FetchLike>>;
+      try {
+        submitted = await fetchImpl(endpoint, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ prompt: String(args["prompt"] ?? "") }),
+        });
+      } catch (err) {
+        return { ok: false, status: 503, headers: {}, body: { code: "connection_error", message: err instanceof Error ? err.message : String(err) } };
+      }
+      const submittedText = await submitted.text();
+      if (!submitted.ok) {
+        const responseHeaders: Record<string, string> = {};
+        submitted.headers.forEach((value, key) => (responseHeaders[key.toLowerCase()] = value));
+        return { ok: false, status: submitted.status, headers: responseHeaders, body: safeJson(submittedText) };
+      }
+
+      const queued = safeJson(submittedText) as { request_id?: unknown } | null;
+      const requestId = typeof queued?.request_id === "string" ? queued.request_id : undefined;
+      if (!requestId) return { ok: true, text: submittedText };
+
+      const timeoutMs = Number(env["HIGGSFIELD_POLL_TIMEOUT_MS"]) || 120_000;
+      const pollMs = Number(env["HIGGSFIELD_POLL_INTERVAL_MS"]) || 2_000;
+      const deadline = Date.now() + timeoutMs;
+      let latest: unknown = queued;
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, pollMs));
+        let statusResponse: Awaited<ReturnType<FetchLike>>;
+        try {
+          statusResponse = await fetchImpl(higgsfieldStatusUrl(endpoint, requestId), { method: "GET", headers, body: "" });
+        } catch (err) {
+          return { ok: false, status: 503, headers: {}, body: { code: "connection_error", message: err instanceof Error ? err.message : String(err), request_id: requestId } };
+        }
+        const statusText = await statusResponse.text();
+        latest = safeJson(statusText);
+        if (!statusResponse.ok) {
+          const responseHeaders: Record<string, string> = {};
+          statusResponse.headers.forEach((value, key) => (responseHeaders[key.toLowerCase()] = value));
+          return { ok: false, status: statusResponse.status, headers: responseHeaders, body: latest };
+        }
+        const result = latest as { status?: unknown; images?: Array<{ url?: unknown }> } | null;
+        if (result?.status === "completed") {
+          const imageUrl = result.images?.find((image) => typeof image.url === "string")?.url;
+          return { ok: true, text: imageUrl ? `Image ready: ${imageUrl}` : statusText };
+        }
+        if (result?.status === "failed" || result?.status === "nsfw" || result?.status === "canceled") {
+          return { ok: false, status: 422, headers: {}, body: latest };
+        }
+      }
+      return { ok: false, status: 504, headers: {}, body: { code: "generation_timeout", message: "Higgsfield generation did not complete before the polling timeout.", request_id: requestId, latest } };
+    },
+  };
+}
+
 /** openai__chat — a real OpenAI chat completion with the user's key. */
 export function openAiChatTool(env: NodeJS.ProcessEnv, fetchImpl: FetchLike): VendorTool {
   return {
