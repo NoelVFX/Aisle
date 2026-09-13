@@ -32,6 +32,8 @@ export interface PurchaseConfig {
   offerEntryPath?: string;
   /** Controls clicked in order to reveal menu-hidden top-up packs before staging (e.g. [profile avatar, "Top-up credits" button]). */
   offerRevealSelectors?: string[];
+  /** Regex (matched on a control's name) removing subscription/plan upsells from the picker's choices, e.g. "explore all plans|upgrade|% off". */
+  excludeControlsPattern?: string;
   loggedInSelector?: string;
   /** Match (with no logged-in marker) means logged OUT, for vendors that show "Log in / Sign up" instead of a login-wall redirect. */
   loggedOutSelector?: string;

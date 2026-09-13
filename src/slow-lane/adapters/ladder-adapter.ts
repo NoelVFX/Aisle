@@ -160,6 +160,13 @@ export interface LadderAdapterConfig {
   loginGraceMs?: number;
   /** Tier-3 steps allowed to reach checkout. Default 4. */
   maxStagingSteps?: number;
+  /**
+   * Controls whose accessible name matches this are removed from the picker's
+   * candidates — subscription/plan upsells that would derail a one-time credit
+   * top-up (e.g. "Explore all plans", "Upgrade", "% OFF"). Per vendor, so it
+   * never hides the buy path on a plan-based vendor.
+   */
+  excludeControlsRegex?: RegExp;
   onEvent?: (type: string, detail: Record<string, unknown>) => void;
 }
 
@@ -448,7 +455,13 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
 
       const all = await page.actionableCandidates();
       const candidates: ActionCandidate[] = all
-        .filter((c) => !CONFIRM_NAME_RE.test(c.name) && !ACCOUNT_SETUP_CONTROL_RE.test(c.name) && !DISMISS_RE.test(c.name))
+        .filter(
+          (c) =>
+            !CONFIRM_NAME_RE.test(c.name) &&
+            !ACCOUNT_SETUP_CONTROL_RE.test(c.name) &&
+            !DISMISS_RE.test(c.name) &&
+            !(this.cfg.excludeControlsRegex?.test(c.name) ?? false),
+        )
         .map((c, index) => ({ ...c, index }));
       if (candidates.length === 0) {
         // Only setup controls were on offer (e.g. an "add a payment method" dialog): the account isn't ready to pay.

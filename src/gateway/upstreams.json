@@ -123,8 +123,9 @@
       "offerEntryPath": "/",
       "offerRevealSelectors": [
         "[data-testid*='avatar' i],[data-testid*='user-menu' i],[data-testid*='account' i],[aria-label*='account' i],[aria-label*='profile' i],header button:has(img)",
-        "button:near(:text('Top-up credits'), 400),a:near(:text('Top-up credits'), 400),:text('Top-up credits')"
+        ":text('Credits')"
       ],
+      "excludeControlsPattern": "explore all plans|all plans|view plans|see plans|compare plans|choose a plan|upgrade|premium|subscription|% off|claim",
       "dismissSelectors": [
         "button:has-text('Dismiss')",
         "button:has-text('Accept')",

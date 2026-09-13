@@ -93,6 +93,7 @@ export function createSteelPurchaser(options: SteelPurchaserOptions): SteelPurch
         ...(cfg.dismissSelectors ? { dismissSelectors: [...cfg.dismissSelectors] } : {}),
         ...(cfg.offerEntryPath ? { offerEntryPath: cfg.offerEntryPath } : {}),
         ...(cfg.offerRevealSelectors ? { offerRevealSelectors: [...cfg.offerRevealSelectors] } : {}),
+        ...(cfg.excludeControlsPattern ? { excludeControlsRegex: new RegExp(cfg.excludeControlsPattern, "i") } : {}),
         ...(cfg.loggedInSelector ? { loggedInSelector: cfg.loggedInSelector } : {}),
         ...(cfg.loggedOutSelector ? { loggedOutSelector: cfg.loggedOutSelector } : {}),
         ...(cfg.loginWallPattern ? { loginWallPattern: new RegExp(cfg.loginWallPattern, "i") } : {}),
