@@ -46,11 +46,17 @@ export interface CandidatePicker {
  * fallbacks OpenRouter routes to if it's rate-limited. Override with
  * OPENROUTER_PICKER_MODEL (e.g. a paid model if you want lower latency).
  */
+// Paid high-end picker (infra key), verified 2026-09-13: Qwen 3.7 returns the
+// {"index"} JSON in ~3s. NOTE kimi-k3 was rejected here — it's a reasoning model
+// that ignores reasoning:{exclude} and spent the whole token budget thinking,
+// returning empty content after 70s. The picker needs a decisive non-stalling
+// model. A free model backs it up so a spent/again-402 infra key still resolves.
+// Override with OPENROUTER_PICKER_MODEL.
 export const PICKER_PROFILE = {
-  model: "deepseek/deepseek-chat-v3-0324:free",
+  model: "qwen/qwen3.7-max",
   models: [
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "qwen/qwen-2.5-72b-instruct:free",
+    "qwen/qwen3.7-plus",
+    "nvidia/nemotron-3-super-120b-a12b:free",
   ] as readonly string[],
 } as const;
 
@@ -147,18 +153,25 @@ export function createOpenRouterPicker(options: OpenRouterPickerOptions = {}): C
         `Return ONLY: {"index": <number>, "why": "<12 words max>"}`;
 
       let lastError: unknown;
-      // A bad or out-of-range reply is rejected in code and retried within budget.
-      for (let attempt = 0; attempt < 2; attempt++) {
+      // Try each model in turn (primary → fallbacks): a stale/removed primary
+      // slug 404s before OpenRouter's own `models` routing can help, so advancing
+      // the primary is what actually recovers. A bad/out-of-range reply also
+      // advances. All bounded by budget.
+      const modelChain = [model, ...fallbackModels];
+      const attempts = Math.max(2, modelChain.length);
+      for (let attempt = 0; attempt < attempts; attempt++) {
         if (calls >= budget) throw new ResolutionExhaustedError(`Picker budget of ${budget} calls exhausted.`);
         calls += 1;
 
+        const activeModel = modelChain[Math.min(attempt, modelChain.length - 1)]!;
+        const routeFallbacks = modelChain.slice(modelChain.indexOf(activeModel) + 1);
         const payload: Record<string, unknown> = {
-          model,
+          model: activeModel,
           max_tokens: 4096,
           reasoning: { exclude: true },
           messages: [{ role: "user", content: prompt }],
         };
-        if (fallbackModels.length > 0) payload["models"] = fallbackModels;
+        if (routeFallbacks.length > 0) payload["models"] = routeFallbacks;
 
         let resp: Awaited<ReturnType<OpenRouterFetch>>;
         try {

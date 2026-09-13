@@ -51,6 +51,8 @@ const FILLABLE = new Set(["textbox", "spinbutton", "searchbox"]);
 const CHALLENGE_TEXT_RE =
   /3-?D ?Secure|verify (it'?s|that it'?s) you|authenticate (this|your) (payment|purchase)|one-time (pass)?code|enter the (verification )?code|confirm (this|the) (payment|purchase) in your (bank|banking app)/i;
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+/** Reveal-and-read retries per account page before giving up on a menu-hidden balance. */
+const BALANCE_READ_ATTEMPTS = 3;
 
 /**
  * Account setup the user owns: a billing address or a first payment method. Aisle
@@ -125,6 +127,12 @@ export interface LadderAdapterConfig {
   offerRevealSelectors?: string[];
   /** Any non-empty match means logged in (e.g. "[data-account-email]"). */
   loggedInSelector?: string;
+  /**
+   * Any non-empty match (with no logged-in marker) means logged OUT — for vendors
+   * that show a marketing page with "Log in / Sign up" controls instead of
+   * redirecting to a login wall. E.g. "a[href*='login' i],a[href*='signup' i]".
+   */
+  loggedOutSelector?: string;
   /** Pathname pattern of the vendor's login wall. */
   loginWallPattern?: RegExp;
   currency?: string;
@@ -280,6 +288,17 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
       await page.settle?.(1000);
     }
     if (this.onLoginWall(page.currentUrl())) return false;
+    // Some vendors never redirect to a login wall — a logged-out visitor just
+    // sees the marketing page with "Log in / Sign up" controls. A visible
+    // logged-out marker (and no logged-in marker) is a reliable negative, so we
+    // detect the logout and hand off to an interactive login instead of quoting
+    // a purchase against a balance of 0.
+    if (this.cfg.loggedOutSelector) {
+      await page.dismissOverlays?.(this.cfg.dismissSelectors ?? []).catch(() => {});
+      const loggedOut = (await this.first(page, this.cfg.loggedOutSelector)) !== undefined;
+      const loggedIn = this.cfg.loggedInSelector ? (await this.first(page, this.cfg.loggedInSelector)) !== undefined : false;
+      if (loggedOut && !loggedIn) return false;
+    }
     if (this.cfg.loggedInSelector) return (await this.first(page, this.cfg.loggedInSelector)) !== undefined;
     return true;
   }
@@ -642,39 +661,51 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
     for (const path of this.accountPaths) {
       await page.goto(this.url(path));
       await page.settle?.(2000);
-      // Clear promo/cookie overlays first — otherwise they intercept the reveal
-      // click and the avatar wait hangs on the 90s action default ("cursor stuck").
-      if (this.cfg.balanceRevealSelector || this.cfg.dismissSelectors) {
-        await page.dismissOverlays?.(this.cfg.dismissSelectors ?? []).catch(() => {});
-        await page.settle?.(400);
+      // The reveal (avatar dropdown) is intermittent — the click can miss, a promo
+      // can re-cover it, or the menu closes before the read. Retry the whole
+      // dismiss → reveal → read on this page a few times before moving on.
+      for (let attempt = 0; attempt < BALANCE_READ_ATTEMPTS; attempt++) {
+        // Clear promo/cookie overlays first — otherwise they intercept the reveal
+        // click and the avatar wait hangs on the 90s action default ("cursor stuck").
+        if (this.cfg.balanceRevealSelector || this.cfg.dismissSelectors) {
+          await page.dismissOverlays?.(this.cfg.dismissSelectors ?? []).catch(() => {});
+          await page.settle?.(400);
+        }
+        // Reveal a menu-hidden balance (e.g. an avatar dropdown) WITHOUT reloading.
+        // Bounded so a still-obscured avatar fails fast instead of stalling the read.
+        if (this.cfg.balanceRevealSelector) {
+          await page.clickBySelector(this.cfg.balanceRevealSelector, 8000).catch(() => {});
+          await page.settle?.(900);
+        }
+        const balance = await this.readBalanceFromDom(page);
+        if (balance !== undefined) {
+          this.emit("BALANCE_READ", { source: "page", balance, path, attempt: attempt + 1 });
+          const out: PurchaseVerification = { confirmed: balance >= requirement.amount, resource: requirement.resource, balanceAfter: balance };
+          const tx = await this.first(page, "[data-last-transaction-id]");
+          if (tx) out.transactionId = tx;
+          return out;
+        }
+        await page.settle?.(700);
       }
-      // Reveal a menu-hidden balance (e.g. an avatar dropdown) WITHOUT reloading.
-      // Bounded so a still-obscured avatar fails fast instead of stalling the read.
-      if (this.cfg.balanceRevealSelector) {
-        await page.clickBySelector(this.cfg.balanceRevealSelector, 8000).catch(() => {});
-        await page.settle?.(800);
-      }
-      let parsed: number | undefined;
-      for (const selector of this.balanceSelectors) {
-        const raw = await this.first(page, selector);
-        if (raw === undefined) continue;
-        const fromLabel = extractBalance(raw) ?? (() => {
-          const labelled = /\bcredits?\b\s*[:=-]?\s*(-?[\d,]+(?:\.\d+)?)/i.exec(raw) ?? /(-?[\d,]+(?:\.\d+)?)\s*\bcredits?\b/i.exec(raw);
-          return labelled?.[1] === undefined ? undefined : Number(labelled[1].replace(/,/g, ""));
-        })();
-        const fromNumber = Number(raw.replace(/[^0-9.-]/g, ""));
-        parsed = fromLabel ?? (Number.isFinite(fromNumber) ? fromNumber : undefined);
-        if (parsed !== undefined) break;
-      }
-      if (parsed === undefined) parsed = extractBalance(await page.innerText());
-      const balance = parsed !== undefined && Number.isFinite(parsed) ? parsed : undefined;
-      if (balance !== undefined) {
-        const out: PurchaseVerification = { confirmed: balance >= requirement.amount, resource: requirement.resource, balanceAfter: balance };
-        const tx = await this.first(page, "[data-last-transaction-id]");
-        if (tx) out.transactionId = tx;
-        return out;
-      }
+      this.emit("BALANCE_READ_MISS", { path });
     }
     return { confirmed: false, reason: "Could not read an authoritative balance from the account pages." };
+  }
+
+  /** Parse the balance from the current DOM: known selectors first, then a whole-page text scan. */
+  private async readBalanceFromDom(page: PageLike): Promise<number | undefined> {
+    for (const selector of this.balanceSelectors) {
+      const raw = await this.first(page, selector);
+      if (raw === undefined) continue;
+      const fromLabel = extractBalance(raw) ?? (() => {
+        const labelled = /\bcredits?\b\s*[:=-]?\s*(-?[\d,]+(?:\.\d+)?)/i.exec(raw) ?? /(-?[\d,]+(?:\.\d+)?)\s*\bcredits?\b/i.exec(raw);
+        return labelled?.[1] === undefined ? undefined : Number(labelled[1].replace(/,/g, ""));
+      })();
+      const fromNumber = Number(raw.replace(/[^0-9.-]/g, ""));
+      const parsed = fromLabel ?? (Number.isFinite(fromNumber) ? fromNumber : undefined);
+      if (parsed !== undefined && Number.isFinite(parsed)) return parsed;
+    }
+    const fromText = extractBalance(await page.innerText());
+    return fromText !== undefined && Number.isFinite(fromText) ? fromText : undefined;
   }
 }

@@ -107,13 +107,12 @@
       "mode": "slow-lane",
       "realMoney": true,
       "pricingPath": "/pricing",
-      "accountPath": "/pricing",
+      "accountPath": "/",
       "accountPaths": [
-        "/pricing",
         "/",
-        "/account",
-        "/dashboard"
+        "/pricing"
       ],
+      "loggedOutSelector": "a[href*='login' i],a[href*='signin' i],a[href*='sign-in' i],a[href*='signup' i],a[href*='sign-up' i]",
       "balanceSelectors": [
         "[data-testid*='credit' i]",
         "[data-testid*='balance' i]",
@@ -127,6 +126,8 @@
         "button:near(:text('Top-up credits'), 400),a:near(:text('Top-up credits'), 400),:text('Top-up credits')"
       ],
       "dismissSelectors": [
+        "button:has-text('Dismiss')",
+        "button:has-text('Accept')",
         "[role='dialog'] [aria-label*='close' i]",
         "[role='dialog'] button[aria-label*='close' i]",
         "button[aria-label*='close' i]",

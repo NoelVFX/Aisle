@@ -94,6 +94,7 @@ export function createSteelPurchaser(options: SteelPurchaserOptions): SteelPurch
         ...(cfg.offerEntryPath ? { offerEntryPath: cfg.offerEntryPath } : {}),
         ...(cfg.offerRevealSelectors ? { offerRevealSelectors: [...cfg.offerRevealSelectors] } : {}),
         ...(cfg.loggedInSelector ? { loggedInSelector: cfg.loggedInSelector } : {}),
+        ...(cfg.loggedOutSelector ? { loggedOutSelector: cfg.loggedOutSelector } : {}),
         ...(cfg.loginWallPattern ? { loginWallPattern: new RegExp(cfg.loginWallPattern, "i") } : {}),
         ...(cfg.offersFrom === "catalogue" ? { catalogueOffers: [...upstream.offers] } : {}),
         ...(cfg.paymentOrigins ? { paymentOrigins: [...cfg.paymentOrigins] } : {}),

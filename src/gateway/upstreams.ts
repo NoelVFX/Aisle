@@ -33,6 +33,8 @@ export interface PurchaseConfig {
   /** Controls clicked in order to reveal menu-hidden top-up packs before staging (e.g. [profile avatar, "Top-up credits" button]). */
   offerRevealSelectors?: string[];
   loggedInSelector?: string;
+  /** Match (with no logged-in marker) means logged OUT, for vendors that show "Log in / Sign up" instead of a login-wall redirect. */
+  loggedOutSelector?: string;
   /** Regex (pathname) of the vendor's login wall. */
   loginWallPattern?: string;
   /**
