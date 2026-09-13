@@ -1,5 +1,5 @@
 {
-  "name": "top-up-agent",
+  "name": "aisle",
   "version": "0.1.0",
   "description": "Fast-lane transaction recovery for coding agents: detect a vendor's WebMCP purchase tools, buy the minimum entitlement, verify it, and hand back a resume token.",
   "type": "module",

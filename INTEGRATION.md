@@ -16,7 +16,7 @@ that authorization before buying. It does not obtain approval itself.
 import {
   connectMcpWebMcpSession, InMemoryIdempotencyStore, runFastLane,
   NoFastLaneError, PurchaseInFlightError,
-} from "top-up-agent";
+} from "aisle";
 
 // Create once for the host's lifetime, and share with the slow lane.
 const store = new InMemoryIdempotencyStore();
