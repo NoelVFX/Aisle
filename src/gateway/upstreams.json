@@ -125,16 +125,26 @@
         ":text('Credits')"
       ],
       "excludeControlsPattern": "explore all plans|all plans|view plans|see plans|compare plans|choose a plan|upgrade|premium|subscription|% off|claim",
+      "requireLabelledTotal": true,
+      "selectOfferByText": true,
       "dismissSelectors": [
         "button:has-text('Dismiss')",
-        "button:has-text('Accept')",
+        "button:has-text('Reject all')",
+        "button:has-text('Reject')",
+        "button:has-text('Decline')",
+        "button:has-text('Necessary only')",
+        "[aria-label*='cookie' i] button:has-text('Close')",
         "[role='dialog'] [aria-label*='close' i]",
         "[role='dialog'] button[aria-label*='close' i]",
         "button[aria-label*='close' i]",
         "[aria-label='Close']",
         "[data-testid*='close' i]",
         "[class*='modal' i] button[class*='close' i]",
-        "[class*='overlay' i] [aria-label*='close' i]"
+        "[class*='overlay' i] [aria-label*='close' i]",
+        "[role='dialog'] button:has(svg):not(:has-text('Claim')):not(:has-text('Continue')):not(:has-text('Upgrade'))",
+        "[class*='modal' i] button:has(svg):not(:has-text('Claim')):not(:has-text('Continue'))",
+        "[class*='dialog' i] button:has(svg):not(:has-text('Claim')):not(:has-text('Continue'))",
+        "[role='dialog'] button:not(:has-text('Claim')):not(:has-text('Continue')):not(:has-text('Upgrade')):not(:has-text('Get'))"
       ],
       "loginWallPattern": "^/(login|signin|sign-in|auth)",
       "offersFrom": "catalogue",
@@ -169,6 +179,29 @@
         "autoRenew": false
       }
     ]
+  },
+  "textto-image": {
+    "description": "textto-image.vercel.app — a text-to-image/video generator on Stripe TEST mode (free to buy with card 4242). Email/password login; credits live on /billing; out-of-credits returns 402 and Aisle tops up there. Sign in once with `npm run login -- textto-image`.",
+    "canonicalOrigin": "https://textto-image.vercel.app",
+    "billingOrigin": "https://textto-image.vercel.app",
+    "billingUrl": "https://textto-image.vercel.app/billing",
+    "resource": "image_credits",
+    "purchase": {
+      "mode": "slow-lane",
+      "realMoney": false,
+      "pricingPath": "/billing",
+      "accountPath": "/billing",
+      "loggedInSelector": "#logout-button",
+      "loggedOutSelector": "#login-form,#login-email,a[href='/auth/google']",
+      "loginWallPattern": "^/(login|signin|sign-in|auth)",
+      "balanceSelectors": ["#account-status-line", "[class*='credit' i]", "[data-testid*='credit' i]"],
+      "paymentOrigins": ["https://checkout.stripe.com"],
+      "stripeTestCard": true,
+      "selectOfferByText": true,
+      "requireLabelledTotal": true,
+      "dismissSelectors": ["button:has-text('Dismiss')", "[aria-label*='close' i]", "[role='dialog'] button:has(svg)"]
+    },
+    "offers": []
   },
   "studio": {
     "description": "Studio: a real image-credits vendor on Stripe TEST mode (npm run vendor:studio). A 402 insufficient_credits sends Aisle to /billing to buy a pack and pay on Stripe Checkout with the test card 4242.",

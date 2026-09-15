@@ -69,7 +69,7 @@ describe("gateway slow lane", () => {
     expect(seen).toEqual([true]);
   });
 
-  it("a login wall fails with the steel:login instruction", async () => {
+  it("a login wall fails with the login instruction", async () => {
     const purchaser: SteelPurchaser = {
       async purchase() { throw Object.assign(new Error("Not authenticated with the vendor and re-authentication failed."), { code: "NOT_AUTHENTICATED" }); },
     };
@@ -82,7 +82,7 @@ describe("gateway slow lane", () => {
     const { recovery_id } = json((await g.callTool("openai__chat", { prompt: "2+2" }, { taskId: "t" })) as never);
     const job = g.coordinator.get(recovery_id)!;
     await g.coordinator.approve(job.id, job.mandate!.signature);
-    expect(json((await g.waitForRecovery(job.id)) as never).error).toMatch(/npm run steel:login -- openai/);
+    expect(json((await g.waitForRecovery(job.id)) as never).error).toMatch(/npm run login -- openai/);
   });
 });
 

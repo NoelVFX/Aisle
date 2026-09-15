@@ -51,8 +51,16 @@ const AUTO_RENEW_OFF_RE = /(no auto[- ]?renew|auto[- ]?renew(s|al)?\s*[:=]?\s*(o
 const num = (s: string): number => Number(s.replace(/,/g, ""));
 
 export function extractPrice(text: string, priceRegex = DEFAULTS.priceRegex): number | undefined {
-  const m = priceRegex.exec(text);
-  return m?.[1] === undefined ? undefined : num(m[1]);
+  // Skip conversion-RATE tokens, not prices: "$1 = 21 credits", "$1/credit".
+  // A "$N" immediately followed by "=" or "/" is a rate and must not be read as a total.
+  const g = new RegExp(priceRegex.source, priceRegex.flags.includes("g") ? priceRegex.flags : priceRegex.flags + "g");
+  for (const m of text.matchAll(g)) {
+    if (m[1] === undefined) continue;
+    const after = text.slice(m.index! + m[0].length, m.index! + m[0].length + 16);
+    if (/^\s*=/.test(after)) continue; // conversion rate: "$1 = 21 credits" (but keep "$10/month")
+    return num(m[1]);
+  }
+  return undefined;
 }
 
 export function extractUnits(text: string, unitsRegex = DEFAULTS.unitsRegex): number | undefined {

@@ -1,15 +1,14 @@
 /**
  * `npm run vendor:studio [-- --no-tunnel]`
- * Starts the Studio demo vendor, exposes it via a cloudflared quick tunnel,
- * stores the demo login in Steel's credentials vault and writes
- * .aisle/studio.json for the Aisle gateway.
+ * Starts the Studio demo vendor, exposes it via a cloudflared quick tunnel, and
+ * writes .aisle/studio.json for the Aisle gateway. Sign in to the demo once with
+ * `npm run login -- studio` so the local browser profile remembers it.
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import Steel from "steel-sdk";
 import { startStudio, type StudioHandle } from "./server.js";
 import { createStripeApi } from "./stripe.js";
 
@@ -82,29 +81,6 @@ async function waitForHealth(publicUrl: string, timeoutMs = 60_000): Promise<boo
   return false;
 }
 
-async function storeSteelCredentials(origin: string, email: string, password: string): Promise<void> {
-  const steelAPIKey = process.env["STEEL_API_KEY"];
-  if (!steelAPIKey) {
-    console.warn("[studio] STEEL_API_KEY not set; skipping Steel credentials vault.");
-    return;
-  }
-  const client = new Steel({ steelAPIKey });
-  const value = { username: email, password };
-  try {
-    await client.credentials.update({ origin, value });
-    console.log(`[studio] Updated Steel credentials for ${origin}.`);
-    return;
-  } catch {
-    // Not found (or update failed) — fall through to create.
-  }
-  try {
-    await client.credentials.create({ origin, value, label: "Studio demo login" });
-    console.log(`[studio] Stored Steel credentials for ${origin}.`);
-  } catch (err) {
-    console.warn(`[studio] WARNING: could not store Steel credentials: ${err instanceof Error ? err.message : String(err)}`);
-  }
-}
-
 async function main(): Promise<void> {
   loadEnv();
   const noTunnel = process.argv.includes("--no-tunnel");
@@ -149,15 +125,13 @@ async function main(): Promise<void> {
     { mode: 0o600 },
   );
 
-  await storeSteelCredentials(publicUrl, email, password);
-
   console.log("");
   console.log(`Studio demo vendor running (Stripe test mode)`);
   console.log(`  Local:      ${localUrl}`);
   console.log(`  Public:     ${publicUrl}`);
   console.log(`  Billing:    ${publicUrl}/billing`);
   console.log(`  Playground: ${publicUrl}/playground`);
-  console.log(`  Login:      ${email} (password stored in Steel credentials and .aisle/studio.json)`);
+  console.log(`  Login:      ${email} (also in .aisle/studio.json; run \`npm run login -- studio\` to sign the browser in)`);
   console.log(`  API key:    stored in .aisle/studio.json`);
   console.log("");
   console.log("Restart the Aisle gateway so it picks up .aisle/studio.json");

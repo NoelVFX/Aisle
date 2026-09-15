@@ -1,49 +1,43 @@
 /**
- * The gateway's Steel step: open a real Steel browser on the vendor's billing
- * page (on the LOCKED billing origin), let the user watch it live, take a
- * screenshot through `sessions.computer`, and release.
+ * The gateway's preview step: open a local Chromium on the vendor's billing page
+ * (the LOCKED billing origin), screenshot it for the approval card, hold briefly
+ * so the user can watch, then close.
  *
  * It does not purchase. It never runs the checkout, never consumes the mandate,
- * and uses `persistProfile: false` so a test run never writes a stored identity.
+ * and uses a throwaway profile so a preview never writes a stored identity.
  */
 
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import Steel from "steel-sdk";
-import { SteelBrowserProvider, type SteelProviderOptions } from "../slow-lane/steel-provider.js";
-import type { SteelEvidence, SteelLive, SteelRunner } from "./recovery.js";
+import { LocalBrowserProvider, type LocalProviderOptions } from "../slow-lane/local-provider.js";
+import type { SteelEvidence, SteelRunner } from "./recovery.js";
 
-export interface SteelRunnerOptions {
-  /** Longest the session stays open for watching, unless ended from the approval page. */
+export interface LocalRunnerOptions {
+  /** Longest the window stays open for watching, unless ended from the approval page. */
   holdMs?: number;
   screenshotsDir: string;
-  provider?: SteelProviderOptions;
+  /** Throwaway userDataDir base for previews (never bound to a user/vendor). */
+  previewProfilesDir: string;
+  browser?: Partial<LocalProviderOptions>;
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-export function createSteelRunner(opts: SteelRunnerOptions): SteelRunner {
+export function createLocalRunner(opts: LocalRunnerOptions): SteelRunner {
   return {
     async run({ provider, billingUrl, jobId, emit, onLive, hold }): Promise<SteelEvidence> {
-      const steel = new SteelBrowserProvider(opts.provider); // throws if STEEL_API_KEY is missing
-      const client = new Steel({ steelAPIKey: opts.provider?.apiKey ?? process.env["STEEL_API_KEY"] ?? "" });
-      const session = await steel.createSession({ provider, persistProfile: false });
+      const browser = new LocalBrowserProvider({ profilesDir: opts.previewProfilesDir, headed: false, ...opts.browser });
+      const session = await browser.createSession({ provider, persistProfile: false });
 
       try {
-        const details = await client.sessions.retrieve(session.sessionId).catch(() => undefined);
-        const live: SteelLive = {
-          sessionId: session.sessionId,
-          debugUrl: details?.debugUrl,
-          viewerUrl: session.sessionViewerUrl,
-        };
+        const live = { sessionId: session.sessionId, debugUrl: undefined, viewerUrl: undefined };
         emit("STEEL_SESSION_CREATED", { ...live });
         onLive(live);
 
         await session.page.goto(billingUrl);
         emit("PAGE_OPENED", { requested: billingUrl, url: session.page.currentUrl() });
 
-        // Let client-side redirects (e.g. to a login page) settle before recording
-        // where the browser really ended up.
+        // Let client-side redirects (e.g. to a login page) settle before recording where it landed.
         await sleep(3000);
         const finalUrl = session.page.currentUrl();
         const loginWall = /\/(login|signin|sign-in|auth)\b/i.test(new URL(finalUrl).pathname);

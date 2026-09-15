@@ -1,36 +1,30 @@
 /**
- * The browsing session (web-path.md §1–§5). The user browses inside a Steel
- * browser embedded in the Aisle page; Aisle watches the wire.
+ * The browsing session — a local Chromium window the user browses while Aisle
+ * watches the wire.
  *
- *   - one interactive Steel session (15 min on the launch plan, AISLE_BROWSE_TIMEOUT_MS; asserted)
+ *   - one persistent local browse profile (headed) the user can drive
  *   - a CDP Network listener on EVERY page, including new tabs
  *   - 402/403/429 from an enrolled origin → recovery; unenrolled → toast only
- *   - freeze the viewer during recovery; the approval card lives in Aisle's
- *     own page, never inside the iframe
- *   - the purchase runs in a SEPARATE worker session seeded with this session's
- *     live context; afterwards the page that hit the wall reloads
+ *   - freeze the viewer during recovery; the approval card lives in Aisle's own
+ *     page, and the recovery runs in the vendor's own persistent profile
  */
 
 import { randomUUID } from "node:crypto";
-import Steel from "steel-sdk";
-import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
-import { assertTimeoutApplied } from "../slow-lane/steel-provider.js";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { chromium, type BrowserContext, type Page } from "playwright-core";
+import { DEFAULT_DIMENSIONS } from "../slow-lane/playwright-page.js";
 import type { RecoveryCoordinator, RecoveryJob } from "../gateway/recovery.js";
 import type { FileEnrollmentStore } from "./enrollments.js";
 import { handleWireResponse } from "./detector.js";
-
-/** Steel's launch plan caps sessions at 15 minutes. Raise with AISLE_BROWSE_TIMEOUT_MS on a paid plan. */
-const BROWSING_TIMEOUT_MS = (() => {
-  const fromEnv = Number(process.env["AISLE_BROWSE_TIMEOUT_MS"]);
-  return Number.isFinite(fromEnv) && fromEnv > 0 ? fromEnv : 15 * 60_000;
-})();
 
 export interface BrowsingDeps {
   coordinator: RecoveryCoordinator;
   enrollments: FileEnrollmentStore;
   userId: string;
-  steelApiKey: string | undefined;
-  steelOptions: { useProxy?: boolean; solveCaptcha?: boolean };
+  /** Base dir for the persistent local browse profile. */
+  profilesDir: string;
+  headed?: boolean;
   log: (message: string) => void;
 }
 
@@ -59,8 +53,6 @@ export interface BrowsingView {
 }
 
 export class BrowsingManager {
-  private client: Steel | undefined;
-  private browser: Browser | undefined;
   private context: BrowserContext | undefined;
   private view: BrowsingView = { active: false, frozen: false, toasts: [] };
   private readonly attached = new WeakSet<Page>();
@@ -83,46 +75,34 @@ export class BrowsingManager {
 
   async start(startUrl?: string): Promise<BrowsingView> {
     if (this.view.active) return this.state();
-    if (!this.deps.steelApiKey) throw new Error("STEEL_API_KEY is required to browse in Steel.");
-    this.client = new Steel({ steelAPIKey: this.deps.steelApiKey });
-
-    const session = await this.client.sessions.create({
-      timeout: BROWSING_TIMEOUT_MS, // cannot be raised later
-      // inactivityTimeout omitted: approval happens OUTSIDE the iframe, with no remote input (§5).
-      useProxy: this.deps.steelOptions.useProxy ?? false,
-      solveCaptcha: this.deps.steelOptions.solveCaptcha ?? false,
-      dimensions: { width: 1440, height: 900 },
-      debugConfig: { interactive: true, systemCursor: true },
-      // Logins stored in Steel's credentials vault are typed by Steel, never by Aisle (steel.md §8).
-      credentials: { autoSubmit: true, blurFields: true },
+    const userDataDir = join(this.deps.profilesDir, "_browse");
+    mkdirSync(userDataDir, { recursive: true });
+    const sessionId = `browse_${randomUUID().slice(0, 8)}`;
+    const context = await chromium.launchPersistentContext(userDataDir, {
+      headless: this.deps.headed === false,
+      viewport: DEFAULT_DIMENSIONS,
+      args: ["--disable-blink-features=AutomationControlled"],
     });
     try {
-      assertTimeoutApplied(session, BROWSING_TIMEOUT_MS);
-      this.browser = await chromium.connectOverCDP(session.websocketUrl);
-      const context = this.browser.contexts()[0];
-      const page = context?.pages()[0];
-      if (!context || !page) throw new Error("Steel session exposed no default context/page.");
+      const page = context.pages()[0] ?? (await context.newPage());
       this.context = context;
 
-      // Every page, not just the first: 402s in new tabs are most of them (§3.1).
+      // Every page, not just the first: 402s in new tabs are most of them.
       for (const p of context.pages()) await this.attach(p);
       context.on("page", (p) => void this.attach(p));
 
       this.view = {
         active: true,
-        sessionId: session.id,
-        debugUrl: session.debugUrl,
+        sessionId,
         frozen: false,
         toasts: [],
         startedAt: new Date().toISOString(),
       };
-      this.deps.log(`[aisle:web] browsing session ${session.id} live`);
+      this.deps.log(`[aisle:web] local browsing session ${sessionId} live`);
       if (startUrl) await page.goto(startUrl, { waitUntil: "domcontentloaded" }).catch(() => {});
       return this.state();
     } catch (err) {
-      await this.browser?.close().catch(() => {});
-      await this.client.sessions.release(session.id).catch(() => {});
-      this.browser = undefined;
+      await context.close().catch(() => {});
       this.context = undefined;
       throw err;
     }
@@ -143,12 +123,10 @@ export class BrowsingManager {
 
   async stop(): Promise<void> {
     const id = this.view.sessionId;
-    await this.browser?.close().catch(() => {});
-    if (id) await this.client?.sessions.release(id).catch(() => {});
-    this.browser = undefined;
+    await this.context?.close().catch(() => {});
     this.context = undefined;
     this.view = { active: false, frozen: false, toasts: [] };
-    this.deps.log(`[aisle:web] browsing session ${id ?? "-"} released`);
+    this.deps.log(`[aisle:web] local browsing session ${id ?? "-"} closed`);
   }
 
   private async attach(page: Page): Promise<void> {
@@ -200,7 +178,6 @@ export class BrowsingManager {
       arguments: { url },
       blocker,
       surface: "web",
-      workerContextFrom: sessionId,
     });
     if (this.view.recoveryId === job.id) return; // joined the recovery already on screen
 

@@ -10,7 +10,6 @@ import { FakeWebMcpVendor } from "./helpers/fake-webmcp-vendor.js";
 import { McpWebMcpSession } from "../src/webmcp/mcp-http-session.js";
 import { detectWebMcp } from "../src/webmcp/detector.js";
 import { FakeBrowserProvider, FakeShopAdapter, FakeShopSite } from "./helpers/fake-shop.js";
-import { buildSessionCreateParams } from "../src/slow-lane/steel-provider.js";
 import { PurchaseVerificationError } from "../src/index.js";
 import { makeRequest, SECRET } from "./fixtures.js";
 
@@ -143,12 +142,3 @@ describe("purchase tool detection", () => {
   });
 });
 
-describe("web path worker session", () => {
-  it("starts from a captured session context, never a profile, and persists nothing", () => {
-    const ctx = { cookies: [{ name: "sid", value: "x" }] };
-    const plan = buildSessionCreateParams({}, { provider: "mockvendor", sessionContext: ctx }, {});
-    expect(plan.params.sessionContext).toEqual(ctx);
-    expect(plan.params.persistProfile).toBe(false);
-    expect(plan.params.profileId).toBeUndefined();
-  });
-});

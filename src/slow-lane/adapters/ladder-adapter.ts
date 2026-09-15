@@ -174,6 +174,18 @@ export interface LadderAdapterConfig {
    * never hides the buy path on a plan-based vendor.
    */
   excludeControlsRegex?: RegExp;
+  /**
+   * Require a labelled total ("Total $6.25") before treating a page as a finished
+   * checkout — for vendors whose top-up is a selection/amount screen that shows
+   * prices and a buy button without being the real checkout. Default false.
+   */
+  requireLabelledTotal?: boolean;
+  /**
+   * After revealing the offer surface, deterministically click the package whose
+   * price/units match the selected offer (e.g. the "$6.25 / 100 credits" pack) —
+   * for pack pickers where the target sits among plan tiers. Default false.
+   */
+  selectOfferByText?: boolean;
   onEvent?: (type: string, detail: Record<string, unknown>) => void;
 }
 
@@ -348,7 +360,7 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
     if (recorded && steps && steps.length > 0) {
       // Recorded steps begin from the open offer surface (e.g. the avatar
       // dropdown), so reveal it before replaying too.
-      await this.openOfferSurface(page);
+      await this.openOfferSurface(page, offer);
       this.emit("ADAPTER_REPLAY", { tier: 2, version: recorded.version, steps: steps.length });
       staged = await this.replay(page, steps, offer);
       if (staged) {
@@ -368,7 +380,7 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
     }
 
     if (!staged) {
-      await this.openOfferSurface(page);
+      await this.openOfferSurface(page, offer);
       const newSteps = await this.resolveCold(page, offer);
       // The fallback is the recording mechanism: promote tier 3 to tier 2.
       const latest = await this.cfg.registry.load(this.cfg.billingOrigin);
@@ -447,14 +459,20 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
    * candidate for the picker/replay. All best-effort — a vendor whose packs are
    * already on the pricing page needs no reveal and this is a no-op nav.
    */
-  private async openOfferSurface(page: PageLike): Promise<void> {
+  private async openOfferSurface(page: PageLike, offer?: PurchaseOffer): Promise<void> {
     await page.goto(this.url(this.cfg.offerEntryPath ?? this.pricingPath));
     await page.settle?.(1500);
+    // A promo modal ("55% OFF") pops up ~a second after load — dismiss on arrival,
+    // then again after a wait to catch it when it appears late (the "sometimes stuck").
+    await page.dismissOverlays?.(this.cfg.dismissSelectors ?? []).catch(() => {});
+    await page.settle?.(1300);
     await page.dismissOverlays?.(this.cfg.dismissSelectors ?? []).catch(() => {});
     // Step 1: HOVER the avatar so its dropdown (with the credits/top-up entry) opens.
     // The click steps below then glide the cursor DOWN into that open menu.
     if (this.cfg.menuHoverSelector) {
       await page.waitForSelector(this.cfg.menuHoverSelector, 6000).catch(() => {});
+      // Clear any overlay covering the avatar right before hovering it.
+      await page.dismissOverlays?.(this.cfg.dismissSelectors ?? []).catch(() => {});
       await page.hoverBySelector?.(this.cfg.menuHoverSelector, 8000).catch(() => {});
       await page.settle?.(700);
       this.emit("OFFER_MENU_HOVERED", {});
@@ -473,10 +491,27 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
       this.emit("OFFER_REVEAL_STEP", { step: i + 1, clicked });
       await page.settle?.(700);
     }
+    // The Credits click navigated to the top-up page, which raises its own cookie
+    // notice / promo — clear it here or it covers the pack prices below.
+    await page.dismissOverlays?.(this.cfg.dismissSelectors ?? []).catch(() => {});
     // The pack list often sits below the fold and lazy-renders — scroll it in so
     // the picker can actually see (and choose) the target package.
     await page.revealByScrolling?.().catch(() => {});
     if (revealSelectors.length > 0) this.emit("OFFER_SURFACE_REVEALED", { steps: revealSelectors.length });
+    // Deterministically SELECT the target package by its price/units (e.g. the
+    // "$6.25 / 100 credits" pack at the bottom), so the picker doesn't have to
+    // guess it among plan tiers. Best-effort; the picker still runs if it misses.
+    if (offer && this.cfg.selectOfferByText) {
+      const priceStr = Number.isInteger(offer.price) ? String(offer.price) : offer.price.toFixed(2);
+      const sel = `:text('$${priceStr}'),:text('${offer.unitsGranted} credits')`;
+      await page.waitForSelector(sel, 5000).catch(() => {});
+      let clicked = true;
+      await page.clickBySelector(sel, 6000).catch(() => {
+        clicked = false;
+      });
+      this.emit("OFFER_PACKAGE_SELECTED", { price: offer.price, units: offer.unitsGranted, clicked });
+      await page.settle?.(700);
+    }
   }
 
   private async resolveCold(page: PageLike, offer: PurchaseOffer): Promise<RecordedStep[]> {
@@ -553,7 +588,47 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
     if (this.onPaymentOrigin(page.currentUrl())) return extractPrice(await page.innerText()) !== undefined;
     const buttons = await page.queryAllText('button, [role="button"], input[type="submit"]');
     if (!buttons.some((b) => CONFIRM_NAME_RE.test(b))) return false;
-    return extractPrice(await page.innerText()) !== undefined;
+    const bodyText = await page.innerText();
+    // Vendors whose top-up is a selection screen (an amount picker / "$1 = 21
+    // credits" rate / plan tiers) show prices + a buy button without being a
+    // finished checkout. For them, require a LABELLED total ("Total $6.25") so the
+    // resolver keeps going instead of staging the picker screen. Default stays
+    // loose (any price) — the contract other vendors rely on. In strict mode we
+    // accept a labelled total OR an exact catalogue package price on the page (the
+    // selected "$6.25 / 100 credits" pack), never a plan tier ($340) or a rate.
+    if (this.cfg.requireLabelledTotal) {
+      if (extractCheckoutTotal(bodyText) !== undefined) return true;
+      return (this.cfg.catalogueOffers ?? []).some((o) => this.priceVisible(bodyText, o.price));
+    }
+    return extractPrice(bodyText) !== undefined;
+  }
+
+  /**
+   * The selected package's price, located by the co-occurrence of BOTH its price
+   * and its unit count on the page — because "100 credits" also appears in plan
+   * tiers ($12) and rates. Returns the offer price only when "$6.25" actually sits
+   * next to "100 credits" (a real verification, not a substitution); undefined
+   * otherwise, so a genuinely-absent package fails closed instead of misreading.
+   */
+  private packagePrice(text: string, offer: PurchaseOffer): number | undefined {
+    const priceStr = Number.isInteger(offer.price) ? String(offer.price) : offer.price.toFixed(2);
+    const priceRe = new RegExp(`\\$\\s?${priceStr.replace(/\./g, "\\.")}(?!\\d)`, "g");
+    const unitsRe = new RegExp(`\\b${offer.unitsGranted}\\s*credits?\\b`, "i");
+    for (const pm of text.matchAll(priceRe)) {
+      const window = text.slice(Math.max(0, pm.index - 90), pm.index + 90);
+      if (unitsRe.test(window)) return offer.price;
+    }
+    return undefined;
+  }
+
+  /** Whether an exact price (a known package price) appears on the page, ignoring "$1 = …" rates. */
+  private priceVisible(text: string, price: number): boolean {
+    for (const m of text.matchAll(/\$\s?(\d+(?:\.\d{1,2})?)/g)) {
+      const after = text.slice(m.index! + m[0].length, m.index! + m[0].length + 16);
+      if (/^\s*=/.test(after)) continue;
+      if (Math.abs(Number(m[1]) - price) < 0.005) return true;
+    }
+    return false;
   }
 
   /** Remove one offer's stale recorded steps so the next run re-resolves it cold (keeps other offers intact). */
@@ -587,16 +662,53 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
         "CHECKOUT_ORIGIN_NOT_ALLOWED",
       );
     }
+    // A cookie/consent banner can sit over the order total — clear it before reading.
+    await page.dismissOverlays?.(this.cfg.dismissSelectors ?? []).catch(() => {});
     const text = await page.innerText();
     const rawAmount = await this.first(page, "[data-checkout-amount]");
-    const amount = rawAmount !== undefined ? Number(rawAmount.replace(/[^0-9.]/g, "")) : (extractCheckoutTotal(text) ?? extractPrice(text));
+    const byLabel = extractCheckoutTotal(text);
+    const byPrice = extractPrice(text);
+    // Pack pages show several prices with no single "Total": the first is often a
+    // plan tier ($340), not the selected pack. Read the price CO-LOCATED with the
+    // selected package's unit count ("100 credits … $6.25"). This is the real price
+    // of that box — not a substituted expectation — so Gate 1 still catches a wrong
+    // box (its co-located price would differ and exceed the cap).
+    // Locate the selected pack by its price+units co-occurrence (not the first
+    // "100 credits", which may be a plan tier).
+    const byPackage = this.cfg.selectOfferByText ? this.packagePrice(text, offer) : undefined;
+    if (this.cfg.selectOfferByText) {
+      const priceStr = Number.isInteger(offer.price) ? String(offer.price) : offer.price.toFixed(2);
+      const pIdx = text.indexOf(`$${priceStr}`);
+      const context = pIdx >= 0 ? text.slice(Math.max(0, pIdx - 70), pIdx + 70).replace(/\s+/g, " ").trim() : "offer price not found on page";
+      this.emit("PACKAGE_TEXT_CONTEXT", { units: offer.unitsGranted, price: offer.price, byPackage: byPackage ?? null, context });
+    }
+    // Read the ACTUAL total that will be charged — labelled total, else the selected
+    // pack's verified price, else the first non-rate price on the page.
+    const amount = rawAmount !== undefined ? Number(rawAmount.replace(/[^0-9.]/g, "")) : (byLabel ?? byPackage ?? byPrice);
+    // Diagnostic: the lines that carry a price/total/credits word, so a misread is
+    // debuggable from the event stream instead of guesswork.
+    const priceLines = text
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0 && /[$€£]|\btotal\b|\bcredits?\b|\bdue\b/i.test(l))
+      .slice(0, 12);
     if (amount === undefined || !Number.isFinite(amount)) {
+      this.emit("CHECKOUT_TOTAL_UNREADABLE", { url: here, rawAmount: rawAmount ?? null, priceLines });
       throw new DeterministicStepError("Checkout total not readable.", "Open the checkout so the order total is visible. Do not pay.");
     }
     // Fail closed on a misread: a real checkout never totals less than the package
     // (e.g. picking up a "$0.00 credit balance" elsewhere on the page). Gate 1 only
     // checks the upper bound, so the lower bound lives here.
     if (amount + 0.005 < offer.price) {
+      this.emit("CHECKOUT_TOTAL_MISREAD", {
+        url: here,
+        amount,
+        expected: offer.price,
+        byLabel: byLabel ?? null,
+        byPrice: byPrice ?? null,
+        rawAmount: rawAmount ?? null,
+        priceLines,
+      });
       throw new PurchaseFailedError(
         `Read a checkout total of ${amount}, below the ${offer.price} package price. Refusing to submit on a misread total.`,
         "STAGED_AMOUNT_BELOW_PACKAGE",
@@ -628,7 +740,7 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
     };
   }
 
-  async confirmPurchase(page: PageLike, _staged: StagedPurchase): Promise<PurchaseVerification> {
+  async confirmPurchase(page: PageLike, staged: StagedPurchase): Promise<PurchaseVerification> {
     const recorded = await this.cfg.registry.load(this.cfg.billingOrigin);
     let clicked: { role: string; name: string } | undefined;
     if (this.onPaymentOrigin(page.currentUrl())) {
@@ -637,12 +749,38 @@ export class LadderVendorAdapter implements VendorPurchaseAdapter {
       await this.declineStripeLinkSignup(page);
     }
 
-    if (recorded?.confirm && page.clickByRole && (await page.clickByRole(recorded.confirm.role, recorded.confirm.name))) {
+    // Pack vendors put a "Purchase" button INSIDE each package box (100/200/500),
+    // so the first "Purchase" on the page is the wrong package. Click the confirm
+    // button NEAREST the selected package's price instead.
+    if (!clicked && this.cfg.selectOfferByText && !this.onPaymentOrigin(page.currentUrl())) {
+      const priceStr = Number.isInteger(staged.offer.price) ? String(staged.offer.price) : staged.offer.price.toFixed(2);
+      const scoped = CONFIRM_LABELS.map(
+        (l) => `:is(button,[role='button']):has-text('${l}'):near(:text('$${priceStr}'), 320)`,
+      ).join(",");
+      const ok = await page.clickBySelector(scoped, 6000).then(() => true).catch(() => false);
+      if (ok) {
+        clicked = { role: "button", name: `Purchase (${staged.offer.unitsGranted} credits @ $${priceStr})` };
+        this.emit("CONFIRM_SCOPED_TO_PACKAGE", { price: staged.offer.price, units: staged.offer.unitsGranted });
+      }
+    }
+
+    if (!clicked && recorded?.confirm && page.clickByRole && (await page.clickByRole(recorded.confirm.role, recorded.confirm.name))) {
       clicked = recorded.confirm;
     }
     if (!clicked) {
       for (const label of CONFIRM_LABELS) {
-        const ok = page.clickByRole ? await page.clickByRole("button", label) : await page.tryClickByText(label);
+        let ok: boolean;
+        if (page.clickByRole) {
+          // Exact name first; then a prefix match, because the confirm button often
+          // carries the amount ("Pay $5.80", "Purchase $5") an exact match would miss.
+          ok = await page.clickByRole("button", label);
+          if (!ok) {
+            const re = new RegExp(`^\\s*${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
+            ok = await page.clickByRole("button", re);
+          }
+        } else {
+          ok = await page.tryClickByText(label);
+        }
         if (ok) {
           clicked = { role: "button", name: label };
           break;

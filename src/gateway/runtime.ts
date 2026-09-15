@@ -15,17 +15,16 @@ import { z } from "zod";
 import { createGateway, type Gateway, type Progress } from "./gateway.js";
 import { loadUpstreams, type Upstreams } from "./upstreams.js";
 import { startApprovalServer, type ApprovalServer } from "./approval-server.js";
-import { createSteelRunner } from "./steel-runner.js";
-import { createSteelPurchaser } from "./steel-purchaser.js";
+import { createLocalRunner } from "./runner.js";
+import { createSlowLanePurchaser } from "./purchaser.js";
 import { createFastPurchaser } from "./fast-purchaser.js";
 import { createBalanceReaders } from "./balances.js";
 import { isOpen, type RecoveryJob } from "./recovery.js";
 import { InMemoryIdempotencyStore } from "../fast-lane/idempotency.js";
-import { stealthFromEnv, type SteelProviderOptions } from "../slow-lane/steel-provider.js";
 import { FileEnrollmentStore } from "../web/enrollments.js";
 import { BrowsingManager, type BrowsingView } from "../web/browsing.js";
 import { BROWSE_PAGE } from "../web/browse-page.js";
-import { ExternalActionManager, SteelExternalActionExecutor } from "../web/external-action.js";
+import { ExternalActionManager, LocalExternalActionExecutor } from "../web/external-action.js";
 import { MCP_APP_MIME, RECOVERY_WIDGET_CSP, RECOVERY_WIDGET_HTML, RECOVERY_WIDGET_URI } from "./widget.js";
 
 export interface AisleRuntime {
@@ -80,17 +79,6 @@ export async function startAisleRuntime(): Promise<AisleRuntime> {
     }
   }
 
-  const steelOptions = {
-    useProxy: process.env["AISLE_STEEL_PROXY_CAPTCHA"] === "1",
-    solveCaptcha: process.env["AISLE_STEEL_PROXY_CAPTCHA"] === "1",
-  };
-  const stealth = stealthFromEnv();
-  const steelProvider: SteelProviderOptions = {
-    ...(process.env["AISLE_STEEL_PROXY_CAPTCHA"] === "1" ? {} : { useProxy: false, solveCaptcha: false }),
-    // Real Chrome fingerprint so vendors don't serve an "unsupported browser" wall.
-    ...(stealth ? { stealth } : {}),
-    sessionOptions: { debugConfig: { interactive: process.env["AISLE_STEEL_INTERACTIVE"] === "1", systemCursor: true } },
-  };
   const realPurchaseProviders = new Set(
     (process.env["AISLE_REAL_PURCHASE_PROVIDERS"] ?? "").split(",").map((s) => s.trim()).filter(Boolean),
   );
@@ -108,15 +96,15 @@ export async function startAisleRuntime(): Promise<AisleRuntime> {
     upstreams,
     publicUrl: () => publicUrl,
     balanceReaders,
-    // CLI recoveries are approved and watched on the browse page: card, live Steel browser, timeline.
+    // CLI recoveries are approved and watched on the browse page: card, preview screenshot, timeline.
     // One link for every CLI agent (Hermes, Claude Code, Codex): the page follows the latest recovery.
     approveUrlFor: (id, surface) => (surface === "cli" ? `${publicUrl}/browse` : `${publicUrl}/r/${id}`),
-    steel: createSteelRunner({
+    steel: createLocalRunner({
       holdMs: Number(process.env["AISLE_STEEL_HOLD_MS"] ?? 120_000),
       screenshotsDir: join(stateDir, "screenshots"),
-      provider: steelProvider,
+      previewProfilesDir: join(stateDir, "preview-profiles"),
     }),
-    ...(process.env["STEEL_API_KEY"] ? { purchaser: createSteelPurchaser({ stateDir, steelProvider, store, balanceReaders }) } : {}),
+    purchaser: createSlowLanePurchaser({ stateDir, store, balanceReaders }),
     fastPurchaser: createFastPurchaser({ store }),
     realPurchaseProviders,
     log,
@@ -130,16 +118,8 @@ export async function startAisleRuntime(): Promise<AisleRuntime> {
       if (job.surface === "cli" && process.env["AISLE_OPEN_APPROVAL"] !== "0") openInBrowser(job.approveUrl);
     },
     onSteelLive: (job) => {
-      const live = job.live;
-      const url = live?.debugUrl ?? live?.viewerUrl;
-      if (live?.interactive) log(`[aisle] TAKEOVER (${live.takeoverReason}): use the Steel browser at ${url}`);
-      else log(`[aisle] STEEL BROWSER LIVE ${url ?? "(no viewer url)"}`);
-      // The browse page embeds the live Steel browser. A separate tab only on request.
-      const once = `${live?.sessionId}:${live?.interactive ? "takeover" : "watch"}`;
-      if (url && job.surface === "cli" && process.env["AISLE_OPEN_VIEWER"] === "1" && !openedViewers.has(once)) {
-        openedViewers.add(once);
-        openInBrowser(url);
-      }
+      // Local engine: the browser is a real window on this machine. Watch it directly.
+      log(`[aisle] browser session ${job.live?.sessionId ?? "?"} live — a Chromium window opened on this machine.`);
     },
   });
 
@@ -148,14 +128,15 @@ export async function startAisleRuntime(): Promise<AisleRuntime> {
     coordinator: gateway.coordinator,
     enrollments,
     userId: USER_ID,
-    steelApiKey: process.env["STEEL_API_KEY"],
-    steelOptions,
+    profilesDir: join(stateDir, "profiles"),
+    headed: true, // the user drives this window directly
     log,
   });
   const externalActions = new ExternalActionManager({
     upstreams,
     coordinator: gateway.coordinator,
-    executor: new SteelExternalActionExecutor(),
+    executor: new LocalExternalActionExecutor({ profilesDir: join(stateDir, "profiles"), headed: process.env["AISLE_HEADED"] === "1" }),
+    profilesDir: join(stateDir, "profiles"),
   });
 
   const webRoutes = async (req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> => {
@@ -325,7 +306,7 @@ export function registerAisleTools(
   server.registerTool(
     "aisle__execute_web_action",
     {
-      description: "Execute a prompt-driven action on a configured external service in Steel. The model never pays; billing walls use the normal Aisle top-up approval flow.",
+      description: "Run a prompt-driven action on a SaaS in a local browser signed in with your saved profile — e.g. \"generate an image on textto-image\" or \"top up credits on higgsfield\". Name the vendor OR paste its https link; a bare name resolves to a vendor you've configured or logged in to (never a guessed domain). Works for any vendor with no merchant integration. Use it to generate/act or to top up on demand, not only after a 402. The model operates the site but never pays: any checkout goes through the normal one-approval Aisle top-up flow.",
       inputSchema: { prompt: z.string(), url: z.string().url().optional(), max_steps: z.number().int().positive().max(20).optional() },
       _meta: widgetMeta,
     },
@@ -376,5 +357,31 @@ export function registerAisleTools(
     "aisle__spend_report",
     { description: "Report what Aisle has spent and every recovery opened in this session." },
     async (extra) => gateway.spendReport(taskFor(extra as unknown as Extra)),
+  );
+
+  // A slash command in MCP clients (Claude Code: /mcp__aisle__topup <request>) that
+  // deterministically routes a request through Aisle — no tool ambiguity.
+  server.registerPrompt(
+    "topup",
+    {
+      title: "Aisle top-up / action",
+      description: 'Do a paid action or top up credits on a SaaS via Aisle. Argument: what to do, naming the vendor or its link — e.g. "generate an image on textto-image".',
+      argsSchema: { request: z.string().describe('What to do, e.g. "generate an image on textto-image" or "top up credits on higgsfield".') },
+    },
+    ({ request }) => ({
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text:
+              `Call the aisle__execute_web_action tool with prompt: ${JSON.stringify(request)}. ` +
+              `Use ONLY that tool — do not use any other image, media, or payment tool, because this must run through Aisle so any top-up gets one human approval. ` +
+              `If the result is AWAITING_APPROVAL, show me the approve_url and recovery_id, then call aisle__wait_for_external_action with that recovery_id and wait until it resolves. ` +
+              `When it resolves, report the final result and, if a purchase happened, a one-line spend note.`,
+          },
+        },
+      ],
+    }),
   );
 }

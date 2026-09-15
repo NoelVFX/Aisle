@@ -137,6 +137,8 @@ export interface RecoveryJob {
   approveUrl: string;
   /** Web path: the user's live browsing session, whose context seeds the worker session. */
   workerContextFrom?: string;
+  /** Ad-hoc vendor config synthesized from a URL (zero-integration path). Overrides the static map. */
+  upstream?: UpstreamEntry;
   live?: SteelLive;
   steel?: SteelEvidence;
   staged?: StagedCheckout;
@@ -156,6 +158,8 @@ export interface OpenRecoveryInput {
   surface?: "cli" | "web";
   /** Web path: the browsing Steel session id (web-path.md §2.2). */
   workerContextFrom?: string;
+  /** Ad-hoc vendor config synthesized from a URL, for a vendor not in upstreams.json. */
+  upstream?: UpstreamEntry;
 }
 
 export interface CoordinatorDeps {
@@ -211,7 +215,9 @@ export class RecoveryCoordinator {
 
   /** Open a recovery, or join the open one for the same (task, requirement). */
   async open(input: OpenRecoveryInput): Promise<RecoveryJob> {
-    const upstream = this.deps.upstreams[input.namespace];
+    // Ad-hoc vendor (zero-integration): a synthesized upstream from a URL overrides
+    // the static map, so any origin can be recovered without a config entry.
+    const upstream = input.upstream ?? this.deps.upstreams[input.namespace];
     if (!upstream) throw new Error(`UNKNOWN_UPSTREAM:${input.namespace}`);
 
     const blocker: Blocker =
@@ -249,6 +255,7 @@ export class RecoveryCoordinator {
       session: createRecoverySession(input.taskId),
       approveUrl: this.deps.approveUrlFor ? this.deps.approveUrlFor(id, surface) : `${this.deps.publicUrl()}/r/${id}`,
       ...(input.workerContextFrom ? { workerContextFrom: input.workerContextFrom } : {}),
+      ...(input.upstream ? { upstream: input.upstream } : {}),
       events: [],
       createdAt: new Date().toISOString(),
     };
@@ -377,7 +384,7 @@ export class RecoveryCoordinator {
     }
     if (planId === job.selectedPlanId) return { ok: true };
 
-    const offer = this.deps.upstreams[job.namespace]?.offers.find((o) => o.productId === planId);
+    const offer = (job.upstream ?? this.deps.upstreams[job.namespace])?.offers.find((o) => o.productId === planId);
     if (!offer) return { ok: false, error: "PLAN_NOT_IN_CATALOGUE" };
     const quote: Quote = {
       ...job.quote,
@@ -453,7 +460,7 @@ export class RecoveryCoordinator {
   }
 
   private async execute(job: RecoveryJob): Promise<void> {
-    const upstream = this.deps.upstreams[job.namespace];
+    const upstream = job.upstream ?? this.deps.upstreams[job.namespace];
     if (upstream?.purchase && (this.deps.purchaser || this.deps.fastPurchaser)) return this.executePurchase(job, upstream);
     return this.executeViewing(job);
   }
@@ -519,14 +526,14 @@ export class RecoveryCoordinator {
       this.advanceIfValid(job, code === "PURCHASE_VERIFICATION_FAILED" || code === "PURCHASE_IN_FLIGHT" ? "PURCHASE_UNKNOWN" : "PURCHASE_FAILED");
       job.error = err instanceof Error ? err.message : String(err);
       if (code === "NOT_AUTHENTICATED") {
-        job.error += ` Log the Steel profile in once with: npm run steel:login -- ${job.namespace}`;
+        job.error += ` Sign in once with: npm run login -- ${job.namespace}`;
       }
       this.emit(job, "RECOVERY_FAILED", { error: job.error, ...(typeof code === "string" ? { code } : {}) });
     }
   }
 
   private async executeViewing(job: RecoveryJob): Promise<void> {
-    const upstream = this.deps.upstreams[job.namespace];
+    const upstream = job.upstream ?? this.deps.upstreams[job.namespace];
     const hold = new Promise<void>((resolve) => this.holds.set(job.id, resolve));
     job.lane = "viewing";
     try {

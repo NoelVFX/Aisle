@@ -17,8 +17,18 @@ describe("prompt-driven external actions", () => {
     expect(extractPromptUrl("Generate it at https://shop.vendor.test/create, please")).toBe("https://shop.vendor.test/create");
   });
 
-  it("refuses origins that are not in the configured catalogue", () => {
-    expect(() => resolveExternalTarget("Use https://evil.test/create", upstreamsWith(imageVendorEntry()))).toThrow("UNENROLLED_ORIGIN");
+  it("synthesizes an ad-hoc vendor for an unconfigured origin (zero-integration)", () => {
+    const target = resolveExternalTarget("Use https://any-saas.test/pricing", upstreamsWith(imageVendorEntry()));
+    // The user-named origin becomes the LOCKED billing origin; no config entry needed.
+    expect(target.provider).toBe("any-saas.test");
+    expect(target.upstream.billingOrigin).toBe("https://any-saas.test");
+    expect(target.upstream.canonicalOrigin).toBe("https://any-saas.test");
+    expect(target.upstream.purchase?.mode).toBe("slow-lane");
+    expect(target.upstream.offers).toEqual([]); // discovered at runtime
+  });
+
+  it("still rejects a non-https link", () => {
+    expect(() => resolveExternalTarget("Use http://evil.test/create", upstreamsWith(imageVendorEntry()))).toThrow("HTTPS_REQUIRED");
   });
 
   it("replays the exact prompt after an approved billing recovery", async () => {
@@ -41,7 +51,7 @@ describe("prompt-driven external actions", () => {
         return { kind: "completed", note: "generated", finalUrl: input.url };
       },
     };
-    const manager = new ExternalActionManager({ upstreams, coordinator: g.coordinator, executor });
+    const manager = new ExternalActionManager({ upstreams, coordinator: g.coordinator, executor, profilesDir: "/tmp/aisle-test-profiles" });
     const first = await manager.execute({ taskId: "t", prompt: "Generate a red bicycle at https://shop.vendor.test/create." });
     expect(first.status).toBe("AWAITING_APPROVAL");
     const recoveryId = String(first.status === "AWAITING_APPROVAL" ? first.recovery_id : "");

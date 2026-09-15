@@ -61,26 +61,20 @@ export { InMemoryIdempotencyStore, blocksNewPurchase, purchaseKeyFor } from "./f
 export type { IdempotencyStore, PurchaseRecord, PurchaseStatus } from "./fast-lane/idempotency.js";
 export { buildResumeToken, isResumeTokenExpired } from "./resume/resume-token.js";
 
-// ---- Slow lane (Steel + Playwright over CDP) --------------------------------
+// ---- Slow lane (local Playwright, persistent profiles) ----------------------
 export { runSlowLane } from "./slow-lane/executor.js";
 export type { SlowLaneDeps, SlowLaneEvent, TakeoverContext } from "./slow-lane/executor.js";
+export { LocalBrowserProvider } from "./slow-lane/local-provider.js";
+export type { LocalProviderOptions } from "./slow-lane/local-provider.js";
 export {
-  SteelBrowserProvider,
-  assertProfileMounted,
-  assertTimeoutApplied,
-  buildSessionCreateParams,
-  waitForProfileReady,
-  CHECKOUT_TIMEOUT_MS,
-  PROFILE_READY_TIMEOUT_MS,
-  PURCHASE_SESSION_TIMEOUT_MS,
-} from "./slow-lane/steel-provider.js";
-export type {
-  ProfileReadyOptions,
-  SessionPlan,
-  SteelProfilesClient,
-  SteelProviderOptions,
-} from "./slow-lane/steel-provider.js";
-export { InMemoryProfileStore, FileProfileStore } from "./slow-lane/profiles.js";
+  PlaywrightPage,
+  PlaywrightControl,
+  ACTION_TIMEOUT_MS,
+  NAVIGATION_TIMEOUT_MS,
+  DEFAULT_DIMENSIONS,
+} from "./slow-lane/playwright-page.js";
+export type { Cursor } from "./slow-lane/playwright-page.js";
+export { InMemoryProfileStore, FileProfileStore, profileDirFor } from "./slow-lane/profiles.js";
 export type { ProfileStore } from "./slow-lane/profiles.js";
 export { DeterministicStepError, chooseMinimumOffer, selectOffer } from "./slow-lane/vendor-adapter.js";
 export type { VendorPurchaseAdapter } from "./slow-lane/vendor-adapter.js";
@@ -100,8 +94,6 @@ export {
   createOpenRouterComputerUseAgent,
   parseComputerUseAction,
 } from "./slow-lane/computer-use.js";
-export { SteelComputerControl } from "./slow-lane/steel-computer.js";
-export type { SteelComputerClient } from "./slow-lane/steel-computer.js";
 export type {
   ComputerUseAction,
   ComputerUseAgent,

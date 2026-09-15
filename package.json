@@ -1,7 +1,7 @@
 {
   "name": "aisle",
   "version": "0.1.0",
-  "description": "Fast-lane transaction recovery for coding agents: detect a vendor's WebMCP purchase tools, buy the minimum entitlement, verify it, and hand back a resume token.",
+  "description": "Agentic Checkout: an MCP agent that completes a purchase through almost any merchant's existing checkout — WebMCP fast lane, local Playwright slow lane — with one human approval. No merchant integration required.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -10,26 +10,24 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "smoke:steel": "node --env-file=.env --import tsx src/steel-smoke.ts",
     "gateway": "tsx src/gateway/server.ts",
-    "steel:login": "tsx src/gateway/steel-login.ts",
-    "steel:credentials": "tsx src/gateway/steel-credentials.ts",
+    "login": "tsx src/gateway/login.ts",
     "gateway:http": "tsx src/gateway/http-server.ts",
     "vendor:studio": "tsx src/demo-vendor/launch.ts"
   },
   "keywords": [
+    "agentic-checkout",
     "webmcp",
     "mcp",
     "agent",
+    "playwright",
     "payments",
-    "entitlement",
-    "recovery"
+    "checkout"
   ],
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "playwright-core": "^1.48.2",
-    "steel-sdk": "^0.18.0",
     "zod": "^3.25.76"
   },
   "devDependencies": {

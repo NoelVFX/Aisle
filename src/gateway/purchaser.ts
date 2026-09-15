@@ -1,20 +1,20 @@
 /**
- * Slow lane for an approved gateway recovery, in a real Steel browser
- * (aisle-pipeline.md §15, §17, §18; steel.md §20).
+ * Slow lane for an approved gateway recovery, in a local Playwright browser.
  *
- *   Steel session on the (user, vendor) profile → liveness probe → balance read →
- *   offers (tier 1) → stage via recorded steps (tier 2) or the AX picker (tier 3,
- *   promoted to tier 2) → Gate 1 → deterministic submit (or withheld for an
- *   unapproved real-money vendor) → Gate 2 → profile READY
+ *   Local persistent-profile session for (user, vendor) → liveness probe →
+ *   balance read → offers (tier 1) → stage via recorded steps (tier 2) or the AX
+ *   picker (tier 3, promoted to tier 2) → Gate 1 → deterministic submit (or
+ *   withheld for an unapproved real-money vendor) → Gate 2.
  *
- * The vision computer-use agent only helps discovery/staging when both tiers
- * fail. No model ever clicks submit.
+ * The browser runs on this machine (a real Chromium window the user can watch and,
+ * if a login is needed, take over directly). The vision computer-use agent only
+ * helps discovery/staging when both deterministic tiers fail. No model ever clicks
+ * submit.
  */
 
 import { join } from "node:path";
-import Steel from "steel-sdk";
 import { runSlowLane, type SlowLaneEvent } from "../slow-lane/executor.js";
-import { SteelBrowserProvider, type SteelProviderOptions } from "../slow-lane/steel-provider.js";
+import { LocalBrowserProvider, type LocalProviderOptions } from "../slow-lane/local-provider.js";
 import { FileProfileStore } from "../slow-lane/profiles.js";
 import { LadderVendorAdapter } from "../slow-lane/adapters/ladder-adapter.js";
 import { FileAdapterRegistry } from "../slow-lane/adapters/recorded-adapter.js";
@@ -25,18 +25,16 @@ import { purchaseKeyFor, type IdempotencyStore } from "../fast-lane/idempotency.
 import { resolveRequirement } from "../core/outcome.js";
 import type { SteelLive, SteelPurchaser } from "./recovery.js";
 
-/** steel.md §16.3: how long a scoped takeover (sign-in, 3-D Secure) may take. */
+/** How long a scoped takeover (sign-in, 3-D Secure) may take in the local window. */
 export const TAKEOVER_WAIT_MS = 5 * 60_000;
 
-/** Steel's live viewer: input is forwarded only when `interactive=true`. */
-const viewerUrl = (debugUrl: string | undefined, interactive: boolean) =>
-  debugUrl === undefined ? undefined : `${debugUrl}${debugUrl.includes("?") ? "&" : "?"}interactive=${interactive}&showControls=${interactive}`;
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-export interface SteelPurchaserOptions {
+export interface SlowLanePurchaserOptions {
   /** `.aisle` — profiles, recorded adapters, resolver recordings. */
   stateDir: string;
-  steelProvider?: SteelProviderOptions;
+  /** Local browser options (profilesDir is derived from stateDir when omitted). */
+  browser?: Partial<LocalProviderOptions>;
   /** Shared across jobs so "did we buy?" survives between recoveries in one gateway. */
   store: IdempotencyStore;
   mandateSecret?: string;
@@ -45,8 +43,9 @@ export interface SteelPurchaserOptions {
   balanceReaders?: Readonly<Record<string, () => Promise<number | undefined>>>;
 }
 
-export function createSteelPurchaser(options: SteelPurchaserOptions): SteelPurchaser {
+export function createSlowLanePurchaser(options: SlowLanePurchaserOptions): SteelPurchaser {
   const env = options.env ?? process.env;
+  const profilesDir = join(options.stateDir, "profiles");
 
   return {
     async purchase({ job, upstream, realMoneyAllowed, emit, onLive }) {
@@ -54,21 +53,15 @@ export function createSteelPurchaser(options: SteelPurchaserOptions): SteelPurch
       if (!cfg) throw new Error(`Upstream '${job.namespace}' has no purchase config.`);
       if (!job.quote || !job.mandate) throw new Error("Recovery has no approved mandate.");
 
-      // The session accepts input so a scoped takeover is possible (steel.md §16.2);
-      // the viewer the user sees stays read-only until one is granted.
-      const provider = new SteelBrowserProvider({
-        ...options.steelProvider,
-        // steel.md §8: the vendor login lives in Steel's vault and is typed by Steel, never by Aisle.
-        ...(cfg.steelCredentials ? { credentials: { autoSubmit: true, blurFields: true, exactOrigin: true } } : {}),
-        sessionOptions: {
-          ...options.steelProvider?.sessionOptions,
-          debugConfig: { ...options.steelProvider?.sessionOptions?.debugConfig, interactive: true, systemCursor: true },
-        },
+      // A real Chromium on this machine. Headless by default for speed; set
+      // AISLE_HEADED=1 to watch. (Log in ahead of time with `npm run login`.)
+      const provider = new LocalBrowserProvider({
+        profilesDir,
+        headed: env["AISLE_HEADED"] === "1",
+        ...(env["AISLE_BROWSER_CHANNEL"] ? { channel: env["AISLE_BROWSER_CHANNEL"] } : {}),
+        ...options.browser,
       });
-      let live: SteelLive | undefined;
-      let rawDebugUrl: string | undefined;
-      let liveReady: Promise<void> = Promise.resolve();
-      const client = new Steel({ steelAPIKey: options.steelProvider?.apiKey ?? env["STEEL_API_KEY"] ?? "" });
+
       const infraKey = env["OPENROUTER_INFRA_KEY"];
       const replay = env["REPLAY_RESOLVER"] === "1";
 
@@ -95,13 +88,14 @@ export function createSteelPurchaser(options: SteelPurchaserOptions): SteelPurch
         ...(cfg.offerEntryPath ? { offerEntryPath: cfg.offerEntryPath } : {}),
         ...(cfg.offerRevealSelectors ? { offerRevealSelectors: [...cfg.offerRevealSelectors] } : {}),
         ...(cfg.excludeControlsPattern ? { excludeControlsRegex: new RegExp(cfg.excludeControlsPattern, "i") } : {}),
+        ...(cfg.requireLabelledTotal ? { requireLabelledTotal: true } : {}),
+        ...(cfg.selectOfferByText ? { selectOfferByText: true } : {}),
         ...(cfg.loggedInSelector ? { loggedInSelector: cfg.loggedInSelector } : {}),
         ...(cfg.loggedOutSelector ? { loggedOutSelector: cfg.loggedOutSelector } : {}),
         ...(cfg.loginWallPattern ? { loginWallPattern: new RegExp(cfg.loginWallPattern, "i") } : {}),
         ...(cfg.offersFrom === "catalogue" ? { catalogueOffers: [...upstream.offers] } : {}),
         ...(cfg.paymentOrigins ? { paymentOrigins: [...cfg.paymentOrigins] } : {}),
         ...(cfg.stripeTestCard ? { stripeTestCard: true } : {}),
-        ...(cfg.steelCredentials ? { loginGraceMs: 12_000 } : {}),
         ...(balanceReader ? { balanceReader } : {}),
         registry: new FileAdapterRegistry(join(options.stateDir, "adapters")),
         ...(picker ? { picker } : {}),
@@ -110,33 +104,25 @@ export function createSteelPurchaser(options: SteelPurchaserOptions): SteelPurch
 
       const agent = infraKey ? createOpenRouterComputerUseAgent({ apiKey: infraKey }) : undefined;
 
-      // Web path (web-path.md §2.2): capture cookies + localStorage from the user's
-      // LIVE browsing session. The worker starts from them, isolated, and persists nothing.
-      const sessionContext = job.workerContextFrom ? await client.sessions.context(job.workerContextFrom) : undefined;
-      if (sessionContext) emit("WORKER_CONTEXT_CAPTURED", { fromBrowsingSession: true });
-
       try {
         const result = await runSlowLane(
           { checkpoint: job.checkpoint, quote: job.quote, mandate: job.mandate },
           {
             provider,
             adapter,
-            ...(sessionContext ? { sessionContext } : { profiles: new FileProfileStore(join(options.stateDir, "profiles")) }),
+            profiles: new FileProfileStore(profilesDir),
             ...(agent ? { agent } : {}),
             onTakeover: async (ctx) => {
-              await liveReady;
-              emit("TAKEOVER_INTERACTIVE_GRANTED", { reason: ctx.reason, maxSeconds: TAKEOVER_WAIT_MS / 1000 });
-              if (live) onLive({ ...live, debugUrl: viewerUrl(rawDebugUrl, true), interactive: true, takeoverReason: ctx.reason });
-              try {
-                const deadline = Date.now() + TAKEOVER_WAIT_MS;
-                while (!(await ctx.cleared().catch(() => false))) {
-                  if (Date.now() > deadline) throw new TakeoverRequiredError(`${ctx.reason} was not cleared within ${TAKEOVER_WAIT_MS / 60_000} minutes.`);
-                  await sleep(2000);
+              // The browser is local and headed: the user signs in directly in the window.
+              emit("TAKEOVER_REQUIRED", { reason: ctx.reason, maxSeconds: TAKEOVER_WAIT_MS / 1000 });
+              const deadline = Date.now() + TAKEOVER_WAIT_MS;
+              while (!(await ctx.cleared().catch(() => false))) {
+                if (Date.now() > deadline) {
+                  throw new TakeoverRequiredError(`${ctx.reason} was not cleared within ${TAKEOVER_WAIT_MS / 60_000} minutes.`);
                 }
-              } finally {
-                if (live) onLive(live);
-                emit("TAKEOVER_INTERACTIVE_REVOKED", { reason: ctx.reason });
+                await sleep(2000);
               }
+              emit("TAKEOVER_RESOLVED", { reason: ctx.reason });
             },
             store: options.store,
             stopBeforeSubmit: !realMoneyAllowed,
@@ -145,22 +131,15 @@ export function createSteelPurchaser(options: SteelPurchaserOptions): SteelPurch
               const { type, ...rest } = event;
               emit(type, rest as Record<string, unknown>);
               if (event.type === "STEEL_SESSION_CREATED") {
-                liveReady = client.sessions
-                  .retrieve(event.sessionId)
-                  .then((d) => d.debugUrl)
-                  .catch(() => undefined)
-                  .then((debugUrl) => {
-                    rawDebugUrl = debugUrl;
-                    live = { sessionId: event.sessionId, debugUrl: viewerUrl(debugUrl, false), viewerUrl: event.sessionViewerUrl, interactive: false };
-                    onLive(live);
-                  });
+                // Local window — no cloud viewer URL; the user watches it directly.
+                const live: SteelLive = { sessionId: event.sessionId, debugUrl: undefined, viewerUrl: undefined, interactive: false };
+                onLive(live);
               }
             },
           },
         );
-        // This recovery is finished and verified. Release its record so the next
-        // wall of the same size in this session can buy again instead of being
-        // mistaken for a retry of this purchase.
+        // Release this recovery's record so the next wall of the same size in this
+        // session can buy again instead of being mistaken for a retry.
         const request = { checkpoint: job.checkpoint, quote: job.quote, mandate: job.mandate };
         await options.store.forget(purchaseKeyFor(job.mandate, resolveRequirement(request)));
         return { outcome: "verified", result };

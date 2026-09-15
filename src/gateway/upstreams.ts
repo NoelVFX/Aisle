@@ -36,6 +36,10 @@ export interface PurchaseConfig {
   offerRevealSelectors?: string[];
   /** Regex (matched on a control's name) removing subscription/plan upsells from the picker's choices, e.g. "explore all plans|upgrade|% off". */
   excludeControlsPattern?: string;
+  /** Require a labelled total ("Total $6.25") before treating a page as a checkout — for amount-picker/rate top-ups. Default false. */
+  requireLabelledTotal?: boolean;
+  /** Deterministically click the package matching the selected offer's price/units after revealing the offer surface. Default false. */
+  selectOfferByText?: boolean;
   loggedInSelector?: string;
   /** Match (with no logged-in marker) means logged OUT, for vendors that show "Log in / Sign up" instead of a login-wall redirect. */
   loggedOutSelector?: string;
