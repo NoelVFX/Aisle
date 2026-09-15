@@ -25,6 +25,9 @@ import { FileEnrollmentStore } from "../web/enrollments.js";
 import { BrowsingManager, type BrowsingView } from "../web/browsing.js";
 import { BROWSE_PAGE } from "../web/browse-page.js";
 import { ExternalActionManager, LocalExternalActionExecutor } from "../web/external-action.js";
+import { LoginManager } from "../web/login-manager.js";
+import { loginPage } from "../web/login-page.js";
+import { FileProfileStore } from "../slow-lane/profiles.js";
 import { MCP_APP_MIME, RECOVERY_WIDGET_CSP, RECOVERY_WIDGET_HTML, RECOVERY_WIDGET_URI } from "./widget.js";
 
 export interface AisleRuntime {
@@ -132,11 +135,16 @@ export async function startAisleRuntime(): Promise<AisleRuntime> {
     headed: true, // the user drives this window directly
     log,
   });
+  const profileStore = new FileProfileStore(join(stateDir, "profiles"));
+  const loginManager = new LoginManager({ profilesDir: join(stateDir, "profiles"), store: profileStore, userId: USER_ID, log });
   const externalActions = new ExternalActionManager({
     upstreams,
     coordinator: gateway.coordinator,
     executor: new LocalExternalActionExecutor({ profilesDir: join(stateDir, "profiles"), headed: process.env["AISLE_HEADED"] === "1" }),
     profilesDir: join(stateDir, "profiles"),
+    store: profileStore,
+    loginManager,
+    publicUrl: () => publicUrl,
   });
 
   const webRoutes = async (req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> => {
@@ -203,6 +211,20 @@ export async function startAisleRuntime(): Promise<AisleRuntime> {
     }
     const unenroll = p.match(/^\/api\/enrollments\/([^/]+)$/);
     if (req.method === "DELETE" && unenroll?.[1]) return enrollments.unenroll(USER_ID, unenroll[1]), send(204), true;
+    // One-time vendor sign-in (link-based). GET the page, POST start/finish, GET status.
+    const loginPageMatch = p.match(/^\/login\/([^/]+)$/);
+    if (req.method === "GET" && loginPageMatch?.[1]) return send(200, loginPage(decodeURIComponent(loginPageMatch[1])), "text/html; charset=utf-8"), true;
+    const loginApi = p.match(/^\/api\/login\/([^/]+)\/(start|finish|status)$/);
+    if (loginApi?.[1] && loginApi[2]) {
+      const provider = decodeURIComponent(loginApi[1]);
+      try {
+        if (req.method === "POST" && loginApi[2] === "start") return send(200, await loginManager.start(provider)), true;
+        if (req.method === "POST" && loginApi[2] === "finish") return send(200, await loginManager.finish(provider)), true;
+        if (req.method === "GET" && loginApi[2] === "status") return send(200, loginManager.status(provider)), true;
+      } catch (err) {
+        return send(400, { error: err instanceof Error ? err.message : String(err) }), true;
+      }
+    }
     return false;
   };
 

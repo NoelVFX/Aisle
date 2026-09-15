@@ -14,7 +14,8 @@ import { classifyFailure } from "../classifier.js";
 import type { Blocker, PurchaseOffer } from "../types.js";
 import type { PurchaseConfig, UpstreamEntry, Upstreams } from "../gateway/upstreams.js";
 import type { RecoveryCoordinator, RecoveryJob } from "../gateway/recovery.js";
-import { profileDirFor } from "../slow-lane/profiles.js";
+import { profileDirFor, type FileProfileStore } from "../slow-lane/profiles.js";
+import type { LoginManager } from "./login-manager.js";
 import { ACTION_TIMEOUT_MS, DEFAULT_DIMENSIONS, NAVIGATION_TIMEOUT_MS, PlaywrightControl, PlaywrightPage } from "../slow-lane/playwright-page.js";
 import { offersFromJsonLd } from "../slow-lane/adapters/ladder-adapter.js";
 import { parseOffersFromText } from "../slow-lane/adapters/generic-vendor-adapter.js";
@@ -90,6 +91,7 @@ export interface ExternalActionExecutor {
 
 export type ExternalActionResult =
   | { status: "COMPLETED"; provider: string; note: string; final_url: string; viewer_url?: string }
+  | { status: "LOGIN_REQUIRED"; provider: string; login_url: string; next: string }
   | { status: "AWAITING_APPROVAL"; recovery_id: string; approve_url: string; provider: string; next: string }
   | { status: "RECOVERY_RUNNING"; recovery_id: string; provider: string }
   | { status: "RECOVERY_FAILED"; recovery_id: string; error?: string };
@@ -249,11 +251,33 @@ export class ExternalActionManager {
       executor: ExternalActionExecutor;
       /** Base dir for persistent vendor profiles; used to discover ad-hoc vendor offers. */
       profilesDir: string;
+      /** Optional: enable the friendly first-time sign-in link instead of failing on an auth wall. */
+      store?: FileProfileStore;
+      loginManager?: LoginManager;
+      userId?: string;
+      publicUrl?: () => string;
     },
   ) {}
 
   async execute(request: ExternalActionRequest): Promise<ExternalActionResult> {
     const target = resolveExternalTarget(request.prompt, this.deps.upstreams, request.url, this.deps.profilesDir);
+
+    // First time on this vendor: hand back a one-time sign-in link instead of failing.
+    // Once signed in, the profile is remembered and this never fires again.
+    if (this.deps.loginManager && this.deps.publicUrl) {
+      const loggedIn = await this.deps.loginManager.isLoggedIn(target.provider);
+      if (!loggedIn) {
+        const loginUrl = target.upstream.billingUrl ?? target.url;
+        this.deps.loginManager.register(target.provider, loginUrl);
+        return {
+          status: "LOGIN_REQUIRED",
+          provider: target.provider,
+          login_url: `${this.deps.publicUrl()}/login/${encodeURIComponent(target.provider)}`,
+          next: `Open the link and sign in to ${target.provider} once. Aisle will remember it. Then re-run your request.`,
+        };
+      }
+    }
+
     const isAdHoc = this.deps.upstreams[target.provider] === undefined;
     const full = { ...request, ...target };
     const attempt = await this.deps.executor.run(full);
