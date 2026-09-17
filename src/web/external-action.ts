@@ -267,13 +267,18 @@ export class ExternalActionManager {
     if (this.deps.loginManager && this.deps.publicUrl) {
       const loggedIn = await this.deps.loginManager.isLoggedIn(target.provider);
       if (!loggedIn) {
-        const loginUrl = target.upstream.billingUrl ?? target.url;
-        this.deps.loginManager.register(target.provider, loginUrl);
+        const pc = target.upstream.purchase;
+        this.deps.loginManager.register(target.provider, {
+          loginUrl: target.upstream.billingUrl ?? target.url,
+          ...(pc?.loggedInSelector ? { loggedInSelector: pc.loggedInSelector } : {}),
+          ...(pc?.loggedOutSelector ? { loggedOutSelector: pc.loggedOutSelector } : {}),
+          ...(pc?.loginWallPattern ? { loginWallPattern: pc.loginWallPattern } : {}),
+        });
         return {
           status: "LOGIN_REQUIRED",
           provider: target.provider,
           login_url: `${this.deps.publicUrl()}/login/${encodeURIComponent(target.provider)}`,
-          next: `Open the link and sign in to ${target.provider} once. Aisle will remember it. Then re-run your request.`,
+          next: `Give the user this exact link to open in their browser: ${this.deps.publicUrl()}/login/${encodeURIComponent(target.provider)} — they sign in once and the page confirms "You're logged in". Do NOT use your own browser-connect flow. After they confirm, re-run this request.`,
         };
       }
     }

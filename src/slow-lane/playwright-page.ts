@@ -8,8 +8,27 @@
  * Playwright's native input.
  */
 
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { delimiter, join } from "node:path";
 import type { CDPSession, Page } from "playwright-core";
 import type { ActionCandidate, ControlSurface, PageLike } from "./browser.js";
+
+/**
+ * On Linux (e.g. WSL) Chromium dlopens system libs like libasound.so.2. When the
+ * user can't `sudo apt install` them, we stage them (no root) under
+ * ~/.aisle-native-libs/lib; put that on LD_LIBRARY_PATH so the browser child
+ * process finds them. Runs once at import — before any chromium.launch — and is a
+ * no-op off Linux or when the dir doesn't exist. Any launcher imports this module.
+ */
+(function ensureNativeLibPath(): void {
+  if (process.platform !== "linux") return;
+  const dir = join(homedir(), ".aisle-native-libs", "lib");
+  if (!existsSync(dir)) return;
+  const current = process.env["LD_LIBRARY_PATH"] ?? "";
+  if (current.split(delimiter).includes(dir)) return;
+  process.env["LD_LIBRARY_PATH"] = current ? `${dir}${delimiter}${current}` : dir;
+})();
 
 /** A never-settling loading element must not hang the whole flow on one action. */
 export const ACTION_TIMEOUT_MS = 20_000;
