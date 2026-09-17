@@ -30,6 +30,7 @@ import { loginPage } from "../web/login-page.js";
 import { FileProfileStore } from "../slow-lane/profiles.js";
 import { createAgnicClient } from "../agnic/client.js";
 import { AgnicCommerceManager } from "../agnic/manager.js";
+import { recommendTool } from "../agnic/recommend.js";
 import { shopPage } from "../web/shop-page.js";
 import { MCP_APP_MIME, RECOVERY_WIDGET_CSP, RECOVERY_WIDGET_HTML, RECOVERY_WIDGET_URI } from "./widget.js";
 
@@ -392,6 +393,31 @@ export function registerAisleTools(
 
   // --- Agnic commerce rail: buy through any merchant's checkout with one approval. ---
   const agnicMissing = { content: [{ type: "text" as const, text: JSON.stringify({ status: "FAILED", error: "AGNIC_NOT_CONFIGURED: set AGNIC_TOKEN on the server to enable purchases." }) }], isError: true };
+
+  server.registerTool(
+    "aisle__find_tool",
+    {
+      description:
+        "Recommend the best-fit MCP tool / SaaS for a goal and return its checkout URL — the discovery step before a purchase. Describe the goal in `goal` (e.g. \"an MCP tool for my site that sends email autonomously\"); returns { tool_name, checkout_url, why, alternatives }. Show the user the pick, then pass checkout_url to aisle__shop as explore_url to buy the plan. This only names a tool and a URL — it never pays.",
+      inputSchema: { goal: z.string().min(1).describe("What the user wants a tool to do.") },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ goal }) => {
+      try {
+        const rec = await recommendTool(goal);
+        const result = {
+          status: "RECOMMENDED",
+          ...rec,
+          next: `Show the user "${rec.tool_name}" (${rec.checkout_url}) and its rationale. To buy its plan, call aisle__shop with explore_url set to that checkout_url. The user still approves before anything is charged.`,
+        };
+        return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result };
+      } catch (err) {
+        const result = { status: "FAILED", error: err instanceof Error ? err.message : String(err) };
+        return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result, isError: true };
+      }
+    },
+  );
+
   server.registerTool(
     "aisle__shop",
     {

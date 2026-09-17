@@ -18,6 +18,26 @@ Hermes → aisle__wait_for_purchase { shop_id }      (Aisle: place + follow the 
   → COMPLETED { receipt: { order_id, amount_charged_minor, currency, status, ... } }
 ```
 
+### With discovery (the "I want a tool for X" flow)
+
+When the user names a *goal* rather than a product — "I want an MCP tool for my site that
+sends email autonomously" — start one step earlier. `aisle__find_tool` recommends the best-fit
+SaaS/MCP tool and returns its **checkout URL**, which feeds straight into `aisle__shop`:
+
+```
+User → Hermes: "I want an MCP tool that sends email autonomously"
+Hermes → aisle__find_tool { goal }                 (Aisle: OpenRouter LLM picks the tool)
+  → RECOMMENDED { tool_name: "Resend", checkout_url, why, alternatives }
+Hermes → aisle__shop { prompt: "Resend plan", explore_url: <checkout_url> }
+  → AWAITING_APPROVAL → approve → aisle__wait_for_purchase → COMPLETED { receipt }
+```
+
+`aisle__find_tool` only *names* a tool and a URL — it never pays. Agnic (product search)
+indexes vetted Shopify goods, not SaaS/MCP subscriptions, so this recommendation is an LLM
+judgement (Qwen 3.7 Max by default, via `OPENROUTER_INFRA_KEY`; override with
+`OPENROUTER_RECOMMEND_MODEL`). Aisle then completes the plan's checkout through Agnic's
+Explore-then-Pay engine at that URL.
+
 If Agnic raises a step-up (passkey / expired CVV / currency), `wait_for_purchase` returns
 `APPROVAL_REQUIRED` with a link — the user completes it, then Hermes calls
 `aisle__wait_for_purchase` again. **Aisle dispatches at most once per approval** and never
@@ -28,6 +48,7 @@ integration in their coding agent afterwards.
 
 | Tool | Does |
 |---|---|
+| `aisle__find_tool` | Goal → best-fit SaaS/MCP tool + its checkout URL (LLM). `{ goal }` → `{ tool_name, checkout_url, why, alternatives }`. Never pays. |
 | `aisle__shop` | Discover + price a purchase; returns a summary for one approval. `{ prompt, country?, merchant_id?, sku?, quantity?, explore_url? }` |
 | `aisle__wait_for_purchase` | After approval, place the order and return the receipt. `{ shop_id }` |
 
