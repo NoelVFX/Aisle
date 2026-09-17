@@ -28,6 +28,9 @@ import { ExternalActionManager, LocalExternalActionExecutor } from "../web/exter
 import { LoginManager } from "../web/login-manager.js";
 import { loginPage } from "../web/login-page.js";
 import { FileProfileStore } from "../slow-lane/profiles.js";
+import { createAgnicClient } from "../agnic/client.js";
+import { AgnicCommerceManager } from "../agnic/manager.js";
+import { shopPage } from "../web/shop-page.js";
 import { MCP_APP_MIME, RECOVERY_WIDGET_CSP, RECOVERY_WIDGET_HTML, RECOVERY_WIDGET_URI } from "./widget.js";
 
 export interface AisleRuntime {
@@ -38,6 +41,8 @@ export interface AisleRuntime {
   approval: ApprovalServer;
   browsing: BrowsingManager;
   externalActions?: ExternalActionManager;
+  /** Agnic checkout rail (buy through any merchant's existing checkout). Present when AGNIC_TOKEN is set. */
+  agnicCommerce?: AgnicCommerceManager;
   enrollments: FileEnrollmentStore;
   log: (line: string) => void;
   close(): Promise<void>;
@@ -146,6 +151,16 @@ export async function startAisleRuntime(): Promise<AisleRuntime> {
     loginManager,
     publicUrl: () => publicUrl,
   });
+  // Agnic checkout rail: buy through any merchant's existing checkout (hosted engine,
+  // vaulted card, verifiable receipt). Present only when a server-side token is set.
+  const agnicToken = process.env["AGNIC_TOKEN"];
+  const agnicCommerce = agnicToken
+    ? new AgnicCommerceManager({
+        agnic: createAgnicClient(agnicToken, process.env["AGNIC_BASE_URL"] ? { baseUrl: process.env["AGNIC_BASE_URL"] } : {}),
+        publicUrl: () => publicUrl,
+        ...(process.env["AGNIC_DEFAULT_COUNTRY"] ? { defaultCountry: process.env["AGNIC_DEFAULT_COUNTRY"] } : {}),
+      })
+    : undefined;
 
   const webRoutes = async (req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> => {
     const send = (status: number, body?: unknown, type = "application/json") => {
@@ -225,6 +240,27 @@ export async function startAisleRuntime(): Promise<AisleRuntime> {
         return send(400, { error: err instanceof Error ? err.message : String(err) }), true;
       }
     }
+    // Agnic purchase approval: GET the page, POST approve, GET status.
+    const shopPageMatch = p.match(/^\/shop\/([^/]+)$/);
+    if (req.method === "GET" && shopPageMatch?.[1]) {
+      const pend = agnicCommerce?.pending(decodeURIComponent(shopPageMatch[1]));
+      if (!pend) return send(404, "<h1>Unknown or expired purchase</h1>", "text/html; charset=utf-8"), true;
+      const total = (() => { try { return new Intl.NumberFormat("en", { style: "currency", currency: pend.currency }).format(pend.total_minor / 100); } catch { return `${(pend.total_minor / 100).toFixed(2)} ${pend.currency}`; } })();
+      return send(200, shopPage(decodeURIComponent(shopPageMatch[1]), pend.summary, total), "text/html; charset=utf-8"), true;
+    }
+    const shopApi = p.match(/^\/api\/shop\/([^/]+)\/(approve|status)$/);
+    if (shopApi?.[1] && shopApi[2] && agnicCommerce) {
+      const id = decodeURIComponent(shopApi[1]);
+      if (req.method === "POST" && shopApi[2] === "approve") {
+        const body = await readJson(req);
+        const r = agnicCommerce.approve(id, typeof body["text"] === "string" ? body["text"] : undefined);
+        return r.ok ? (send(200, r), true) : (send(400, r), true);
+      }
+      if (req.method === "GET" && shopApi[2] === "status") {
+        const pend = agnicCommerce.pending(id);
+        return send(pend ? 200 : 404, pend ?? { error: "UNKNOWN_SHOP" }), true;
+      }
+    }
     return false;
   };
 
@@ -249,6 +285,7 @@ export async function startAisleRuntime(): Promise<AisleRuntime> {
     approval,
     browsing,
     externalActions,
+    ...(agnicCommerce ? { agnicCommerce } : {}),
     enrollments,
     log,
     close: async () => {
@@ -300,7 +337,7 @@ function progressFor(extra: Extra, log: (line: string) => void): Progress {
 /** Register Aisle's namespaced vendor tools plus its own tools on an MCP server. */
 export function registerAisleTools(
   server: McpServer,
-  runtime: Pick<AisleRuntime, "gateway" | "log"> & { externalActions?: ExternalActionManager },
+  runtime: Pick<AisleRuntime, "gateway" | "log"> & { externalActions?: ExternalActionManager; agnicCommerce?: AgnicCommerceManager },
   taskFor: (extra: { sessionId?: string }) => string,
 ): void {
   const { gateway, log } = runtime;
@@ -349,6 +386,53 @@ export function registerAisleTools(
     async ({ recovery_id }) => {
       if (!runtime.externalActions) return { content: [{ type: "text", text: JSON.stringify({ status: "RECOVERY_FAILED", error: "EXTERNAL_ACTIONS_NOT_CONFIGURED" }) }], isError: true };
       const result = await runtime.externalActions.wait(recovery_id);
+      return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result };
+    },
+  );
+
+  // --- Agnic commerce rail: buy through any merchant's checkout with one approval. ---
+  const agnicMissing = { content: [{ type: "text" as const, text: JSON.stringify({ status: "FAILED", error: "AGNIC_NOT_CONFIGURED: set AGNIC_TOKEN on the server to enable purchases." }) }], isError: true };
+  server.registerTool(
+    "aisle__shop",
+    {
+      description:
+        "Buy something through a merchant's existing checkout via Agnic — discover/price it and return a summary for ONE human approval, no merchant integration. Describe the purchase in `prompt` (e.g. \"a hex token fidget\"); optionally pin a merchant_id + sku, or an explore_url to onboard a shop first. The model never pays: it returns AWAITING_APPROVAL with an approve link. Use for buying a product/plan/credits; ends at a receipt (the user does their own setup after).",
+      inputSchema: {
+        prompt: z.string().min(1).describe("What to buy, in plain language."),
+        country: z.string().length(2).optional().describe("Market for search: US, GB, CA or AU."),
+        merchant_id: z.string().optional().describe("Skip search: buy from this merchant."),
+        sku: z.string().optional().describe("The exact product to buy (with merchant_id or explore_url)."),
+        quantity: z.number().int().positive().max(50).optional(),
+        explore_url: z.string().url().optional().describe("Onboard this shop (Explore) before buying."),
+      },
+      _meta: widgetMeta,
+    },
+    async ({ prompt, country, merchant_id, sku, quantity, explore_url }, extra) => {
+      if (!runtime.agnicCommerce) return agnicMissing;
+      const result = await runtime.agnicCommerce.shop({
+        taskId: taskFor(extra as unknown as Extra),
+        prompt,
+        ...(country ? { country } : {}),
+        ...(merchant_id ? { merchantId: merchant_id } : {}),
+        ...(sku ? { sku } : {}),
+        ...(quantity ? { quantity } : {}),
+        ...(explore_url ? { exploreUrl: explore_url } : {}),
+      });
+      return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result };
+    },
+  );
+
+  server.registerTool(
+    "aisle__wait_for_purchase",
+    {
+      description:
+        "After the user approves a purchase (from aisle__shop's AWAITING_APPROVAL), place and follow the order and return the receipt. Poll this with the shop_id; do NOT re-run aisle__shop. If it returns APPROVAL_REQUIRED, show the link, let the user complete the step-up, then call this again.",
+      inputSchema: { shop_id: z.string() },
+      _meta: widgetMeta,
+    },
+    async ({ shop_id }) => {
+      if (!runtime.agnicCommerce) return agnicMissing;
+      const result = await runtime.agnicCommerce.wait(shop_id);
       return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result };
     },
   );
