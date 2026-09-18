@@ -63,9 +63,41 @@ body {
   animation: green-drift 32s var(--ease-in-out) infinite alternate;
   will-change: transform, filter;
 }
+.aurora::before,
+.aurora::after {
+  content: "";
+  position: absolute;
+  inset: -22%;
+  pointer-events: none;
+  filter: blur(52px);
+  mix-blend-mode: screen;
+  will-change: transform, opacity;
+}
+.aurora::before {
+  background:
+    radial-gradient(34% 30% at 18% 30%, rgba(28, 185, 125, 0.36), transparent 72%),
+    radial-gradient(30% 36% at 76% 24%, rgba(187, 238, 72, 0.34), transparent 70%),
+    radial-gradient(36% 28% at 58% 82%, rgba(9, 122, 91, 0.30), transparent 74%);
+  animation: gradient-drift-a 24s var(--ease-in-out) infinite alternate;
+}
+.aurora::after {
+  background:
+    radial-gradient(28% 34% at 82% 68%, rgba(114, 224, 71, 0.30), transparent 72%),
+    radial-gradient(32% 28% at 32% 76%, rgba(0, 154, 116, 0.26), transparent 72%);
+  opacity: 0.82;
+  animation: gradient-drift-b 29s var(--ease-in-out) infinite alternate;
+}
 @keyframes green-drift {
   from { transform: scale(1.04) translate3d(-0.8%, 0.4%, 0); filter: saturate(0.98) brightness(0.94); }
   to { transform: scale(1.12) translate3d(0.8%, -0.6%, 0); filter: saturate(1.08) brightness(1.02); }
+}
+@keyframes gradient-drift-a {
+  from { transform: translate3d(-4%, 3%, 0) rotate(-2deg) scale(0.98); opacity: 0.78; }
+  to { transform: translate3d(5%, -4%, 0) rotate(3deg) scale(1.12); opacity: 1; }
+}
+@keyframes gradient-drift-b {
+  from { transform: translate3d(5%, -3%, 0) rotate(3deg) scale(1.08); }
+  to { transform: translate3d(-6%, 5%, 0) rotate(-4deg) scale(0.96); }
 }
 
 /* Scrim keeps text readable over the bright aurora without killing the colour. */
