@@ -366,7 +366,7 @@ export function registerAisleTools(
   server.registerTool(
     "aisle__execute_web_action",
     {
-      description: "Run a prompt-driven action on a SaaS in a local browser signed in with your saved profile — e.g. \"generate an image on textto-image\" or \"top up credits on higgsfield\". Name the vendor OR paste its https link; a bare name resolves to a vendor you've configured or logged in to (never a guessed domain). Works for any vendor with no merchant integration. Use it to generate/act or to top up on demand, not only after a 402. The model operates the site but never pays: any checkout goes through the normal one-approval Aisle top-up flow.",
+      description: "USE THIS TOOL to DO something on a SaaS the user already uses (signed in with their saved profile), or to top up credits on that site — e.g. \"generate an image on textto-image\", \"top up credits on higgsfield\", or \"use Aisle to top up on <site>\". This is for acting on / topping up an EXISTING account on a named site; to buy a NEW product or subscribe to a plan through checkout, use aisle__shop instead. Name the vendor OR paste its https link; a bare name resolves to a vendor you've configured or logged in to (never a guessed domain). Works for any vendor with no integration. The model operates the site but never pays: any checkout goes through the normal one-approval Aisle top-up flow.",
       inputSchema: { prompt: z.string(), url: z.string().url().optional(), max_steps: z.number().int().positive().max(20).optional() },
       _meta: widgetMeta,
     },
@@ -398,7 +398,7 @@ export function registerAisleTools(
     "aisle__find_tool",
     {
       description:
-        "Recommend the best-fit MCP tool / SaaS for a goal and return its checkout URL — the discovery step before a purchase. Describe the goal in `goal` (e.g. \"an MCP tool for my site that sends email autonomously\"); returns { tool_name, checkout_url, why, alternatives }. Show the user the pick, then pass checkout_url to aisle__shop as explore_url to buy the plan. This only names a tool and a URL — it never pays.",
+        "USE THIS TOOL when the user wants a tool/SaaS/MCP server for a GOAL but hasn't named a specific product — e.g. \"I want an MCP tool that sends email autonomously\", \"what should I use to add payments?\", \"find me a SaaS for X\", or \"use Aisle to find a tool for …\". It recommends the best-fit tool and returns its checkout URL + suggested plan: { tool_name, checkout_url, plan, why, alternatives }. Show the user the pick, then to buy it call aisle__shop with explore_url = checkout_url and plan = the suggested plan. This only names a tool and a URL — it never pays.",
       inputSchema: { goal: z.string().min(1).describe("What the user wants a tool to do.") },
       annotations: { readOnlyHint: true },
     },
@@ -422,7 +422,7 @@ export function registerAisleTools(
     "aisle__shop",
     {
       description:
-        "Buy something through a merchant's existing checkout via Agnic — discover/price it and return a summary for ONE human approval, no merchant integration. Describe the purchase in `prompt` (e.g. \"a hex token fidget\"); optionally pin a merchant_id + sku, or an explore_url to onboard a shop first. The model never pays: it returns AWAITING_APPROVAL with an approve link. Use for buying a product/plan/credits; ends at a receipt (the user does their own setup after).",
+        "USE THIS TOOL to buy, purchase, order, check out, or pay for anything — a product, a SaaS/MCP plan or subscription, or a credits pack — through a real merchant's existing checkout (Agnic rail, no merchant integration). This is Aisle's purchase tool: it is the correct choice for ANY request like \"buy me …\", \"purchase …\", \"order …\", \"get me …\", \"subscribe to …\", or \"check out …\", and ALWAYS when the user says \"use Aisle\" / \"with Aisle\" to buy something. Do NOT use a generic web/browser/search tool for a purchase — use this. Describe the item in `prompt` (e.g. \"a hex token fidget\"); optionally pin merchant_id + sku, or pass explore_url (a SaaS pricing page) + plan to onboard and buy a plan. The model never pays — it returns AWAITING_APPROVAL with an approve link; after the user approves, call aisle__wait_for_purchase. If it returns CHOOSE_PLAN, show the options and call again with the chosen sku. Ends at a receipt.",
       inputSchema: {
         prompt: z.string().min(1).describe("What to buy, in plain language."),
         country: z.string().length(2).optional().describe("Market for search: US, GB, CA or AU."),

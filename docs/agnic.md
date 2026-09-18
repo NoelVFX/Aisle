@@ -56,19 +56,26 @@ integration in their coding agent afterwards.
 
 ## How to invoke it (so the agent doesn't wander off)
 
-A plain "buy me a hex token fidget" is ambiguous — Hermes may reach for some other
-shopping/browser skill instead of Aisle. Two ways to route deterministically:
+How you trigger Aisle depends on the client:
 
-- **Slash command (deterministic):** `/mcp__aisle__buy <what to buy>`
-  e.g. `/mcp__aisle__buy a hex token fidget` — or for a goal:
-  `/mcp__aisle__buy an MCP tool that sends email autonomously`.
-  This hard-routes through `aisle__find_tool` → `aisle__shop` → `aisle__wait_for_purchase`
-  and forbids any other payment/shopping tool. (Credits/actions on a live SaaS use the
-  sibling command `/mcp__aisle__topup <what to do>`.)
-- **Natural language:** prefix with **"Use Aisle to …"** — e.g. "Use Aisle to buy a hex
-  token fidget." Naming Aisle steers the model to the `aisle__*` tools.
+- **Natural-language agents (Hermes CLI, most MCP clients):** there are no slash commands —
+  the agent picks a tool by reading tool descriptions. Route to Aisle by **naming it and using
+  a buy/act verb**:
+  - Buy a product/plan: **"Use Aisle to buy a hex token fidget"**, "Use Aisle to purchase the
+    Resend Pro plan".
+  - Buy for a goal (discover first): **"Use Aisle to find and buy an MCP tool that sends email
+    autonomously"** → runs `aisle__find_tool` then `aisle__shop`.
+  - Act on / top up a site you use: **"Use Aisle to top up credits on higgsfield"**.
 
-The slash command is the reliable one; the natural-language prefix is the convenience form.
+  The Aisle tool descriptions claim the verbs (buy/purchase/order/subscribe/check out/top up)
+  and the phrase "use Aisle", so these route to `aisle__*` rather than a generic web tool.
+
+- **Claude Code clients only:** the same flows are also exposed as MCP-prompt slash commands —
+  `/mcp__aisle__buy <what to buy>` and `/mcp__aisle__topup <what to do>`. These do **not** exist
+  in a plain natural-language CLI like Hermes (typing them there returns "unknown command").
+
+> Prompts/slash commands are a per-client convenience; the **tools** (`aisle__shop`,
+> `aisle__find_tool`, `aisle__wait_for_purchase`) are universal and are what actually run.
 
 ## MCP tools
 
