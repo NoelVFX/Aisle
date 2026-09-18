@@ -516,4 +516,34 @@ export function registerAisleTools(
       ],
     }),
   );
+
+  // A slash command (Claude Code: /mcp__aisle__buy <request>) that deterministically
+  // routes a PURCHASE through Aisle's Agnic checkout rail — no tool ambiguity, so the
+  // agent never wanders off to some other shopping/web skill.
+  server.registerPrompt(
+    "buy",
+    {
+      title: "Aisle buy (Agnic checkout)",
+      description: 'Buy a product, plan, or credits through Aisle\'s Agnic checkout, or find the best tool for a goal first. Argument: what to buy or the goal — e.g. "a hex token fidget" or "an MCP tool that sends email autonomously".',
+      argsSchema: { request: z.string().describe('What to buy or the goal, e.g. "a hex token fidget" or "an email-sending MCP tool".') },
+    },
+    ({ request }) => ({
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text:
+              `Complete this purchase through Aisle's Agnic checkout rail ONLY. Request: ${JSON.stringify(request)}. ` +
+              `Do NOT use any other shopping, browser, payment, or marketplace tool — it must go through Aisle so it gets exactly one human approval and a verifiable receipt.\n` +
+              `1. If the request describes a GOAL or a need for a tool (e.g. "an MCP tool that sends email") rather than a specific product, first call aisle__find_tool with goal set to the request, then show me the recommended tool and its checkout_url. If it is already a concrete product, skip this step.\n` +
+              `2. Call aisle__shop with prompt set to the request. If you used aisle__find_tool, also pass explore_url set to its checkout_url. Pass merchant_id/sku only if I gave them.\n` +
+              `3. On AWAITING_APPROVAL, show me the summary, total, and approve_url, then STOP and wait — I approve on that page. Never place payment yourself.\n` +
+              `4. After I approve, call aisle__wait_for_purchase with the shop_id and poll it. If it returns APPROVAL_REQUIRED, show me the link, let me finish it, then call aisle__wait_for_purchase again. Do NOT re-run aisle__shop.\n` +
+              `5. When COMPLETED, show me the receipt (order id, amount, currency, status).`,
+          },
+        },
+      ],
+    }),
+  );
 }

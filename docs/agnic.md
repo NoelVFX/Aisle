@@ -44,6 +44,22 @@ If Agnic raises a step-up (passkey / expired CVV / currency), `wait_for_purchase
 polls by re-dispatching. It ends at the **receipt** — the user does their own setup and
 integration in their coding agent afterwards.
 
+## How to invoke it (so the agent doesn't wander off)
+
+A plain "buy me a hex token fidget" is ambiguous — Hermes may reach for some other
+shopping/browser skill instead of Aisle. Two ways to route deterministically:
+
+- **Slash command (deterministic):** `/mcp__aisle__buy <what to buy>`
+  e.g. `/mcp__aisle__buy a hex token fidget` — or for a goal:
+  `/mcp__aisle__buy an MCP tool that sends email autonomously`.
+  This hard-routes through `aisle__find_tool` → `aisle__shop` → `aisle__wait_for_purchase`
+  and forbids any other payment/shopping tool. (Credits/actions on a live SaaS use the
+  sibling command `/mcp__aisle__topup <what to do>`.)
+- **Natural language:** prefix with **"Use Aisle to …"** — e.g. "Use Aisle to buy a hex
+  token fidget." Naming Aisle steers the model to the `aisle__*` tools.
+
+The slash command is the reliable one; the natural-language prefix is the convenience form.
+
 ## MCP tools
 
 | Tool | Does |
