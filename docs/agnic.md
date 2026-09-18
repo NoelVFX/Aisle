@@ -69,6 +69,38 @@ If Agnic raises a step-up (passkey / expired CVV / currency), `wait_for_purchase
 polls by re-dispatching. It ends at the **receipt** — the user does their own setup and
 integration in their coding agent afterwards.
 
+## Personalised Explore (physical / Shopify track)
+
+Agnic returns a flat product list; the **ranking, the pitch, and the learning are Aisle's** —
+the part a bare Agnic wrapper can't copy. `aisle__browse` turns a search into a ranked, pitched
+shortlist and learns from what the user actually buys.
+
+```
+User → "show me some blazers"
+Hermes → aisle__browse { prompt: "blazer" }
+  → Agnic search → rank by persona + learned conversion → assign each a DIFFERENT pitch tone
+  → { products: [{ sku, title, price, merchant_id, tone, pitch, why }, …] }   (impression recorded)
+User picks one → Hermes → aisle__shop { merchant_id, sku }  → AWAITING_APPROVAL
+  → the pick is credited as a CONVERSION for that tone + attributes (tailors next time)
+```
+
+Three parts, one local **Preference Model** (`.aisle/personalization.json`, single-user, never
+sent to the merchant or the LLM as identity):
+
+1. **Multi-version pitches (A/B tones).** Each shown product gets a different tone — value,
+   aspirational, social-proof, expert, playful — chosen by an **epsilon-greedy bandit**: mostly
+   the tones that have converted for this user, occasionally the least-seen one to keep learning.
+2. **Personalisation (consented).** `aisle__set_profile { consent, about }` distils a short
+   self-description into coarse persona tags (e.g. *student, budget-conscious, smart-casual*) that
+   boost matching products — so "uni student + blazer" surfaces the cost-friendly, young-cut one
+   first. Stored only with `consent:true`; `consent:false` erases it.
+3. **Memory + conversion learning.** Every impression and proceed-to-buy updates per-tone and
+   per-attribute rates, so next session's shortlist is pre-tuned. The scoring is deliberately
+   **explainable** (each item carries a `why`), and `PreferenceModel.stats()` exposes the rates.
+
+Pitches and persona distillation use OpenRouter (`OPENROUTER_PITCH_MODEL`, default Qwen 3.7 Max)
+with a **templated fallback**, so Explore works offline / without a key.
+
 ## How to invoke it (so the agent doesn't wander off)
 
 ### One entry, auto-routed: `aisle__buy`
@@ -119,6 +151,8 @@ How you trigger Aisle depends on the client:
 | Tool | Does |
 |---|---|
 | `aisle__buy` | The single smart entry: classify physical vs SaaS and route (physical → Agnic; SaaS → vendor checkout / discovery). `{ prompt, country?, plan? }`. Never pays. |
+| `aisle__browse` | Personalised Explore: a ranked, pitched shortlist over Agnic's Shopify catalogue. `{ prompt, country?, count? }` → `{ products: [{ sku, title, price_minor, currency, merchant_id, tone, pitch, why }] }`. The user picks one → `aisle__shop { merchant_id, sku }`. Never pays. |
+| `aisle__set_profile` | Save/clear the user's local shopping profile (consented) so Explore is personalised. `{ consent, about?, budget_band?, country? }`. Stored locally only. |
 | `aisle__find_tool` | Goal → best-fit SaaS/MCP tool + checkout URL + plan (LLM). `{ goal }` → `{ tool_name, checkout_url, plan, why, alternatives }`. Never pays. |
 | `aisle__shop` | Discover + price a purchase; returns a summary for one approval, or `CHOOSE_PLAN { merchant_id, plans }` when a SaaS has several plans (pick, then call again with `merchant_id` + `sku`). `{ prompt, country?, merchant_id?, sku?, quantity?, explore_url?, plan? }` |
 | `aisle__wait_for_purchase` | After approval, place the order and return the receipt. `{ shop_id }` |

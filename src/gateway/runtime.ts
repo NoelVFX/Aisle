@@ -32,6 +32,8 @@ import { createAgnicClient } from "../agnic/client.js";
 import { AgnicCommerceManager } from "../agnic/manager.js";
 import { recommendTool } from "../agnic/recommend.js";
 import { classifyTrack } from "../agnic/classify.js";
+import { PreferenceModel } from "../agnic/personalization.js";
+import { generatePitches, distillPersona } from "../agnic/pitch.js";
 import { shopPage } from "../web/shop-page.js";
 import { MCP_APP_MIME, RECOVERY_WIDGET_CSP, RECOVERY_WIDGET_HTML, RECOVERY_WIDGET_URI } from "./widget.js";
 
@@ -45,6 +47,8 @@ export interface AisleRuntime {
   externalActions?: ExternalActionManager;
   /** Agnic checkout rail (buy through any merchant's existing checkout). Present when AGNIC_TOKEN is set. */
   agnicCommerce?: AgnicCommerceManager;
+  /** Local, consented preference model powering personalised Explore (ranking, pitches, learning). */
+  personalization: PreferenceModel;
   enrollments: FileEnrollmentStore;
   log: (line: string) => void;
   close(): Promise<void>;
@@ -163,6 +167,8 @@ export async function startAisleRuntime(): Promise<AisleRuntime> {
         ...(process.env["AGNIC_DEFAULT_COUNTRY"] ? { defaultCountry: process.env["AGNIC_DEFAULT_COUNTRY"] } : {}),
       })
     : undefined;
+  // Local, consented preference model for personalised Explore (ranking + pitch tone learning).
+  const personalization = new PreferenceModel(join(stateDir, "personalization.json"));
 
   const webRoutes = async (req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> => {
     const send = (status: number, body?: unknown, type = "application/json") => {
@@ -288,6 +294,7 @@ export async function startAisleRuntime(): Promise<AisleRuntime> {
     browsing,
     externalActions,
     ...(agnicCommerce ? { agnicCommerce } : {}),
+    personalization,
     enrollments,
     log,
     close: async () => {
@@ -339,7 +346,7 @@ function progressFor(extra: Extra, log: (line: string) => void): Progress {
 /** Register Aisle's namespaced vendor tools plus its own tools on an MCP server. */
 export function registerAisleTools(
   server: McpServer,
-  runtime: Pick<AisleRuntime, "gateway" | "log"> & { externalActions?: ExternalActionManager; agnicCommerce?: AgnicCommerceManager },
+  runtime: Pick<AisleRuntime, "gateway" | "log"> & { externalActions?: ExternalActionManager; agnicCommerce?: AgnicCommerceManager; personalization?: PreferenceModel },
   taskFor: (extra: { sessionId?: string }) => string,
 ): void {
   const { gateway, log } = runtime;
@@ -466,6 +473,77 @@ export function registerAisleTools(
     },
   );
 
+  // --- Personalised Explore: a ranked, pitched shortlist that learns from what the user buys. ---
+  server.registerTool(
+    "aisle__browse",
+    {
+      description:
+        "Explore physical products for a shopping request and return a RANKED, PITCHED shortlist — Aisle's personalised discovery over Agnic's Shopify catalogue. Use this before buying when the user is browsing/deciding (\"show me options for …\", \"find me a …\", \"what blazers can I get\"). Each result carries a one-line pitch and a merchant_id + sku; show them to the user, and when they choose one, call aisle__shop with that merchant_id + sku (that choice tailors future picks). Ranking + pitches use the user's local, consented profile (set via aisle__set_profile). Never pays.",
+      inputSchema: {
+        prompt: z.string().min(1).describe("What the user is shopping for, in plain language."),
+        country: z.string().length(2).optional().describe("Market: US, GB, CA or AU."),
+        count: z.number().int().positive().max(8).optional().describe("How many to show (default 5)."),
+      },
+    },
+    async ({ prompt, country, count }, extra) => {
+      if (!runtime.agnicCommerce) return agnicMissing;
+      if (!runtime.personalization) return asJson({ status: "FAILED", error: "PERSONALIZATION_UNAVAILABLE" }, true);
+      try {
+        const n = count ?? 5;
+        const products = await runtime.agnicCommerce.search(prompt, country, Math.max(n * 2, 8));
+        if (products.length === 0) return asJson({ status: "NO_RESULTS", prompt, next: "No products found. Try different wording or a different country." });
+        const ranked = runtime.personalization.rank(products, n);
+        const pitched = await generatePitches(ranked, runtime.personalization.profile());
+        runtime.personalization.recordImpressions(pitched.map((p) => ({ sku: p.product.sku, tone: p.tone, attrs: p.attrs })));
+        const items = pitched.map((p) => ({
+          sku: p.product.sku,
+          title: p.product.title,
+          ...(p.product.price_minor !== undefined ? { price_minor: p.product.price_minor } : {}),
+          ...(p.product.currency ? { currency: p.product.currency } : {}),
+          ...(p.product.merchant?.merchant_id ? { merchant_id: p.product.merchant.merchant_id } : {}),
+          tone: p.tone,
+          pitch: p.pitch,
+          why: p.why,
+        }));
+        const taskId = taskFor(extra as unknown as Extra);
+        const result = { status: "BROWSING", task_id: taskId, products: items, next: "Show these to the user with their pitches. When they pick one, call aisle__shop with its merchant_id + sku — that records their choice to improve future recommendations. Nothing is charged until they approve." };
+        return asJson(result);
+      } catch (err) {
+        return asJson({ status: "FAILED", error: err instanceof Error ? err.message : String(err) }, true);
+      }
+    },
+  );
+
+  server.registerTool(
+    "aisle__set_profile",
+    {
+      description:
+        "Save (or clear) the user's shopping profile so Aisle can personalise Explore — used with their CONSENT before their first purchase, or when they want tailored picks. Pass `about` (a short freeform self-description, e.g. \"uni student on a budget, smart-casual style\") which is distilled into coarse persona tags, and/or an explicit budget_band. Stored LOCALLY only, never sent to the merchant, and used solely to rank/pitch products. Call with consent=false to erase everything stored.",
+      inputSchema: {
+        consent: z.boolean().describe("Must be true to store anything; false clears the profile."),
+        about: z.string().max(600).optional().describe("Short freeform self-description; distilled to persona tags."),
+        budget_band: z.enum(["low", "mid", "high"]).optional(),
+        country: z.string().length(2).optional(),
+      },
+    },
+    async ({ consent, about, budget_band, country }) => {
+      if (!runtime.personalization) return asJson({ status: "FAILED", error: "PERSONALIZATION_UNAVAILABLE" }, true);
+      if (!consent) {
+        runtime.personalization.setProfile({ consent: false });
+        return asJson({ status: "PROFILE_CLEARED", note: "Your shopping profile was erased. Nothing personal is stored." });
+      }
+      const distilled = about ? await distillPersona(about) : { tags: [] as string[] };
+      const profile = runtime.personalization.setProfile({
+        consent: true,
+        tags: distilled.tags,
+        ...(budget_band ? { budgetBand: budget_band } : distilled.budgetBand ? { budgetBand: distilled.budgetBand } : {}),
+        ...(country ? { country } : {}),
+        ...(about ? { note: about } : {}),
+      });
+      return asJson({ status: "PROFILE_SAVED", profile, note: "Stored locally only — never sent to the merchant; used solely to rank and pitch products for you." });
+    },
+  );
+
   server.registerTool(
     "aisle__shop",
     {
@@ -494,6 +572,9 @@ export function registerAisleTools(
         ...(explore_url ? { exploreUrl: explore_url } : {}),
         ...(plan ? { planHint: plan } : {}),
       });
+      // Proceed-to-buy = conversion: the user chose this specific sku (from a browse), so
+      // credit the tone/attributes it was shown with, tailoring future Explore.
+      if (sku && result.status === "AWAITING_APPROVAL") runtime.personalization?.recordConversion(sku);
       return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result };
     },
   );

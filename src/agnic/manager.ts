@@ -27,6 +27,7 @@ import {
   readOrder,
   searchProducts,
   waitForApproval,
+  type AgnicProduct,
   type ApprovedRequest,
   type CatalogueItem,
   type Constraints,
@@ -157,6 +158,11 @@ export class AgnicCommerceManager {
   private readonly offeredPlans = new Map<string, CatalogueItem>();
 
   constructor(private readonly deps: AgnicManagerDeps) {}
+
+  /** Raw product search for the Explore step (personalised ranking happens above this). */
+  async search(prompt: string, country?: string, limit = 8): Promise<AgnicProduct[]> {
+    return searchProducts(this.deps.agnic, prompt, country ?? this.deps.defaultCountry ?? "CA", limit);
+  }
 
   /** Discover + price the ask and return a summary for one human approval. */
   async shop(request: ShopRequest): Promise<ShopResult> {
