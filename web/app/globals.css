@@ -1,11 +1,11 @@
 /* Aisle — design tokens + system. One dark theme, one accent, one radius scale. */
 
 :root {
-  /* Deep indigo base; surfaces are translucent glass so the moving aurora tints through. */
-  --bg: #0b0819;
-  --surface: rgba(24, 20, 46, 0.55);
-  --surface-2: rgba(30, 25, 54, 0.72);
-  --surface-3: rgba(48, 42, 78, 0.66);
+  /* Deep green base; surfaces are translucent glass so the moving image tints through. */
+  --bg: #06120e;
+  --surface: rgba(7, 27, 22, 0.55);
+  --surface-2: rgba(9, 34, 27, 0.72);
+  --surface-3: rgba(21, 59, 44, 0.66);
   --border: rgba(255, 255, 255, 0.10);
   --border-strong: rgba(255, 255, 255, 0.18);
 
@@ -52,27 +52,26 @@ body {
 }
 .mono { font-family: var(--font-geist-mono), ui-monospace, monospace; font-feature-settings: "tnum" 1; }
 
-/* ---- Moving aurora background (recreated from the purple reference, license-safe) ---- */
+/* ---- Supplied green-light background with slow ambient motion ---- */
 .bg-layer { position: fixed; inset: 0; pointer-events: none; }
 .aurora {
   z-index: -5;
   overflow: hidden;
-  background: radial-gradient(130% 120% at 50% -10%, #2a1c63 0%, #1a1140 40%, #0c0820 75%, #080513 100%);
+  background: #06120e url('/aisle-green-background.jpg') center center / cover no-repeat;
+  transform: scale(1.04);
+  transform-origin: center;
+  animation: green-drift 32s var(--ease-in-out) infinite alternate;
+  will-change: transform, filter;
 }
-.blob { position: absolute; border-radius: 50%; filter: blur(70px); mix-blend-mode: screen; will-change: transform; }
-.blob-1 { width: 62vw; height: 62vw; top: -20vw; left: 6vw;  background: radial-gradient(circle, #e089e6 0%, rgba(224,137,230,0) 62%); opacity: 0.95; animation: drift1 24s var(--ease-in-out) infinite alternate; }
-.blob-2 { width: 58vw; height: 58vw; top: -4vw;  right: -14vw; background: radial-gradient(circle, #7a5cf0 0%, rgba(122,92,240,0) 60%); opacity: 0.9; animation: drift2 30s var(--ease-in-out) infinite alternate; }
-.blob-3 { width: 54vw; height: 54vw; bottom: -22vw; left: -10vw; background: radial-gradient(circle, #4b3ac2 0%, rgba(75,58,194,0) 60%); opacity: 0.85; animation: drift3 27s var(--ease-in-out) infinite alternate; }
-.blob-4 { width: 42vw; height: 42vw; bottom: -14vw; right: 8vw;  background: radial-gradient(circle, #c96fd8 0%, rgba(201,111,216,0) 62%); opacity: 0.7; animation: drift4 33s var(--ease-in-out) infinite alternate; }
-@keyframes drift1 { from { transform: translate3d(0,0,0) scale(1); } to { transform: translate3d(9vw, 7vw, 0) scale(1.16); } }
-@keyframes drift2 { from { transform: translate3d(0,0,0) scale(1.05); } to { transform: translate3d(-11vw, 9vw, 0) scale(0.92); } }
-@keyframes drift3 { from { transform: translate3d(0,0,0) scale(1); } to { transform: translate3d(12vw, -8vw, 0) scale(1.2); } }
-@keyframes drift4 { from { transform: translate3d(0,0,0) scale(0.95); } to { transform: translate3d(-8vw, -10vw, 0) scale(1.14); } }
+@keyframes green-drift {
+  from { transform: scale(1.04) translate3d(-0.8%, 0.4%, 0); filter: saturate(0.98) brightness(0.94); }
+  to { transform: scale(1.12) translate3d(0.8%, -0.6%, 0); filter: saturate(1.08) brightness(1.02); }
+}
 
 /* Scrim keeps text readable over the bright aurora without killing the colour. */
-.scrim { z-index: -4; background: linear-gradient(180deg, rgba(9,6,22,0.42) 0%, rgba(9,6,22,0.30) 42%, rgba(8,5,20,0.62) 100%); }
+.scrim { z-index: -4; background: linear-gradient(180deg, rgba(2,12,9,0.48) 0%, rgba(2,16,11,0.26) 42%, rgba(1,9,7,0.68) 100%); }
 /* Vignette darkens the edges. */
-.vignette { z-index: -3; background: radial-gradient(125% 105% at 50% 42%, transparent 52%, rgba(4,3,12,0.70) 100%); }
+.vignette { z-index: -3; background: radial-gradient(125% 105% at 50% 42%, transparent 52%, rgba(1,8,6,0.72) 100%); }
 /* Film grain, matching the reference texture. */
 .grain {
   z-index: -2; opacity: 0.14; mix-blend-mode: overlay;
