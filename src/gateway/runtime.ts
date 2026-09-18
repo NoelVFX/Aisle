@@ -398,7 +398,7 @@ export function registerAisleTools(
     "aisle__find_tool",
     {
       description:
-        "Recommend the best-fit MCP tool / SaaS for a goal and return its checkout URL — the discovery step before a purchase. Describe the goal in `goal` (e.g. \"an MCP tool for my site that sends email autonomously\"); returns { tool_name, checkout_url, why, alternatives }. Show the user the pick, then pass checkout_url to aisle__shop as explore_url to buy the plan. This only names a tool and a URL — it never pays.",
+        "Recommend the best-fit MCP tool / SaaS for a goal and return its checkout URL — the discovery step before a purchase. Describe the goal in `goal` (e.g. \"an MCP tool for my site that sends email autonomously\"); returns { tool_name, checkout_url, plan_hint?, why, alternatives }. Show the user the pick, then pass checkout_url to aisle__shop as explore_url (and plan_hint, if returned) to buy the plan. This only names a tool and a URL — it never pays.",
       inputSchema: { goal: z.string().min(1).describe("What the user wants a tool to do.") },
       annotations: { readOnlyHint: true },
     },
@@ -408,7 +408,10 @@ export function registerAisleTools(
         const result = {
           status: "RECOMMENDED",
           ...rec,
-          next: `Show the user "${rec.tool_name}" (${rec.checkout_url}) and its rationale. To buy its plan, call aisle__shop with explore_url set to that checkout_url. The user still approves before anything is charged.`,
+          next:
+            `Show the user "${rec.tool_name}" (${rec.checkout_url}) and its rationale. To buy its plan, call aisle__shop with explore_url set to that checkout_url` +
+            (rec.plan_hint ? ` and plan_hint "${rec.plan_hint}"` : "") +
+            ". It may return CHOOSE_PLAN: show the user the plans and let them pick (do not choose for them), then call aisle__shop again with merchant_id and the chosen sku. The user still approves before anything is charged.",
         };
         return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result };
       } catch (err) {
@@ -422,7 +425,7 @@ export function registerAisleTools(
     "aisle__shop",
     {
       description:
-        "Buy something through a merchant's existing checkout via Agnic — discover/price it and return a summary for ONE human approval, no merchant integration. Describe the purchase in `prompt` (e.g. \"a hex token fidget\"); optionally pin a merchant_id + sku, or an explore_url to onboard a shop first. The model never pays: it returns AWAITING_APPROVAL with an approve link. Use for buying a product/plan/credits; ends at a receipt (the user does their own setup after).",
+        "Buy something through a merchant's existing checkout via Agnic — discover/price it and return a summary for ONE human approval, no merchant integration. Describe the purchase in `prompt` (e.g. \"a hex token fidget\"); optionally pin a merchant_id + sku, or an explore_url to onboard a shop first. An explored shop with several plans returns CHOOSE_PLAN { merchant_id, plans }: let the user pick (plan_hint only ranks them — never choose for them), then call again with merchant_id + the chosen sku. The model never pays: it returns AWAITING_APPROVAL with an approve link. Use for buying a product/plan/credits; ends at a receipt (the user does their own setup after).",
       inputSchema: {
         prompt: z.string().min(1).describe("What to buy, in plain language."),
         country: z.string().length(2).optional().describe("Market for search: US, GB, CA or AU."),
@@ -430,10 +433,11 @@ export function registerAisleTools(
         sku: z.string().optional().describe("The exact product to buy (with merchant_id or explore_url)."),
         quantity: z.number().int().positive().max(50).optional(),
         explore_url: z.string().url().optional().describe("Onboard this shop (Explore) before buying."),
+        plan_hint: z.string().max(200).optional().describe("With explore_url: the plan that likely fits (e.g. \"Pro\"). Only ranks the CHOOSE_PLAN list; never picks a plan."),
       },
       _meta: widgetMeta,
     },
-    async ({ prompt, country, merchant_id, sku, quantity, explore_url }, extra) => {
+    async ({ prompt, country, merchant_id, sku, quantity, explore_url, plan_hint }, extra) => {
       if (!runtime.agnicCommerce) return agnicMissing;
       const result = await runtime.agnicCommerce.shop({
         taskId: taskFor(extra as unknown as Extra),
@@ -443,6 +447,7 @@ export function registerAisleTools(
         ...(sku ? { sku } : {}),
         ...(quantity ? { quantity } : {}),
         ...(explore_url ? { exploreUrl: explore_url } : {}),
+        ...(plan_hint ? { planHint: plan_hint } : {}),
       });
       return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result };
     },

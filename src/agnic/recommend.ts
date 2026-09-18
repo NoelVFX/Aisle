@@ -8,9 +8,11 @@
  * return its canonical pricing/checkout URL; the agent then feeds that url into
  * `aisle__shop` as `explore_url`, and Agnic completes the real checkout there.
  *
- *   goal → recommendTool() → { tool_name, checkout_url, … } → aisle__shop{ explore_url } → receipt
+ *   goal → recommendTool() → { tool_name, checkout_url, plan_hint?, … }
+ *        → aisle__shop{ explore_url, plan_hint } → CHOOSE_PLAN (user picks) → … → receipt
  *
- * The model only NAMES a tool and a URL; it never pays and never touches a page.
+ * The model only NAMES a tool, a URL and (optionally) a plan to suggest; it never
+ * pays, never touches a page, and never picks the sku — that comes from Agnic.
  */
 
 import type { OpenRouterFetch } from "../slow-lane/computer-use.js";
@@ -32,6 +34,11 @@ export interface ToolRecommendation {
   why: string;
   /** Canonical pricing/checkout page — feed this to aisle__shop as explore_url. */
   checkout_url: string;
+  /**
+   * The plan that likely fits, e.g. "Pro" or "Pro (~$20/month)" — feed this to
+   * aisle__shop as plan_hint. A suggestion only: the user still picks the plan.
+   */
+  plan_hint?: string;
   /** Whether the tool ships an MCP server (best-effort model knowledge). */
   has_mcp: boolean;
   /** Runner-up options the user might prefer. */
@@ -71,9 +78,10 @@ const PROMPT = (goal: string): string =>
   `You are a procurement advisor for developers. A developer wants to BUY a SaaS or MCP tool to accomplish a goal, then have an automated agent purchase its plan.\n` +
   `Goal: ${goal}\n\n` +
   `Recommend the SINGLE best-fit, widely-used, reputable tool. Prefer tools that ship an official MCP server or a clean API. ` +
-  `Give its CANONICAL pricing or checkout URL (the public pricing page), e.g. https://resend.com/pricing — a real, current https URL, no tracking params, no guesses at deep checkout links.\n\n` +
+  `Give its CANONICAL pricing or checkout URL (the public pricing page), e.g. https://resend.com/pricing — a real, current https URL, no tracking params, no guesses at deep checkout links.\n` +
+  `In plan_hint, name the plan tier that best fits the goal, e.g. "Pro" or "Pro (~$20/month)" — a short plan name, optionally with rough price/billing; use "" if unsure.\n\n` +
   `Return ONLY minified JSON, no prose, no markdown fences:\n` +
-  `{"tool_name":"","vendor":"","category":"","why":"<=20 words","checkout_url":"https://...","has_mcp":true,"alternatives":[{"tool_name":"","why":"<=12 words"},{"tool_name":"","why":"<=12 words"}]}`;
+  `{"tool_name":"","vendor":"","category":"","why":"<=20 words","checkout_url":"https://...","plan_hint":"","has_mcp":true,"alternatives":[{"tool_name":"","why":"<=12 words"},{"tool_name":"","why":"<=12 words"}]}`;
 
 /** Extract the first JSON object from a model reply, tolerating fences/prose around it. */
 function extractJson(text: string): Record<string, unknown> {
@@ -102,6 +110,8 @@ function coerce(obj: Record<string, unknown>, modelUsed: string | undefined): To
   const str = (v: unknown, fallback = ""): string => (typeof v === "string" && v.trim() ? v.trim() : fallback);
   const tool = str(obj["tool_name"], "unknown");
   const { url, warning } = normalizeUrl(obj["checkout_url"]);
+  // A short name only (aisle__shop caps plan_hint at 200 chars); anything else is dropped.
+  const planHint = str(obj["plan_hint"]).slice(0, 200);
   const altRaw = Array.isArray(obj["alternatives"]) ? obj["alternatives"] : [];
   const alternatives: ToolAlternative[] = altRaw
     .filter((a): a is Record<string, unknown> => typeof a === "object" && a !== null)
@@ -114,6 +124,7 @@ function coerce(obj: Record<string, unknown>, modelUsed: string | undefined): To
     category: str(obj["category"]),
     why: str(obj["why"]),
     checkout_url: url,
+    ...(planHint ? { plan_hint: planHint } : {}),
     has_mcp: obj["has_mcp"] === true,
     alternatives,
     ...(modelUsed ? { model_used: modelUsed } : {}),

@@ -44,6 +44,25 @@ describe("recommendTool", () => {
     expect(Array.isArray(calls[0]?.models)).toBe(true);
   });
 
+  it("passes plan_hint through when the model names a plan, and asks for it in the prompt", async () => {
+    const withHint = JSON.stringify({ ...JSON.parse(resendReply), plan_hint: "  Pro (~$20/month)  " });
+    const { fetchImpl, calls } = mockOR(() => ({ content: withHint }));
+    const rec = await recommendTool("send email", { apiKey: "k", fetchImpl });
+    expect(rec.plan_hint).toBe("Pro (~$20/month)");
+    const messages = calls[0]?.body["messages"] as Array<{ content: string }>;
+    expect(messages[0]?.content).toContain("plan_hint");
+  });
+
+  it("omits plan_hint when the model leaves it out, blank, or not a string", async () => {
+    for (const hint of [undefined, "", "   ", 42, { name: "Pro" }]) {
+      const reply = JSON.stringify({ ...JSON.parse(resendReply), ...(hint === undefined ? {} : { plan_hint: hint }) });
+      const { fetchImpl } = mockOR(() => ({ content: reply }));
+      const rec = await recommendTool("send email", { apiKey: "k", fetchImpl });
+      expect(rec.plan_hint).toBeUndefined();
+      expect("plan_hint" in rec).toBe(false);
+    }
+  });
+
   it("tolerates markdown fences and prose around the JSON", async () => {
     const { fetchImpl } = mockOR(() => ({ content: "Sure!\n```json\n" + resendReply + "\n```\nHope that helps." }));
     const rec = await recommendTool("send email", { apiKey: "k", fetchImpl });

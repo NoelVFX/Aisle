@@ -27,10 +27,30 @@ SaaS/MCP tool and returns its **checkout URL**, which feeds straight into `aisle
 ```
 User → Hermes: "I want an MCP tool that sends email autonomously"
 Hermes → aisle__find_tool { goal }                 (Aisle: OpenRouter LLM picks the tool)
-  → RECOMMENDED { tool_name: "Resend", checkout_url, why, alternatives }
-Hermes → aisle__shop { prompt: "Resend plan", explore_url: <checkout_url> }
+  → RECOMMENDED { tool_name: "Resend", checkout_url, plan_hint?: "Pro", why, alternatives }
+Hermes → aisle__shop { prompt: "Resend plan", explore_url: <checkout_url>, plan_hint: "Pro" }
+                                                   (Aisle: known shop by domain, else Explore;
+                                                    then read the merchant's catalogue)
+  → CHOOSE_PLAN { merchant_id, plans: [{ sku, title, price_minor, currency, billing, recommended? }] }
+User picks a plan                                  (the user chooses — never the agent)
+Hermes → aisle__shop { prompt, merchant_id, sku: <chosen sku> }   (no explore_url: no second Explore)
   → AWAITING_APPROVAL → approve → aisle__wait_for_purchase → COMPLETED { receipt }
 ```
+
+The sku always comes from Agnic's catalogue for that merchant — never from the model.
+`plan_hint` only sorts the matching plan first and marks it `recommended`; with two or more
+plans it never picks one. A catalogue with exactly one plan skips `CHOOSE_PLAN` and goes
+straight to `AWAITING_APPROVAL`; an empty one fails with `NO_CATALOGUE` (for a SaaS plan
+behind a sign-in, use `aisle__execute_web_action`, which drives your own signed-in browser).
+A recurring plan's approval summary says how it's billed (e.g. "billed monthly").
+
+> **Unverified until checked live:** the Agnic docs don't specify the catalogue's field name
+> or shape in `GET /api/autofill/merchants/{id}`, so `getMerchantCatalogue` parses it
+> defensively (`catalogue` / `catalog` / `products`, as an array or `{ items }`, optionally
+> under `merchant`). Nor is it confirmed that preview (`POST /api/autofill/shopify/quote`)
+> prices merchants on the non-Shopify rails (`worker`, `acp`), or what it returns for a digital
+> plan with no delivery option. Check both against a live explored SaaS merchant before relying
+> on this flow.
 
 `aisle__find_tool` only *names* a tool and a URL — it never pays. Agnic (product search)
 indexes vetted Shopify goods, not SaaS/MCP subscriptions, so this recommendation is an LLM
@@ -48,8 +68,8 @@ integration in their coding agent afterwards.
 
 | Tool | Does |
 |---|---|
-| `aisle__find_tool` | Goal → best-fit SaaS/MCP tool + its checkout URL (LLM). `{ goal }` → `{ tool_name, checkout_url, why, alternatives }`. Never pays. |
-| `aisle__shop` | Discover + price a purchase; returns a summary for one approval. `{ prompt, country?, merchant_id?, sku?, quantity?, explore_url? }` |
+| `aisle__find_tool` | Goal → best-fit SaaS/MCP tool + its checkout URL (LLM). `{ goal }` → `{ tool_name, checkout_url, plan_hint?, why, alternatives }`. Never pays. |
+| `aisle__shop` | Discover + price a purchase; returns a summary for one approval. `{ prompt, country?, merchant_id?, sku?, quantity?, explore_url?, plan_hint? }`. With `explore_url` and no `sku`, a merchant with several plans returns `CHOOSE_PLAN { merchant_id, plans }` — the user picks, then call again with `merchant_id` + the chosen `sku`. |
 | `aisle__wait_for_purchase` | After approval, place the order and return the receipt. `{ shop_id }` |
 
 The HTTP surface for approval: `GET /shop/:id` (the confirm page), `POST /api/shop/:id/approve`,
@@ -62,7 +82,9 @@ Base `https://api.agnic.ai`, header `X-Agnic-Token`.
 | Step | Route |
 |---|---|
 | Discover by name | `GET /api/autofill/products/search?q=&country=` |
+| Known shop by domain | `GET /api/autofill/merchants?q=<hostname>` (any rail; skips Explore) |
 | Onboard a new shop | `POST /api/autofill/explore` → poll `GET /api/autofill/orders/{id}` until `explored` |
+| Plans to choose from | `GET /api/autofill/merchants/{id}` — "with its catalogue when it has one" (shape unverified) |
 | Price (preview) | `POST /api/autofill/shopify/quote` |
 | Place (dispatch) | `POST /api/autofill/dispatch` — `202` = approval still required |
 | Step-up poll | `GET /api/approvals/{token}` until `approved` |
@@ -92,5 +114,6 @@ a wrong-currency mandate is refused, and a step-up mints a new token each dispat
 approval endpoint, never re-dispatch to poll. The manager handles all three.
 
 The unit tests in [`tests/agnic-commerce.test.ts`](../tests/agnic-commerce.test.ts) exercise the
-entire flow (discover → approve → dispatch-once → receipt, plus the 202 step-up) against a mock
-backend, so the logic is verified without a live token.
+entire flow (discover → approve → dispatch-once → receipt, plus the 202 step-up, and explore →
+`CHOOSE_PLAN` → pick → approval) against a mock backend, so the logic is verified without a live
+token — but the catalogue response in those mocks is an assumption, not a recorded Agnic reply.
