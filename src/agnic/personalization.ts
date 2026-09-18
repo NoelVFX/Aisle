@@ -44,6 +44,7 @@ interface Stat {
 
 interface Impression {
   sku: string;
+  title?: string;
   tone: Tone;
   attrs: string[];
   at: string;
@@ -56,6 +57,8 @@ interface HistoryEntry {
   currency?: string;
   tone?: Tone;
   attrs?: string[];
+  /** "proceed" = user chose to buy; "purchased" = checkout completed (weighted higher). */
+  stage?: "proceed" | "purchased";
   at: string;
 }
 
@@ -82,9 +85,9 @@ const LEXICON: ReadonlyArray<readonly [string, RegExp]> = [
 ];
 
 const emptyProfile = (): PersonaProfile => ({ consent: false, tags: [] });
-const bump = (s: Stat | undefined, key: "impressions" | "conversions"): Stat => {
+const bump = (s: Stat | undefined, key: "impressions" | "conversions", by = 1): Stat => {
   const next = s ?? { impressions: 0, conversions: 0 };
-  return { ...next, [key]: next[key] + 1 };
+  return { ...next, [key]: next[key] + by };
 };
 /** Laplace-smoothed conversion rate: an unseen arm scores 0.5 (neutral). */
 const rate = (s: Stat | undefined): number => ((s?.conversions ?? 0) + 1) / ((s?.impressions ?? 0) + 2);
@@ -229,40 +232,75 @@ export class PreferenceModel {
   }
 
   /** Record that these products were shown (one impression each, with its assigned tone). */
-  recordImpressions(items: Array<{ sku: string; tone: Tone; attrs: string[] }>): void {
+  recordImpressions(items: Array<{ sku: string; title?: string; tone: Tone; attrs: string[] }>): void {
     const at = new Date().toISOString();
     for (const it of items) {
       this.data.tone[it.tone] = bump(this.data.tone[it.tone], "impressions");
       for (const a of it.attrs) this.data.attr[a] = bump(this.data.attr[a], "impressions");
-      this.data.impressions.push({ sku: it.sku, tone: it.tone, attrs: it.attrs, at });
+      this.data.impressions.push({ sku: it.sku, ...(it.title ? { title: it.title } : {}), tone: it.tone, attrs: it.attrs, at });
     }
     if (this.data.impressions.length > IMPRESSIONS_MAX) this.data.impressions = this.data.impressions.slice(-IMPRESSIONS_MAX);
     this.save();
   }
 
   /**
-   * The user proceeded to buy `sku` — credit its shown tone and attributes. Matches the
-   * most recent impression of that sku (so we learn which pitch won), and remembers it.
+   * The user proceeded to buy `sku` — credit its shown tone and attributes with `weight`
+   * (default 1). Matches the most recent impression of that sku (so we learn which pitch
+   * won) and remembers it, so a later `recordPurchase` can add more on top.
    */
-  recordConversion(sku: string, extra: { title?: string; price_minor?: number; currency?: string } = {}): { credited: boolean; tone?: Tone } {
+  recordConversion(sku: string, extra: { title?: string; price_minor?: number; currency?: string } = {}, weight = 1): { credited: boolean; tone?: Tone } {
     let idx = -1;
     for (let i = this.data.impressions.length - 1; i >= 0; i--) {
       if (this.data.impressions[i]!.sku === sku) { idx = i; break; }
     }
     const at = new Date().toISOString();
     if (idx < 0) {
-      this.data.history.push({ sku, at, ...extra });
+      this.data.history.push({ sku, stage: "proceed", at, ...extra });
       this.trimHistory();
       this.save();
       return { credited: false };
     }
     const im = this.data.impressions.splice(idx, 1)[0]!;
-    this.data.tone[im.tone] = bump(this.data.tone[im.tone], "conversions");
-    for (const a of im.attrs) this.data.attr[a] = bump(this.data.attr[a], "conversions");
-    this.data.history.push({ sku, tone: im.tone, attrs: im.attrs, at, ...extra });
+    this.data.tone[im.tone] = bump(this.data.tone[im.tone], "conversions", weight);
+    for (const a of im.attrs) this.data.attr[a] = bump(this.data.attr[a], "conversions", weight);
+    this.data.history.push({ sku, tone: im.tone, attrs: im.attrs, stage: "proceed", at, ...(im.title ? { title: im.title } : {}), ...extra });
     this.trimHistory();
     this.save();
     return { credited: true, tone: im.tone };
+  }
+
+  /**
+   * The purchase COMPLETED — add extra weight (default 2) on top of the proceed-to-buy
+   * credit, since a paid order is a much stronger signal than merely choosing. Reuses the
+   * tone/attributes remembered from the proceed step (the impression is already consumed).
+   */
+  recordPurchase(sku: string, weight = 2): { credited: boolean; tone?: Tone } {
+    let entry: HistoryEntry | undefined;
+    for (let i = this.data.history.length - 1; i >= 0; i--) {
+      const h = this.data.history[i]!;
+      if (h.sku === sku && h.tone) { entry = h; break; }
+    }
+    if (!entry || !entry.tone) return { credited: false };
+    this.data.tone[entry.tone] = bump(this.data.tone[entry.tone], "conversions", weight);
+    for (const a of entry.attrs ?? []) this.data.attr[a] = bump(this.data.attr[a], "conversions", weight);
+    this.data.history.push({ sku, tone: entry.tone, ...(entry.attrs ? { attrs: entry.attrs } : {}), ...(entry.title ? { title: entry.title } : {}), stage: "purchased", at: new Date().toISOString() });
+    this.trimHistory();
+    this.save();
+    return { credited: true, tone: entry.tone };
+  }
+
+  /**
+   * Seed queries for the "For You" default feed, newest first: the titles of things the
+   * user has bought/chosen. Empty for a first-time user — so the default page starts blank.
+   */
+  purchaseSeeds(max = 3): string[] {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (let i = this.data.history.length - 1; i >= 0 && out.length < max; i--) {
+      const t = this.data.history[i]!.title?.trim();
+      if (t && !seen.has(t.toLowerCase())) { seen.add(t.toLowerCase()); out.push(t); }
+    }
+    return out;
   }
 
   /** A readable snapshot for transparency / debugging (per-tone and per-attribute rates). */

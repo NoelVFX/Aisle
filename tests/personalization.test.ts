@@ -63,6 +63,31 @@ describe("PreferenceModel — learning", () => {
     expect(m.recordConversion("never-shown").credited).toBe(false);
   });
 
+  it("a completed purchase adds weight ON TOP of proceed-to-buy", () => {
+    const m = newModel();
+    m.recordImpressions([{ sku: "k", title: "Mechanical Keyboard", tone: "value", attrs: ["tech"] }]);
+    m.recordConversion("k"); // proceed: +1
+    let value = m.stats().tones.find((t) => t.tone === "value");
+    expect(value).toMatchObject({ impressions: 1, conversions: 1 });
+    const res = m.recordPurchase("k"); // completed: +2 more
+    expect(res).toEqual({ credited: true, tone: "value" });
+    value = m.stats().tones.find((t) => t.tone === "value");
+    expect(value?.conversions).toBe(3); // 1 (proceed) + 2 (purchase)
+    expect(m.stats().attrs.find((a) => a.attr === "tech")?.conversions).toBe(3);
+  });
+
+  it("recordPurchase is a no-op for a sku that never proceeded", () => {
+    expect(newModel().recordPurchase("ghost").credited).toBe(false);
+  });
+
+  it("purchaseSeeds returns recent purchase titles (empty for a first-time user)", () => {
+    const m = newModel();
+    expect(m.purchaseSeeds()).toEqual([]); // first-time ⇒ blank For You
+    m.recordImpressions([{ sku: "k", title: "Mechanical Keyboard", tone: "value", attrs: ["tech"] }]);
+    m.recordConversion("k");
+    expect(m.purchaseSeeds()).toEqual(["Mechanical Keyboard"]);
+  });
+
   it("ranks a product higher once its attribute has converted before", () => {
     const m = newModel();
     // Teach the model that "budget-friendly" converts well.

@@ -77,11 +77,13 @@ shortlist and learns from what the user actually buys.
 
 ```
 User → "show me some blazers"
-Hermes → aisle__browse { prompt: "blazer" }
+Hermes → aisle__browse { prompt: "blazer" }        (or aisle__buy — physical routes here too)
   → Agnic search → rank by persona + learned conversion → assign each a DIFFERENT pitch tone
   → { products: [{ sku, title, price, merchant_id, tone, pitch, why }, …] }   (impression recorded)
 User picks one → Hermes → aisle__shop { merchant_id, sku }  → AWAITING_APPROVAL
-  → the pick is credited as a CONVERSION for that tone + attributes (tailors next time)
+  → the pick is credited as a proceed CONVERSION (+1); the AWAITING result also carries
+    `complements` — "frequently bought together" items (keyboard → mouse)
+User approves → aisle__wait_for_purchase → COMPLETED  → the purchase adds MORE weight (+2)
 ```
 
 Three parts, one local **Preference Model** (`.aisle/personalization.json`, single-user, never
@@ -94,12 +96,23 @@ sent to the merchant or the LLM as identity):
    self-description into coarse persona tags (e.g. *student, budget-conscious, smart-casual*) that
    boost matching products — so "uni student + blazer" surfaces the cost-friendly, young-cut one
    first. Stored only with `consent:true`; `consent:false` erases it.
-3. **Memory + conversion learning.** Every impression and proceed-to-buy updates per-tone and
-   per-attribute rates, so next session's shortlist is pre-tuned. The scoring is deliberately
-   **explainable** (each item carries a `why`), and `PreferenceModel.stats()` exposes the rates.
+3. **Memory + weighted conversion learning.** Every impression, proceed-to-buy (**weight 1**) and
+   **completed purchase (weight 2 more, on top)** updates per-tone and per-attribute rates, so next
+   session's shortlist is pre-tuned. Scoring is deliberately **explainable** (each item carries a
+   `why`), and `PreferenceModel.stats()` exposes the rates.
 
-Pitches and persona distillation use OpenRouter (`OPENROUTER_PITCH_MODEL`, default Qwen 3.7 Max)
-with a **templated fallback**, so Explore works offline / without a key.
+**Default path = the shortlist.** `aisle__buy` routes a *physical* ask to this personalised
+shortlist (not a blind auto-buy) — the user picks, then `aisle__shop` buys. `aisle__browse` with
+**no `prompt`** returns the **"For You" feed** built from what the user has bought before — and is
+deliberately **empty for a first-time user**, filling in only as they buy.
+
+**Complementary upsell at checkout.** When `aisle__shop` returns `AWAITING_APPROVAL` for a physical
+buy, the result carries `complements` — a few "frequently bought together" items (keyboard → mouse,
+blazer → dress shirt), themselves ranked by the same model. Derived by `complementQueries` (LLM with
+a heuristic map fallback), searched on Agnic. To add one, the user just buys it like any other pick.
+
+Pitches, persona distillation and complements use OpenRouter (`OPENROUTER_PITCH_MODEL`, default
+Qwen 3.7 Max) with **deterministic fallbacks**, so Explore works offline / without a key.
 
 ## How to invoke it (so the agent doesn't wander off)
 
@@ -151,7 +164,7 @@ How you trigger Aisle depends on the client:
 | Tool | Does |
 |---|---|
 | `aisle__buy` | The single smart entry: classify physical vs SaaS and route (physical → Agnic; SaaS → vendor checkout / discovery). `{ prompt, country?, plan? }`. Never pays. |
-| `aisle__browse` | Personalised Explore: a ranked, pitched shortlist over Agnic's Shopify catalogue. `{ prompt, country?, count? }` → `{ products: [{ sku, title, price_minor, currency, merchant_id, tone, pitch, why }] }`. The user picks one → `aisle__shop { merchant_id, sku }`. Never pays. |
+| `aisle__browse` | Personalised Explore: a ranked, pitched shortlist over Agnic's Shopify catalogue. `{ prompt?, country?, count? }` → `{ products: [{ sku, title, price_minor, currency, merchant_id, tone, pitch, why }] }`. Omit `prompt` for the "For You" feed (empty for first-timers). The user picks one → `aisle__shop { merchant_id, sku }`. Never pays. |
 | `aisle__set_profile` | Save/clear the user's local shopping profile (consented) so Explore is personalised. `{ consent, about?, budget_band?, country? }`. Stored locally only. |
 | `aisle__find_tool` | Goal → best-fit SaaS/MCP tool + checkout URL + plan (LLM). `{ goal }` → `{ tool_name, checkout_url, plan, why, alternatives }`. Never pays. |
 | `aisle__shop` | Discover + price a purchase; returns a summary for one approval, or `CHOOSE_PLAN { merchant_id, plans }` when a SaaS has several plans (pick, then call again with `merchant_id` + `sku`). `{ prompt, country?, merchant_id?, sku?, quantity?, explore_url?, plan? }` |

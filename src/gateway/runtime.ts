@@ -30,10 +30,12 @@ import { loginPage } from "../web/login-page.js";
 import { FileProfileStore } from "../slow-lane/profiles.js";
 import { createAgnicClient } from "../agnic/client.js";
 import { AgnicCommerceManager } from "../agnic/manager.js";
+import type { AgnicProduct } from "../agnic/commerce.js";
 import { recommendTool } from "../agnic/recommend.js";
 import { classifyTrack } from "../agnic/classify.js";
 import { PreferenceModel } from "../agnic/personalization.js";
 import { generatePitches, distillPersona } from "../agnic/pitch.js";
+import { complementQueries } from "../agnic/complements.js";
 import { shopPage } from "../web/shop-page.js";
 import { MCP_APP_MIME, RECOVERY_WIDGET_CSP, RECOVERY_WIDGET_HTML, RECOVERY_WIDGET_URI } from "./widget.js";
 
@@ -403,6 +405,59 @@ export function registerAisleTools(
   const agnicMissing = { content: [{ type: "text" as const, text: JSON.stringify({ status: "FAILED", error: "AGNIC_NOT_CONFIGURED: set AGNIC_TOKEN on the server to enable purchases." }) }], isError: true };
   const asJson = (obj: unknown, isError = false) => ({ content: [{ type: "text" as const, text: JSON.stringify(obj) }], structuredContent: obj as Record<string, unknown>, ...(isError ? { isError: true } : {}) });
 
+  // shop_id → sku, so a completed purchase can add extra weight on top of proceed-to-buy.
+  const shopSku = new Map<string, string>();
+  const shapeItem = (p: { product: AgnicProduct; tone: string; pitch: string; why?: string }) => ({
+    sku: p.product.sku,
+    title: p.product.title,
+    ...(p.product.price_minor !== undefined ? { price_minor: p.product.price_minor } : {}),
+    ...(p.product.currency ? { currency: p.product.currency } : {}),
+    ...(p.product.merchant?.merchant_id ? { merchant_id: p.product.merchant.merchant_id } : {}),
+    tone: p.tone,
+    pitch: p.pitch,
+    ...(p.why ? { why: p.why } : {}),
+  });
+
+  /** The personalised shortlist for the Explore step. No prompt ⇒ the "For You" feed from memory. */
+  const buildShortlist = async (prompt: string | undefined, country: string | undefined, count: number): Promise<Record<string, unknown>> => {
+    if (!runtime.agnicCommerce) return { status: "FAILED", error: "AGNIC_NOT_CONFIGURED" };
+    if (!runtime.personalization) return { status: "FAILED", error: "PERSONALIZATION_UNAVAILABLE" };
+    const pm = runtime.personalization;
+    let products: AgnicProduct[] = [];
+    if (prompt && prompt.trim()) {
+      products = await runtime.agnicCommerce.search(prompt, country, Math.max(count * 2, 8));
+    } else {
+      const seeds = pm.purchaseSeeds(3); // empty for a first-time user ⇒ blank For You page
+      if (seeds.length === 0) return { status: "BROWSING", products: [], note: "No recommendations yet — buy something, or set a profile with aisle__set_profile, and your For You list fills in." };
+      const seen = new Set<string>();
+      for (const seed of seeds) for (const p of await runtime.agnicCommerce.search(seed, country, 4)) if (!seen.has(p.sku)) { seen.add(p.sku); products.push(p); }
+    }
+    if (products.length === 0) return { status: "NO_RESULTS", note: "No products found. Try different wording or a different country." };
+    const pitched = await generatePitches(pm.rank(products, count), pm.profile());
+    pm.recordImpressions(pitched.map((p) => ({ sku: p.product.sku, ...(p.product.title ? { title: p.product.title } : {}), tone: p.tone, attrs: p.attrs })));
+    return { status: "BROWSING", products: pitched.map(shapeItem), next: "Show these with their pitches. When the user picks one, call aisle__shop with its merchant_id + sku (records their choice to improve future picks). Nothing is charged until they approve." };
+  };
+
+  /** Complementary items for the checkout moment ("frequently bought together"). Best-effort. */
+  const complementsFor = async (seed: string, country: string | undefined): Promise<Array<Record<string, unknown>>> => {
+    if (!runtime.agnicCommerce || !runtime.personalization) return [];
+    try {
+      const queries = await complementQueries(seed, { max: 3 });
+      const found: AgnicProduct[] = [];
+      const seen = new Set<string>();
+      for (const q of queries.slice(0, 3)) {
+        const p = (await runtime.agnicCommerce.search(q, country, 2)).find((x) => !seen.has(x.sku));
+        if (p) { seen.add(p.sku); found.push(p); }
+      }
+      if (found.length === 0) return [];
+      const pitched = await generatePitches(runtime.personalization.rank(found, Math.min(3, found.length)), runtime.personalization.profile());
+      runtime.personalization.recordImpressions(pitched.map((p) => ({ sku: p.product.sku, ...(p.product.title ? { title: p.product.title } : {}), tone: p.tone, attrs: p.attrs })));
+      return pitched.map((p) => { const { why: _why, ...rest } = shapeItem(p); return rest; });
+    } catch {
+      return [];
+    }
+  };
+
   // The single smart entry: classify the ask (physical good vs digital SaaS/plan/credits)
   // and route to the right engine — Agnic's Shopify rail, the vendor's own browser
   // checkout, or (for a goal with no named vendor) discovery. The model never pays.
@@ -424,8 +479,9 @@ export function registerAisleTools(
 
       if (classification.track === "physical") {
         if (!runtime.agnicCommerce) return asJson({ track: "physical", status: "FAILED", classification, error: "AGNIC_NOT_CONFIGURED: set AGNIC_TOKEN to buy physical goods." }, true);
-        const r = await runtime.agnicCommerce.shop({ taskId, prompt, ...(country ? { country } : {}), ...(plan ? { planHint: plan } : {}) });
-        return asJson({ track: "physical", classification, ...r });
+        // Default physical path is the personalised shortlist — the user picks, then aisle__shop buys.
+        const shortlist = await buildShortlist(prompt, country, 5);
+        return asJson({ track: "physical", classification, ...shortlist });
       }
 
       // SaaS: check out on the vendor's own site when a vendor/URL is resolvable; else discover.
@@ -478,36 +534,19 @@ export function registerAisleTools(
     "aisle__browse",
     {
       description:
-        "Explore physical products for a shopping request and return a RANKED, PITCHED shortlist — Aisle's personalised discovery over Agnic's Shopify catalogue. Use this before buying when the user is browsing/deciding (\"show me options for …\", \"find me a …\", \"what blazers can I get\"). Each result carries a one-line pitch and a merchant_id + sku; show them to the user, and when they choose one, call aisle__shop with that merchant_id + sku (that choice tailors future picks). Ranking + pitches use the user's local, consented profile (set via aisle__set_profile). Never pays.",
+        "Explore physical products and return a RANKED, PITCHED shortlist — Aisle's personalised discovery over Agnic's Shopify catalogue. With a `prompt`, browses that request (\"show me options for …\", \"what blazers can I get\"). WITHOUT a prompt, returns the user's \"For You\" feed built from what they've bought before — empty for a first-time user. Each result carries a one-line pitch + merchant_id + sku; when the user picks one, call aisle__shop with that merchant_id + sku (the choice tailors future picks). Ranking/pitches use the local, consented profile (aisle__set_profile). Never pays.",
       inputSchema: {
-        prompt: z.string().min(1).describe("What the user is shopping for, in plain language."),
+        prompt: z.string().min(1).optional().describe("What to shop for; omit for the personalised For You feed."),
         country: z.string().length(2).optional().describe("Market: US, GB, CA or AU."),
         count: z.number().int().positive().max(8).optional().describe("How many to show (default 5)."),
       },
     },
-    async ({ prompt, country, count }, extra) => {
+    async ({ prompt, country, count }) => {
       if (!runtime.agnicCommerce) return agnicMissing;
       if (!runtime.personalization) return asJson({ status: "FAILED", error: "PERSONALIZATION_UNAVAILABLE" }, true);
       try {
-        const n = count ?? 5;
-        const products = await runtime.agnicCommerce.search(prompt, country, Math.max(n * 2, 8));
-        if (products.length === 0) return asJson({ status: "NO_RESULTS", prompt, next: "No products found. Try different wording or a different country." });
-        const ranked = runtime.personalization.rank(products, n);
-        const pitched = await generatePitches(ranked, runtime.personalization.profile());
-        runtime.personalization.recordImpressions(pitched.map((p) => ({ sku: p.product.sku, tone: p.tone, attrs: p.attrs })));
-        const items = pitched.map((p) => ({
-          sku: p.product.sku,
-          title: p.product.title,
-          ...(p.product.price_minor !== undefined ? { price_minor: p.product.price_minor } : {}),
-          ...(p.product.currency ? { currency: p.product.currency } : {}),
-          ...(p.product.merchant?.merchant_id ? { merchant_id: p.product.merchant.merchant_id } : {}),
-          tone: p.tone,
-          pitch: p.pitch,
-          why: p.why,
-        }));
-        const taskId = taskFor(extra as unknown as Extra);
-        const result = { status: "BROWSING", task_id: taskId, products: items, next: "Show these to the user with their pitches. When they pick one, call aisle__shop with its merchant_id + sku — that records their choice to improve future recommendations. Nothing is charged until they approve." };
-        return asJson(result);
+        const result = await buildShortlist(prompt, country, count ?? 5);
+        return asJson(result, result["status"] === "FAILED");
       } catch (err) {
         return asJson({ status: "FAILED", error: err instanceof Error ? err.message : String(err) }, true);
       }
@@ -573,9 +612,19 @@ export function registerAisleTools(
         ...(plan ? { planHint: plan } : {}),
       });
       // Proceed-to-buy = conversion: the user chose this specific sku (from a browse), so
-      // credit the tone/attributes it was shown with, tailoring future Explore.
-      if (sku && result.status === "AWAITING_APPROVAL") runtime.personalization?.recordConversion(sku);
-      return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result };
+      // credit the tone/attributes it was shown with (weight 1). Remember shop_id → sku so a
+      // completed purchase can add more on top.
+      if (sku && result.status === "AWAITING_APPROVAL") {
+        runtime.personalization?.recordConversion(sku);
+        shopSku.set(result.shop_id, sku);
+      }
+      // Checkout-moment upsell: complementary products for a physical buy ("frequently bought together").
+      let out: Record<string, unknown> = result;
+      if (result.status === "AWAITING_APPROVAL" && !explore_url && result.merchant_id) {
+        const complements = await complementsFor(prompt, country);
+        if (complements.length > 0) out = { ...result, complements, complements_note: "Frequently bought together — offer these before the user approves; to add one, call aisle__shop with its merchant_id + sku." };
+      }
+      return { content: [{ type: "text", text: JSON.stringify(out) }], structuredContent: out };
     },
   );
 
@@ -590,6 +639,11 @@ export function registerAisleTools(
     async ({ shop_id }) => {
       if (!runtime.agnicCommerce) return agnicMissing;
       const result = await runtime.agnicCommerce.wait(shop_id);
+      // Completed purchase is a much stronger signal than proceed-to-buy: add extra weight.
+      if (result.status === "COMPLETED") {
+        const sku = shopSku.get(shop_id);
+        if (sku) { runtime.personalization?.recordPurchase(sku); shopSku.delete(shop_id); }
+      }
       return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result };
     },
   );
