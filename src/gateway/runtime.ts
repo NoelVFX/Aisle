@@ -31,6 +31,7 @@ import { FileProfileStore } from "../slow-lane/profiles.js";
 import { createAgnicClient } from "../agnic/client.js";
 import { AgnicCommerceManager } from "../agnic/manager.js";
 import { recommendTool } from "../agnic/recommend.js";
+import { classifyTrack } from "../agnic/classify.js";
 import { shopPage } from "../web/shop-page.js";
 import { MCP_APP_MIME, RECOVERY_WIDGET_CSP, RECOVERY_WIDGET_HTML, RECOVERY_WIDGET_URI } from "./widget.js";
 
@@ -393,6 +394,53 @@ export function registerAisleTools(
 
   // --- Agnic commerce rail: buy through any merchant's checkout with one approval. ---
   const agnicMissing = { content: [{ type: "text" as const, text: JSON.stringify({ status: "FAILED", error: "AGNIC_NOT_CONFIGURED: set AGNIC_TOKEN on the server to enable purchases." }) }], isError: true };
+  const asJson = (obj: unknown, isError = false) => ({ content: [{ type: "text" as const, text: JSON.stringify(obj) }], structuredContent: obj as Record<string, unknown>, ...(isError ? { isError: true } : {}) });
+
+  // The single smart entry: classify the ask (physical good vs digital SaaS/plan/credits)
+  // and route to the right engine — Agnic's Shopify rail, the vendor's own browser
+  // checkout, or (for a goal with no named vendor) discovery. The model never pays.
+  server.registerTool(
+    "aisle__buy",
+    {
+      description:
+        "USE THIS as the ONE entry to buy anything with Aisle. It classifies the request — physical product vs digital SaaS/plan/credits — and automatically routes to the right checkout, so the user needn't say which. Prefer this for ANY \"buy / purchase / order / subscribe / top up …\" ask and whenever the user says \"use Aisle\". Examples: \"a hex token fidget\" (physical → Agnic), \"the Resend Pro plan\" or a pricing URL (SaaS → the vendor's own checkout), \"an MCP tool that sends email\" (goal → discovery). The model never pays; it returns an approval link and, for a goal, a recommendation to confirm first.",
+      inputSchema: {
+        prompt: z.string().min(1).describe("What to buy, or the goal, in plain language."),
+        country: z.string().length(2).optional().describe("Market for physical search: US, GB, CA, AU."),
+        plan: z.string().optional().describe("Plan/tier for a SaaS, e.g. \"Pro\"."),
+      },
+      _meta: widgetMeta,
+    },
+    async ({ prompt, country, plan }, extra) => {
+      const taskId = taskFor(extra as unknown as Extra);
+      const classification = await classifyTrack(prompt);
+
+      if (classification.track === "physical") {
+        if (!runtime.agnicCommerce) return asJson({ track: "physical", status: "FAILED", classification, error: "AGNIC_NOT_CONFIGURED: set AGNIC_TOKEN to buy physical goods." }, true);
+        const r = await runtime.agnicCommerce.shop({ taskId, prompt, ...(country ? { country } : {}), ...(plan ? { planHint: plan } : {}) });
+        return asJson({ track: "physical", classification, ...r });
+      }
+
+      // SaaS: check out on the vendor's own site when a vendor/URL is resolvable; else discover.
+      const target = runtime.externalActions?.resolveOrNull(prompt);
+      if (runtime.externalActions && target) {
+        const r = await runtime.externalActions.execute({ taskId, prompt });
+        return asJson({ track: "saas", mode: "checkout", classification, ...r });
+      }
+      try {
+        const rec = await recommendTool(prompt);
+        return asJson({
+          track: "saas",
+          mode: "discover",
+          classification,
+          ...rec,
+          next: `Recommended ${rec.tool_name} (${rec.checkout_url}). Show it to the user to confirm; then to buy it call aisle__buy again with the tool named and its URL in the prompt (e.g. "the ${rec.plan || "Pro"} plan on ${rec.checkout_url}"), which routes to the vendor's own checkout with one approval. Never pay without approval.`,
+        });
+      } catch (err) {
+        return asJson({ track: "saas", mode: "discover", status: "FAILED", classification, error: err instanceof Error ? err.message : String(err) }, true);
+      }
+    },
+  );
 
   server.registerTool(
     "aisle__find_tool",

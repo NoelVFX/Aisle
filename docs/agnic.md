@@ -56,6 +56,28 @@ integration in their coding agent afterwards.
 
 ## How to invoke it (so the agent doesn't wander off)
 
+### One entry, auto-routed: `aisle__buy`
+
+`aisle__buy` is the single smart entry. It classifies the ask and routes to the right
+engine, so the user never has to say which track they mean:
+
+```
+aisle__buy { prompt }
+  → classifyTrack(prompt)
+      ├─ physical good           → Agnic Shopify rail (aisle__shop internally)
+      ├─ SaaS, vendor/URL known  → the vendor's own browser checkout (execute_web_action)
+      └─ SaaS goal, no vendor    → discovery (find_tool) → confirm → buy
+```
+
+Classification is **heuristic-first** (free, instant keyword match) and only calls a
+cheap OpenRouter model (Qwen 3.7 Max, `OPENROUTER_CLASSIFY_MODEL`) when the keywords are
+ambiguous — and degrades to a keyword lean if no key is set, never blocking a purchase.
+The result carries a `classification` field ({track, confidence, reason, source}) so the
+routing is auditable. The lower-level `aisle__shop` / `aisle__find_tool` remain for callers
+that already know the track.
+
+### Trigger phrasing
+
 How you trigger Aisle depends on the client:
 
 - **Natural-language agents (Hermes CLI, most MCP clients):** there are no slash commands —
