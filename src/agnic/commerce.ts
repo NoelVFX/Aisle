@@ -37,6 +37,21 @@ export interface AgnicProduct {
   onboard?: { merchant_url?: string };
 }
 
+/**
+ * One buyable entry in a merchant's catalogue — for a SaaS merchant, a plan. Only
+ * `sku` is required: it is what preview/dispatch take, and it must come from Agnic
+ * (a Shopify variant gid, or the merchant's own sku) — a model cannot invent one.
+ */
+export interface CatalogueItem {
+  sku: string;
+  title?: string;
+  price_minor?: number;
+  currency?: string;
+  available?: boolean;
+  /** Billing period for a recurring plan, as the catalogue states it (e.g. "month", "year"). */
+  billing?: string;
+}
+
 export interface ShipTo {
   name: string;
   street_address: string;
@@ -103,6 +118,8 @@ export interface OrderResult {
 
 const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
 const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
+const rec = (v: unknown): Record<string, unknown> | undefined =>
+  typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /** Search the vetted network for products by query + market (US, GB, CA, AU). */
@@ -121,6 +138,93 @@ export async function findShopifyMerchants(agnic: AgnicFetch, query?: string): P
   return (Array.isArray(data["merchants"]) ? (data["merchants"] as AgnicMerchant[]) : []).filter((m) => (m.rail ?? "shopify") === "shopify");
 }
 
+/** "https://www.Resend.com/pricing" / "resend.com" → "resend.com" (lowercase, no leading www.). */
+function bareHost(urlOrDomain: string): string | undefined {
+  const raw = urlOrDomain.trim();
+  if (!raw) return undefined;
+  try {
+    const host = new URL(raw.includes("://") ? raw : `https://${raw}`).hostname.toLowerCase();
+    return host.replace(/^www\./, "") || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The merchant Agnic already has for this URL's shop, on any rail — so a known shop
+ * skips the slow (~2 min) Explore. Matches on `domain` (ignoring a leading www.).
+ * Best-effort: a non-200 or no match is "not found", never a failure of the flow.
+ */
+export async function findMerchantByDomain(agnic: AgnicFetch, url: string): Promise<AgnicMerchant | undefined> {
+  const host = bareHost(url);
+  if (!host) return undefined;
+  const { httpStatus, data } = await agnic(`${AUTOFILL}/merchants?${new URLSearchParams({ q: host })}`);
+  if (httpStatus !== 200) return undefined;
+  for (const entry of Array.isArray(data["merchants"]) ? data["merchants"] : []) {
+    const m = rec(entry);
+    const id = str(m?.["id"]);
+    const domain = str(m?.["domain"]);
+    if (!m || !id || !domain || bareHost(domain) !== host) continue;
+    return {
+      id,
+      domain,
+      ...(str(m["name"]) ? { name: str(m["name"])! } : {}),
+      ...(str(m["rail"]) ? { rail: str(m["rail"])! } : {}),
+      ...(typeof m["is_test"] === "boolean" ? { is_test: m["is_test"] } : {}),
+    };
+  }
+  return undefined;
+}
+
+/** The raw catalogue list, wherever this response keeps it (see getMerchantCatalogue). */
+function catalogueEntries(data: Record<string, unknown>): unknown[] {
+  for (const holder of [data, rec(data["merchant"])]) {
+    if (!holder) continue;
+    for (const key of ["catalogue", "catalog", "products"]) {
+      const v = holder[key];
+      if (Array.isArray(v)) return v;
+      const items = rec(v)?.["items"];
+      if (Array.isArray(items)) return items;
+    }
+  }
+  return [];
+}
+
+/**
+ * A merchant's buyable catalogue (for a SaaS merchant: its plans), each with the sku
+ * that preview/dispatch take. `GET /merchants/{id}` returns "one merchant, with its
+ * catalogue when it has one".
+ *
+ * UNVERIFIED SHAPE: the docs don't name the catalogue field or its entries' fields,
+ * so this parses defensively — `catalogue` / `catalog` / `products`, as an array or
+ * `{ items: [...] }`, on the body or under `merchant` — and keeps only entries with a
+ * string sku that aren't `available: false`. Check it against a live response (an
+ * explored SaaS merchant) before relying on it.
+ */
+export async function getMerchantCatalogue(agnic: AgnicFetch, merchantId: string): Promise<CatalogueItem[]> {
+  const { httpStatus, data } = await agnic(`${AUTOFILL}/merchants/${encodeURIComponent(merchantId)}`);
+  if (httpStatus !== 200) throw new Error(`agnic.merchant HTTP ${httpStatus}: ${str(data["error"]) ?? "unknown"}`);
+  const items: CatalogueItem[] = [];
+  for (const entry of catalogueEntries(data)) {
+    const e = rec(entry);
+    const sku = str(e?.["sku"])?.trim();
+    if (!e || !sku || e["available"] === false) continue;
+    const title = str(e["title"]) ?? str(e["name"]);
+    const price = num(e["price_minor"]) ?? num(e["amount_minor"]);
+    const currency = str(e["currency"]);
+    const billing = str(e["billing"]) ?? str(e["billing_period"]) ?? str(e["interval"]);
+    items.push({
+      sku,
+      ...(title ? { title } : {}),
+      ...(price !== undefined ? { price_minor: price } : {}),
+      ...(currency ? { currency } : {}),
+      ...(typeof e["available"] === "boolean" ? { available: e["available"] } : {}),
+      ...(billing ? { billing } : {}),
+    });
+  }
+  return items;
+}
+
 /**
  * Onboard a store Agnic has never seen ("Explore"): a model drives the live
  * checkout read-only, charges nothing, and records a reusable Recipe. Slow
@@ -131,14 +235,11 @@ export async function discoverMerchant(
   merchantUrl: string,
   goal: string,
   opts: { timeoutMs?: number; pollMs?: number } = {},
-): Promise<{ merchantId: string; products: AgnicProduct[] }> {
-  const readProducts = (d: Record<string, unknown>): AgnicProduct[] =>
-    (Array.isArray(d["products"]) ? (d["products"] as AgnicProduct[]) : []).filter((p) => p && p.sku);
-
+): Promise<{ merchantId: string }> {
   const { httpStatus, data } = await agnic(`${AUTOFILL}/explore`, { method: "POST", body: { merchant_url: merchantUrl, goal: goal.slice(0, 200) } });
   if (httpStatus !== 200 || !str(data["order_id"])) throw new Error(`agnic.explore HTTP ${httpStatus}: ${str(data["error"]) ?? "no order_id"}`);
   const orderId = str(data["order_id"])!;
-  if (str(data["status"]) === "explored" && str(data["merchant_id"])) return { merchantId: str(data["merchant_id"])!, products: readProducts(data) };
+  if (str(data["status"]) === "explored" && str(data["merchant_id"])) return { merchantId: str(data["merchant_id"])! };
 
   const deadline = Date.now() + (opts.timeoutMs ?? 180_000);
   const pollMs = opts.pollMs ?? 4000;
@@ -146,9 +247,8 @@ export async function discoverMerchant(
     await sleep(pollMs);
     const order = await readOrder(agnic, orderId);
     if (order.status === "explored") {
-      const o = order as unknown as Record<string, unknown>;
-      const mid = str(o["merchant_id"]) ?? str(data["merchant_id"]);
-      if (mid) return { merchantId: mid, products: readProducts(o) };
+      const mid = str((order as Record<string, unknown>)["merchant_id"]) ?? str(data["merchant_id"]);
+      if (mid) return { merchantId: mid };
       throw new Error("agnic.explore: explored but no merchant_id returned.");
     }
     if (order.status && !["exploring", "processing", "pending"].includes(order.status)) {
@@ -156,28 +256,6 @@ export async function discoverMerchant(
     }
     if (Date.now() > deadline) throw new Error("agnic.explore timed out before 'explored'.");
   }
-}
-
-/**
- * The purchasable products (SaaS plans, credit packs) at a merchant already in the
- * network — the merchant-scoped catalogue Explore didn't inline. Used to resolve a
- * plan/sku after an un-integrated SaaS is onboarded, so the caller need not know the
- * sku up front. Results are filtered to this merchant even if the API returns a wider set.
- */
-export async function listMerchantProducts(
-  agnic: AgnicFetch,
-  merchantId: string,
-  query = "",
-  country = "CA",
-  limit = 20,
-): Promise<AgnicProduct[]> {
-  const params = new URLSearchParams({ merchant_id: merchantId, country, limit: String(Math.min(50, Math.max(1, limit))) });
-  if (query) params.set("q", query);
-  const { httpStatus, data } = await agnic(`${AUTOFILL}/products/search?${params}`);
-  if (httpStatus !== 200) throw new Error(`agnic.merchantProducts HTTP ${httpStatus}: ${str(data["error"]) ?? "unknown"}`);
-  return (Array.isArray(data["products"]) ? (data["products"] as AgnicProduct[]) : [])
-    .filter((p) => p && p.sku)
-    .filter((p) => !p.merchant?.merchant_id || p.merchant.merchant_id === merchantId);
 }
 
 /**

@@ -456,7 +456,7 @@ export function registerAisleTools(
         const result = {
           status: "RECOMMENDED",
           ...rec,
-          next: `Show the user "${rec.tool_name}" (${rec.checkout_url}) and its rationale. To buy its plan, call aisle__shop with explore_url set to that checkout_url and plan set to ${JSON.stringify(rec.plan || "the tier the user wants")}. If it returns CHOOSE_PLAN, show the options and call aisle__shop again with the chosen sku. The user still approves before anything is charged.`,
+          next: `Show the user "${rec.tool_name}" (${rec.checkout_url}) and its rationale. To buy its plan, call aisle__shop with explore_url set to that checkout_url and plan set to ${JSON.stringify(rec.plan || "the tier the user wants")}. If it returns CHOOSE_PLAN, show the plans and let the user pick, then call aisle__shop again with merchant_id + the chosen sku. The user still approves before anything is charged.`,
         };
         return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result };
       } catch (err) {
@@ -470,7 +470,7 @@ export function registerAisleTools(
     "aisle__shop",
     {
       description:
-        "USE THIS TOOL to buy, purchase, order, check out, or pay for anything — a product, a SaaS/MCP plan or subscription, or a credits pack — through a real merchant's existing checkout (Agnic rail, no merchant integration). This is Aisle's purchase tool: it is the correct choice for ANY request like \"buy me …\", \"purchase …\", \"order …\", \"get me …\", \"subscribe to …\", or \"check out …\", and ALWAYS when the user says \"use Aisle\" / \"with Aisle\" to buy something. Do NOT use a generic web/browser/search tool for a purchase — use this. Describe the item in `prompt` (e.g. \"a hex token fidget\"); optionally pin merchant_id + sku, or pass explore_url (a SaaS pricing page) + plan to onboard and buy a plan. The model never pays — it returns AWAITING_APPROVAL with an approve link; after the user approves, call aisle__wait_for_purchase. If it returns CHOOSE_PLAN, show the options and call again with the chosen sku. Ends at a receipt.",
+        "USE THIS TOOL to buy, purchase, order, check out, or pay for anything — a product, a SaaS/MCP plan or subscription, or a credits pack — through a real merchant's existing checkout (Agnic rail, no merchant integration). This is Aisle's purchase tool: it is the correct choice for ANY request like \"buy me …\", \"purchase …\", \"order …\", \"get me …\", \"subscribe to …\", or \"check out …\", and ALWAYS when the user says \"use Aisle\" / \"with Aisle\" to buy something. Do NOT use a generic web/browser/search tool for a purchase — use this. Describe the item in `prompt` (e.g. \"a hex token fidget\"); optionally pin merchant_id + sku, or pass explore_url (a SaaS pricing page) to onboard the shop and read its plans from Agnic's catalogue. With several plans it returns CHOOSE_PLAN { merchant_id, plans } — show them and let the USER pick (the optional `plan` only ranks them, never picks), then call again with merchant_id + the chosen sku. The model never pays — it returns AWAITING_APPROVAL with an approve link; after the user approves, call aisle__wait_for_purchase. Ends at a receipt.",
       inputSchema: {
         prompt: z.string().min(1).describe("What to buy, in plain language."),
         country: z.string().length(2).optional().describe("Market for search: US, GB, CA or AU."),
@@ -478,7 +478,7 @@ export function registerAisleTools(
         sku: z.string().optional().describe("The exact product to buy (with merchant_id or explore_url)."),
         quantity: z.number().int().positive().max(50).optional(),
         explore_url: z.string().url().optional().describe("Onboard this shop (Explore) before buying — e.g. a SaaS pricing page."),
-        plan: z.string().optional().describe("Plan/tier to match after exploring a SaaS, e.g. \"Pro\" (used when no sku)."),
+        plan: z.string().optional().describe("With explore_url: the plan that likely fits, e.g. \"Pro\". Only ranks the CHOOSE_PLAN list; never picks a plan."),
       },
       _meta: widgetMeta,
     },

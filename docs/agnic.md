@@ -29,6 +29,11 @@ User → Hermes: "I want an MCP tool that sends email autonomously"
 Hermes → aisle__find_tool { goal }                 (Aisle: OpenRouter LLM picks the tool + plan)
   → RECOMMENDED { tool_name: "Resend", checkout_url, plan: "Pro", why, alternatives }
 Hermes → aisle__shop { prompt: "Resend plan", explore_url: <checkout_url>, plan: "Pro" }
+                                                   (Aisle: known shop by domain, else Explore;
+                                                    then read the merchant's catalogue)
+  → CHOOSE_PLAN { merchant_id, plans: [{ sku, title, price_minor, currency, billing, recommended? }] }
+User picks a plan                                  (the user chooses — never the agent)
+Hermes → aisle__shop { prompt, merchant_id, sku: <chosen sku> }   (no explore_url: no second Explore)
   → AWAITING_APPROVAL → approve → aisle__wait_for_purchase → COMPLETED { receipt }
 ```
 
@@ -38,15 +43,25 @@ judgement (Qwen 3.7 Max by default, via `OPENROUTER_INFRA_KEY`; override with
 `OPENROUTER_RECOMMEND_MODEL`). Aisle then completes the plan's checkout through Agnic's
 **Explore-then-Pay** engine at that URL.
 
-**How the plan/SKU is resolved.** After Explore onboards the merchant, `aisle__shop` resolves
-which plan to buy without you knowing a SKU:
+**How the plan/SKU is resolved.** The sku always comes from **Agnic's catalogue for that
+merchant** — never from the model:
 1. an explicit `sku` you pass wins;
-2. else a `plan` name (from `find_tool` or you) is matched against the plans Explore surfaced;
-3. else, if the merchant exposes exactly one purchasable plan, it's auto-selected;
-4. else `aisle__shop` returns **`CHOOSE_PLAN`** with the options — show them and call `aisle__shop`
-   again with the chosen `sku`.
+2. else Aisle finds the merchant (known shop by domain → skip the ~2-min Explore, else Explore),
+   then reads its catalogue via `GET /api/autofill/merchants/{id}`;
+3. exactly one plan → straight to `AWAITING_APPROVAL`; an empty catalogue → `NO_CATALOGUE`
+   (for a plan behind a sign-in, use `aisle__execute_web_action`, your own signed-in browser);
+4. two or more → **`CHOOSE_PLAN`** with the plans; `plan` only sorts the closest match first and
+   marks it `recommended` — it never picks. The user picks, then you call `aisle__shop` again
+   with `merchant_id` + the chosen `sku` (no `explore_url`, so Explore never runs twice).
 
-Digital plans (no shipping) price straight to a total; physical goods still pick a delivery option.
+A recurring plan's approval summary says how it's billed (e.g. "billed monthly"). Digital plans
+(no shipping) price straight to a total; physical goods still pick a delivery option.
+
+> **Unverified until checked live:** the Agnic docs don't specify the catalogue's field name or
+> shape in `GET /api/autofill/merchants/{id}`, so `getMerchantCatalogue` parses it defensively
+> (`catalogue` / `catalog` / `products`, array or `{ items }`, optionally under `merchant`). Nor
+> is it confirmed that preview prices merchants on non-Shopify rails, or what it returns for a
+> digital plan with no delivery option. Check both against a live explored SaaS merchant.
 
 If Agnic raises a step-up (passkey / expired CVV / currency), `wait_for_purchase` returns
 `APPROVAL_REQUIRED` with a link — the user completes it, then Hermes calls
@@ -103,8 +118,9 @@ How you trigger Aisle depends on the client:
 
 | Tool | Does |
 |---|---|
+| `aisle__buy` | The single smart entry: classify physical vs SaaS and route (physical → Agnic; SaaS → vendor checkout / discovery). `{ prompt, country?, plan? }`. Never pays. |
 | `aisle__find_tool` | Goal → best-fit SaaS/MCP tool + checkout URL + plan (LLM). `{ goal }` → `{ tool_name, checkout_url, plan, why, alternatives }`. Never pays. |
-| `aisle__shop` | Discover + price a purchase; returns a summary for one approval, or `CHOOSE_PLAN` when a SaaS has several plans. `{ prompt, country?, merchant_id?, sku?, quantity?, explore_url?, plan? }` |
+| `aisle__shop` | Discover + price a purchase; returns a summary for one approval, or `CHOOSE_PLAN { merchant_id, plans }` when a SaaS has several plans (pick, then call again with `merchant_id` + `sku`). `{ prompt, country?, merchant_id?, sku?, quantity?, explore_url?, plan? }` |
 | `aisle__wait_for_purchase` | After approval, place the order and return the receipt. `{ shop_id }` |
 
 The HTTP surface for approval: `GET /shop/:id` (the confirm page), `POST /api/shop/:id/approve`,
@@ -117,7 +133,9 @@ Base `https://api.agnic.ai`, header `X-Agnic-Token`.
 | Step | Route |
 |---|---|
 | Discover by name | `GET /api/autofill/products/search?q=&country=` |
+| Known shop by domain | `GET /api/autofill/merchants?q=<hostname>` (any rail; skips Explore) |
 | Onboard a new shop | `POST /api/autofill/explore` → poll `GET /api/autofill/orders/{id}` until `explored` |
+| Plans to choose from | `GET /api/autofill/merchants/{id}` — the merchant's catalogue (shape unverified) |
 | Price (preview) | `POST /api/autofill/shopify/quote` |
 | Place (dispatch) | `POST /api/autofill/dispatch` — `202` = approval still required |
 | Step-up poll | `GET /api/approvals/{token}` until `approved` |

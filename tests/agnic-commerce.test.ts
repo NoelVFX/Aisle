@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { createAgnicClient, type AgnicFetch } from "../src/agnic/client.js";
-import { previewOrder, dispatchOrder, nextOrderAction, buildApprovedRequest, searchProducts, discoverMerchant, listMerchantProducts } from "../src/agnic/commerce.js";
+import { previewOrder, dispatchOrder, nextOrderAction, buildApprovedRequest, searchProducts, getMerchantCatalogue, findMerchantByDomain } from "../src/agnic/commerce.js";
 import { AgnicCommerceManager } from "../src/agnic/manager.js";
 
 /** A scripted Agnic backend: handler(path, init) → {httpStatus, data}; records calls. */
@@ -78,25 +78,6 @@ describe("preview (quote)", () => {
     const r = await previewOrder(agnic, { merchant_id: "M", items: [{ sku: "pro", quantity: 1 }] });
     expect(r.state).toBe("ready");
     if (r.state === "ready") { expect(r.expected_amount_minor).toBe(2000); expect(r.request.fulfillment_option_id).toBeUndefined(); }
-  });
-});
-
-describe("SaaS discovery (explore + merchant catalogue)", () => {
-  it("discoverMerchant returns the products Explore surfaced", async () => {
-    const { agnic } = mockAgnic(() => ({ httpStatus: 200, data: { order_id: "E1", status: "explored", merchant_id: "M9", products: [{ sku: "pro", title: "Pro", price_minor: 2000, currency: "USD" }] } }));
-    const r = await discoverMerchant(agnic, "https://resend.com/pricing", "send email");
-    expect(r.merchantId).toBe("M9");
-    expect(r.products.map((p) => p.sku)).toEqual(["pro"]);
-  });
-
-  it("listMerchantProducts scopes results to the merchant", async () => {
-    const { agnic, calls } = mockAgnic(() => ({ httpStatus: 200, data: { products: [
-      { sku: "pro", title: "Pro", merchant: { merchant_id: "M9" } },
-      { sku: "other", title: "Other", merchant: { merchant_id: "M-other" } },
-    ] } }));
-    const r = await listMerchantProducts(agnic, "M9", "pro", "US");
-    expect(r.map((p) => p.sku)).toEqual(["pro"]);
-    expect(calls[0]?.path).toContain("merchant_id=M9");
   });
 });
 
@@ -198,52 +179,172 @@ describe("AgnicCommerceManager end-to-end", () => {
   });
 });
 
-describe("AgnicCommerceManager — SaaS via explore_url", () => {
-  /** A SaaS merchant: explore inlines `plans`, quote prices a digital plan (no delivery). */
-  function saasManager(plans: Array<Record<string, unknown>>, opts: { catalogue?: Array<Record<string, unknown>> } = {}) {
-    const { agnic } = mockAgnic((path, init) => {
-      if (path === "/api/autofill/explore") return { httpStatus: 200, data: { order_id: "E1", status: "explored", merchant_id: "M9", products: plans } };
-      if (path.startsWith("/api/autofill/products/search")) return { httpStatus: 200, data: { products: opts.catalogue ?? [] } };
+describe("merchant catalogue + lookup by domain", () => {
+  it("parses the catalogue under alternate keys and shapes, keeping only buyable entries with a sku", async () => {
+    const plans = [
+      { sku: "p1", title: "Pro", price_minor: 2000, currency: "USD", billing: "month" },
+      { sku: "p2", name: "Scale", amount_minor: 9000, interval: "year", available: true },
+      { sku: "gone", title: "Legacy", available: false },
+      { title: "no sku" },
+      "junk",
+    ];
+    const shapes: Array<Record<string, unknown>> = [
+      { id: "M1", catalogue: plans },
+      { id: "M1", catalog: { items: plans } },
+      { id: "M1", products: plans },
+      { merchant: { id: "M1", catalogue: { items: plans } } },
+      { merchant: { id: "M1", catalog: plans } },
+    ];
+    for (const shape of shapes) {
+      const { agnic, calls } = mockAgnic(() => ({ httpStatus: 200, data: shape }));
+      const items = await getMerchantCatalogue(agnic, "M1");
+      expect(calls[0]?.path).toBe("/api/autofill/merchants/M1");
+      expect(items).toEqual([
+        { sku: "p1", title: "Pro", price_minor: 2000, currency: "USD", billing: "month" },
+        { sku: "p2", title: "Scale", price_minor: 9000, available: true, billing: "year" },
+      ]);
+    }
+  });
+
+  it("returns [] for a merchant without a catalogue, encodes the id, and throws on non-200", async () => {
+    const none = mockAgnic(() => ({ httpStatus: 200, data: { id: "M/1", name: "Shop" } }));
+    expect(await getMerchantCatalogue(none.agnic, "M/1")).toEqual([]);
+    expect(none.calls[0]?.path).toBe("/api/autofill/merchants/M%2F1");
+    const missing = mockAgnic(() => ({ httpStatus: 404, data: { error: "not_found" } }));
+    await expect(getMerchantCatalogue(missing.agnic, "M1")).rejects.toThrow(/HTTP 404/);
+  });
+
+  it("finds a known merchant by the URL's domain on any rail, ignoring www.", async () => {
+    const { agnic, calls } = mockAgnic(() => ({
+      httpStatus: 200,
+      data: { merchants: [{ id: "MX", domain: "notresend.com", rail: "shopify" }, { id: "M9", name: "Resend", domain: "www.resend.com", rail: "worker" }] },
+    }));
+    const m = await findMerchantByDomain(agnic, "https://resend.com/pricing");
+    expect(m).toEqual({ id: "M9", name: "Resend", domain: "www.resend.com", rail: "worker" });
+    expect(calls[0]?.path).toBe("/api/autofill/merchants?q=resend.com");
+  });
+
+  it("treats no match, a non-200 or a bad URL as not found", async () => {
+    const other = mockAgnic(() => ({ httpStatus: 200, data: { merchants: [{ id: "MX", domain: "example.com" }] } }));
+    expect(await findMerchantByDomain(other.agnic, "https://www.resend.com/pricing")).toBeUndefined();
+    const down = mockAgnic(() => ({ httpStatus: 502, data: { error: "non_json_response" } }));
+    expect(await findMerchantByDomain(down.agnic, "https://resend.com/pricing")).toBeUndefined();
+    const bad = mockAgnic(() => ({ httpStatus: 200, data: { merchants: [] } }));
+    expect(await findMerchantByDomain(bad.agnic, "not a url")).toBeUndefined();
+  });
+});
+
+describe("AgnicCommerceManager plan picker (explore → CHOOSE_PLAN → pick → approval)", () => {
+  const TWO_PLANS = [
+    { sku: "resend-pro", title: "Pro", price_minor: 2000, currency: "USD", billing: "month" },
+    { sku: "resend-scale", title: "Scale", price_minor: 9000, currency: "USD", billing: "month" },
+  ];
+
+  /** Agnic that doesn't know resend.com yet (unless `known`), explores it to M9, and quotes any sku. */
+  function planManager(opts: { catalogue: Record<string, unknown>; known?: boolean }) {
+    const { agnic, calls } = mockAgnic((path, init) => {
+      if (path.startsWith("/api/autofill/merchants?")) {
+        return { httpStatus: 200, data: { merchants: opts.known ? [{ id: "M9", name: "Resend", domain: "resend.com", rail: "worker" }] : [{ id: "MX", domain: "example.com" }] } };
+      }
+      if (path === "/api/autofill/explore") return { httpStatus: 200, data: { order_id: "E1", status: "explored", merchant_id: "M9" } };
+      if (path === "/api/autofill/merchants/M9") return { httpStatus: 200, data: opts.catalogue };
       if (path.startsWith("/api/autofill/shopify/quote")) {
-        const sku = ((init.body as { items?: Array<{ sku?: string }> }).items ?? [])[0]?.sku ?? "?";
-        return { httpStatus: 200, data: { expected_amount_minor: sku === "pro" ? 2000 : 1000, currency: "USD", amount_is_final: true, line_item: `${sku} plan`, fulfillment_options: [] } };
+        const b = (init.body ?? {}) as { items?: Array<{ sku: string }> };
+        const amount = b.items?.[0]?.sku === "resend-scale" ? 9000 : 2000;
+        return { httpStatus: 200, data: { expected_amount_minor: amount, currency: "USD", amount_is_final: true, selected_option_id: "D1", fulfillment_options: [{ id: "D1", type: "digital", amount_minor: 0 }] } };
       }
       return { httpStatus: 404, data: {} };
     });
-    return new AgnicCommerceManager({ agnic, publicUrl: () => "http://127.0.0.1:8787", defaultCountry: "US", pollMs: 0 });
+    const mgr = new AgnicCommerceManager({ agnic, publicUrl: () => "http://127.0.0.1:8787", defaultCountry: "US", pollMs: 0 });
+    const count = (pred: (c: { path: string; method: string }) => boolean) => calls.filter(pred).length;
+    return {
+      mgr,
+      calls,
+      explores: () => count((c) => c.path === "/api/autofill/explore"),
+      quotes: () => count((c) => c.path.startsWith("/api/autofill/shopify/quote")),
+      dispatches: () => count((c) => c.path === "/api/autofill/dispatch"),
+    };
   }
 
-  it("auto-selects the only plan Explore surfaced and prices it (no sku needed)", async () => {
-    const mgr = saasManager([{ sku: "pro", title: "Pro", available: true }]);
+  it("explores an unknown shop once, then returns CHOOSE_PLAN with every plan (nothing priced or placed)", async () => {
+    const { mgr, explores, quotes, dispatches } = planManager({ catalogue: { id: "M9", catalogue: TWO_PLANS } });
+    const r = await mgr.shop({ taskId: "t", prompt: "Resend plan", exploreUrl: "https://resend.com/pricing" });
+    expect(r.status).toBe("CHOOSE_PLAN");
+    if (r.status !== "CHOOSE_PLAN") return;
+    expect(r.merchant_id).toBe("M9");
+    expect(r.plans).toEqual([
+      { sku: "resend-pro", title: "Pro", price_minor: 2000, currency: "USD", billing: "month" },
+      { sku: "resend-scale", title: "Scale", price_minor: 9000, currency: "USD", billing: "month" },
+    ]);
+    expect(r.next).toMatch(/do not choose for them/);
+    expect(r.next).toMatch(/merchant_id and the chosen sku/);
+    expect(explores()).toBe(1);
+    expect(quotes()).toBe(0);
+    expect(dispatches()).toBe(0);
+  });
+
+  it("puts the plan matching plan_hint first and marks it recommended — but still lets the user choose", async () => {
+    const { mgr } = planManager({ catalogue: { id: "M9", catalogue: TWO_PLANS } });
+    const r = await mgr.shop({ taskId: "t", prompt: "Resend plan", exploreUrl: "https://resend.com/pricing", planHint: "scale (~$90/month)" });
+    expect(r.status).toBe("CHOOSE_PLAN");
+    if (r.status !== "CHOOSE_PLAN") return;
+    expect(r.plans.map((p) => p.sku)).toEqual(["resend-scale", "resend-pro"]);
+    expect(r.plans[0]?.recommended).toBe(true);
+    expect(r.plans[1]?.recommended).toBeUndefined();
+  });
+
+  it("the follow-up (merchant_id + chosen sku) goes straight to approval without exploring again, and says it recurs", async () => {
+    const { mgr, explores, calls } = planManager({ catalogue: { id: "M9", catalogue: TWO_PLANS } });
+    const choose = await mgr.shop({ taskId: "t", prompt: "Resend plan", exploreUrl: "https://resend.com/pricing" });
+    if (choose.status !== "CHOOSE_PLAN") throw new Error("expected CHOOSE_PLAN");
+    const before = calls.length;
+
+    const picked = await mgr.shop({ taskId: "t", prompt: "Resend plan", merchantId: choose.merchant_id, sku: "resend-scale" });
+    expect(picked.status).toBe("AWAITING_APPROVAL");
+    if (picked.status !== "AWAITING_APPROVAL") return;
+    expect(picked.merchant_id).toBe("M9");
+    expect(picked.total_minor).toBe(9000);
+    expect(picked.summary).toMatch(/^Scale — /);
+    expect(picked.summary).toMatch(/billed monthly/);
+    expect(explores()).toBe(1); // not explored again
+    // The follow-up only priced the chosen sku: no lookup, no explore, no catalogue read.
+    const followUp = calls.slice(before);
+    expect(followUp.map((c) => c.path)).toEqual(["/api/autofill/shopify/quote"]);
+    expect((followUp[0]?.body as { items: Array<{ sku: string }> }).items[0]?.sku).toBe("resend-scale");
+  });
+
+  it("a catalogue with exactly one plan goes straight to preview → AWAITING_APPROVAL", async () => {
+    const { mgr, explores } = planManager({ catalogue: { id: "M9", catalog: { items: [{ sku: "resend-pro", title: "Pro", billing: "monthly" }] } } });
     const r = await mgr.shop({ taskId: "t", prompt: "Resend plan", exploreUrl: "https://resend.com/pricing" });
     expect(r.status).toBe("AWAITING_APPROVAL");
-    if (r.status === "AWAITING_APPROVAL") { expect(r.total_minor).toBe(2000); expect(r.merchant_id).toBe("M9"); }
+    if (r.status !== "AWAITING_APPROVAL") return;
+    expect(r.total_minor).toBe(2000);
+    expect(r.summary).toMatch(/^Pro — .*billed monthly/);
+    expect(explores()).toBe(1);
   });
 
-  it("matches a plan by name via planHint", async () => {
-    const mgr = saasManager([
-      { sku: "starter", title: "Starter", available: true },
-      { sku: "pro", title: "Pro", available: true },
-    ]);
-    const r = await mgr.shop({ taskId: "t", prompt: "Resend", exploreUrl: "https://resend.com/pricing", planHint: "Pro" });
-    expect(r.status).toBe("AWAITING_APPROVAL");
-    if (r.status === "AWAITING_APPROVAL") expect(r.total_minor).toBe(2000);
+  it("an empty catalogue fails with NO_CATALOGUE and points at the signed-in browser path", async () => {
+    const { mgr, quotes } = planManager({ catalogue: { id: "M9", catalogue: [] } });
+    const r = await mgr.shop({ taskId: "t", prompt: "Resend plan", exploreUrl: "https://resend.com/pricing" });
+    expect(r.status).toBe("FAILED");
+    if (r.status !== "FAILED") return;
+    expect(r.error).toMatch(/^NO_CATALOGUE: explored https:\/\/resend\.com\/pricing/);
+    expect(r.error).toMatch(/aisle__execute_web_action/);
+    expect(quotes()).toBe(0);
   });
 
-  it("returns CHOOSE_PLAN when several plans are ambiguous", async () => {
-    const mgr = saasManager([
-      { sku: "starter", title: "Starter", available: true },
-      { sku: "pro", title: "Pro", available: true },
-    ]);
-    const r = await mgr.shop({ taskId: "t", prompt: "Resend", exploreUrl: "https://resend.com/pricing" });
+  it("a shop Agnic already knows (by domain) skips Explore", async () => {
+    const { mgr, explores, calls } = planManager({ catalogue: { id: "M9", catalogue: TWO_PLANS }, known: true });
+    const r = await mgr.shop({ taskId: "t", prompt: "Resend plan", exploreUrl: "https://www.resend.com/pricing" });
     expect(r.status).toBe("CHOOSE_PLAN");
-    if (r.status === "CHOOSE_PLAN") { expect(r.options.map((o) => o.sku).sort()).toEqual(["pro", "starter"]); expect(r.explore_url).toContain("resend.com"); }
+    expect(explores()).toBe(0);
+    expect(calls.map((c) => c.path)).toEqual(["/api/autofill/merchants?q=resend.com", "/api/autofill/merchants/M9"]);
   });
 
-  it("falls back to the merchant catalogue when Explore inlines nothing", async () => {
-    const mgr = saasManager([], { catalogue: [{ sku: "pro", title: "Pro", available: true, merchant: { merchant_id: "M9" } }] });
-    const r = await mgr.shop({ taskId: "t", prompt: "Resend", exploreUrl: "https://resend.com/pricing" });
+  it("an explore_url with a sku still buys that sku directly (no catalogue read)", async () => {
+    const { mgr, calls } = planManager({ catalogue: { id: "M9", catalogue: TWO_PLANS } });
+    const r = await mgr.shop({ taskId: "t", prompt: "Resend plan", exploreUrl: "https://resend.com/pricing", sku: "resend-pro" });
     expect(r.status).toBe("AWAITING_APPROVAL");
-    if (r.status === "AWAITING_APPROVAL") expect(r.total_minor).toBe(2000);
+    expect(calls.some((c) => c.path === "/api/autofill/merchants/M9")).toBe(false);
   });
 });

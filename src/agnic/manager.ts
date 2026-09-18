@@ -4,6 +4,9 @@
  *   discover (search / explore) → preview (a promise) → ONE human approval →
  *   dispatch (the only thing that spends) → follow the order → receipt
  *
+ * An explored merchant with several plans stops first at CHOOSE_PLAN: the user
+ * picks one, and the follow-up call (merchant_id + sku) goes straight to preview.
+ *
  * Aisle is the commerce agent (find, confirm, receipt); Agnic is the checkout
  * engine (explore/pay/vault/evidence). Nothing is charged before the user taps
  * approve, dispatch runs at most once per approval, and a 202 step-up (passkey /
@@ -17,14 +20,15 @@ import {
   buildApprovedRequest,
   discoverMerchant,
   dispatchOrder,
-  listMerchantProducts,
+  findMerchantByDomain,
+  getMerchantCatalogue,
   nextOrderAction,
   previewOrder,
   readOrder,
   searchProducts,
   waitForApproval,
-  type AgnicProduct,
   type ApprovedRequest,
+  type CatalogueItem,
   type Constraints,
   type PreviewRequest,
   type ReadyQuote,
@@ -44,7 +48,10 @@ export interface ShopRequest {
   constraints?: Constraints;
   /** A merchant URL to Explore (onboard) before buying, for a shop not yet in the network. */
   exploreUrl?: string;
-  /** A plan/tier name to match after exploring a SaaS ("Pro", "Starter") when no sku is given. */
+  /**
+   * A plan name that fits (e.g. "Pro", from aisle__find_tool). Only ranks the plans
+   * in CHOOSE_PLAN — it never becomes a sku and never picks a plan for the user.
+   */
   planHint?: string;
 }
 
@@ -63,12 +70,27 @@ export interface Receipt {
 
 export type ShopResult =
   | { status: "AWAITING_APPROVAL"; shop_id: string; approve_url: string; summary: string; total_minor: number; currency: string; merchant_id: string; next: string }
-  | { status: "CHOOSE_PLAN"; merchant_id: string; explore_url?: string; options: Array<{ sku: string; title?: string; price_minor?: number; currency?: string }>; next: string }
   | { status: "CHOOSE_DELIVERY"; shop_id: string; options: Array<{ id: string; label?: string; amount_minor?: number }>; next: string }
+  | { status: "CHOOSE_PLAN"; merchant_id: string; plans: PlanChoice[]; next: string }
   | { status: "APPROVAL_REQUIRED"; shop_id: string; approval_url?: string; reason?: string; next: string }
   | { status: "RUNNING"; shop_id: string }
   | { status: "COMPLETED"; shop_id: string; receipt: Receipt }
   | { status: "FAILED"; shop_id?: string; error: string };
+
+/** One plan offered in CHOOSE_PLAN. `recommended` marks the best match for the plan hint. */
+export interface PlanChoice {
+  sku: string;
+  title?: string;
+  price_minor?: number;
+  currency?: string;
+  billing?: string;
+  recommended?: boolean;
+}
+
+/** What the ask resolved to: a concrete (merchant, sku), or plans for the user to pick from. */
+type ResolvedTarget =
+  | { kind: "target"; merchantId: string; sku: string; plan?: CatalogueItem }
+  | { kind: "choose"; merchantId: string; plans: CatalogueItem[] };
 
 interface ShopState {
   id: string;
@@ -83,27 +105,6 @@ interface ShopState {
   stepUpToken?: string;
 }
 
-/** resolveTarget's outcome: a concrete buy, or several plans for the user to choose. */
-type ResolveResult =
-  | { kind: "target"; merchantId: string; sku: string }
-  | { kind: "choose"; merchantId: string; options: AgnicProduct[] };
-
-/**
- * Pick a plan from a merchant's products. A hint (plan/tier name) matches by title;
- * otherwise a single purchasable product auto-selects and anything ambiguous returns
- * undefined so the caller offers a choice — never guess which paid plan to buy.
- */
-function selectPlan(products: AgnicProduct[], hint?: string): AgnicProduct | undefined {
-  const avail = products.filter((p) => p.available !== false);
-  if (avail.length === 0) return undefined;
-  if (hint?.trim()) {
-    const h = hint.trim().toLowerCase();
-    const named = avail.find((p) => (p.title ?? "").toLowerCase().includes(h));
-    if (named) return named;
-  }
-  return avail.length === 1 ? avail[0] : undefined;
-}
-
 const money = (minor: number, currency: string): string => {
   try {
     return new Intl.NumberFormat("en", { style: "currency", currency }).format(minor / 100);
@@ -111,6 +112,37 @@ const money = (minor: number, currency: string): string => {
     return `${(minor / 100).toFixed(2)} ${currency}`;
   }
 };
+
+/** "month" / "monthly" → "monthly", etc.; undefined for a one-off charge or no billing info. */
+const billedEvery = (billing: string | undefined): string | undefined => {
+  const b = billing?.trim().toLowerCase();
+  if (!b || /^(one[\s_-]?(time|off)|once|lifetime|none)$/.test(b)) return undefined;
+  if (/^(month|monthly|mo|p1m)$/.test(b)) return "monthly";
+  if (/^(year|yearly|annual|annually|yr|p1y)$/.test(b)) return "yearly";
+  if (/^(week|weekly|p1w)$/.test(b)) return "weekly";
+  if (/^(day|daily|p1d)$/.test(b)) return "daily";
+  return b;
+};
+
+const tokens = (s: string): string[] => s.toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length > 1);
+
+/**
+ * How well a plan matches the hint: case-insensitive token overlap on its title and
+ * billing (an exact token scores 2, a prefix like "month"/"monthly" scores 1).
+ */
+const hintScore = (hint: string[], plan: CatalogueItem): number => {
+  const words = tokens(`${plan.title ?? ""} ${plan.billing ?? ""}`);
+  let score = 0;
+  for (const h of hint) {
+    if (words.includes(h)) score += 2;
+    else if (words.some((w) => w.startsWith(h) || h.startsWith(w))) score += 1;
+  }
+  return score;
+};
+
+/** Plans offered in CHOOSE_PLAN, remembered so the follow-up (merchant_id + sku) can show billing. */
+const OFFERED_PLANS_MAX = 500;
+const planKey = (merchantId: string, sku: string): string => `${merchantId}\u0000${sku}`;
 
 export interface AgnicManagerDeps {
   agnic: AgnicFetch;
@@ -122,6 +154,7 @@ export interface AgnicManagerDeps {
 
 export class AgnicCommerceManager {
   private readonly shops = new Map<string, ShopState>();
+  private readonly offeredPlans = new Map<string, CatalogueItem>();
 
   constructor(private readonly deps: AgnicManagerDeps) {}
 
@@ -129,22 +162,9 @@ export class AgnicCommerceManager {
   async shop(request: ShopRequest): Promise<ShopResult> {
     try {
       const country = request.country ?? this.deps.defaultCountry ?? "CA";
-      const resolved = await this.resolveTarget(request, country);
-      if (resolved.kind === "choose") {
-        return {
-          status: "CHOOSE_PLAN",
-          merchant_id: resolved.merchantId,
-          ...(request.exploreUrl ? { explore_url: request.exploreUrl } : {}),
-          options: resolved.options.map((p) => ({
-            sku: p.sku,
-            ...(p.title ? { title: p.title } : {}),
-            ...(p.price_minor !== undefined ? { price_minor: p.price_minor } : {}),
-            ...(p.currency ? { currency: p.currency } : {}),
-          })),
-          next: "Several plans were found. Show them to the user, then call aisle__shop again with the same explore_url plus `sku` (or `plan`) set to the one they choose.",
-        };
-      }
-      const { merchantId, sku } = resolved;
+      const target = await this.resolveTarget(request, country);
+      if (target.kind === "choose") return this.choosePlan(target.merchantId, target.plans, request.planHint);
+      const { merchantId, sku, plan } = target;
       const preview: PreviewRequest = {
         merchant_id: merchantId,
         items: [{ sku, quantity: request.quantity ?? 1 }],
@@ -170,8 +190,11 @@ export class AgnicCommerceManager {
 
       const id = randomUUID();
       const ceiling = quoted.amount_is_final ? "" : " (plus tax at checkout, never more than this)";
+      // A plan that renews must say so: the user is approving a recurring charge.
+      const every = billedEvery(plan?.billing);
+      const recurring = every ? `, billed ${every} (a recurring subscription)` : "";
       const summary =
-        `${quoted.lineItem ?? request.prompt.slice(0, 80)} — ${money(quoted.expected_amount_minor, quoted.currency)}${ceiling}. ` +
+        `${quoted.lineItem ?? plan?.title ?? request.prompt.slice(0, 80)} — ${money(quoted.expected_amount_minor, quoted.currency)}${recurring}${ceiling}. ` +
         `Merchant ${merchantId}. Pay with your vaulted card. Confirm?`;
       this.shops.set(id, { id, taskId: request.taskId, quote: quoted, merchantId, summary });
       return {
@@ -265,48 +288,80 @@ export class AgnicCommerceManager {
   }
 
   /**
-   * Resolve the NL ask (or explicit fields) to a concrete target, OR a list of plans
-   * to choose from. For an un-integrated SaaS (explore_url) with no sku, this onboards
-   * the merchant, then resolves the plan/sku from what Explore surfaced or a
-   * merchant-scoped Agnic product search — so the caller needn't know the sku.
+   * Resolve the NL ask (or explicit fields) to a concrete (merchant_id, sku) — or,
+   * for an explored merchant with several plans, the plans for the user to pick.
    */
-  private async resolveTarget(request: ShopRequest, country: string): Promise<ResolveResult> {
-    if (request.merchantId && request.sku) return { kind: "target", merchantId: request.merchantId, sku: request.sku };
-
-    if (request.exploreUrl) {
-      const { merchantId, products } = await discoverMerchant(this.deps.agnic, request.exploreUrl, request.prompt);
-      if (request.sku) return { kind: "target", merchantId, sku: request.sku };
-      return this.resolvePlan(merchantId, products, request, country);
+  private async resolveTarget(request: ShopRequest, country: string): Promise<ResolvedTarget> {
+    if (request.merchantId && request.sku) {
+      // The follow-up to CHOOSE_PLAN lands here, so Explore never runs twice.
+      const plan = this.offeredPlans.get(planKey(request.merchantId, request.sku));
+      return { kind: "target", merchantId: request.merchantId, sku: request.sku, ...(plan ? { plan } : {}) };
     }
-
+    if (request.exploreUrl) {
+      // A shop Agnic already knows skips the slow (~2 min) Explore.
+      const merchantId =
+        request.merchantId ??
+        (await findMerchantByDomain(this.deps.agnic, request.exploreUrl))?.id ??
+        (await discoverMerchant(this.deps.agnic, request.exploreUrl, request.prompt)).merchantId;
+      if (request.sku) return { kind: "target", merchantId, sku: request.sku };
+      // The sku has to come from Agnic's catalogue — a model can't invent one.
+      const plans = await getMerchantCatalogue(this.deps.agnic, merchantId);
+      const only = plans.length === 1 ? plans[0] : undefined;
+      if (only) return { kind: "target", merchantId, sku: only.sku, plan: only };
+      if (plans.length === 0) {
+        throw new Error(
+          `NO_CATALOGUE: explored ${request.exploreUrl} but Agnic recorded no buyable plans. ` +
+            "For a SaaS plan behind a sign-in, try aisle__execute_web_action, which uses your own signed-in browser.",
+        );
+      }
+      return { kind: "choose", merchantId, plans };
+    }
     const products = await searchProducts(this.deps.agnic, request.prompt, country);
     const pick = products.find((p) => p.available !== false && (p.merchant?.merchant_id || p.onboard?.merchant_url));
     if (!pick) throw new Error(`NO_PRODUCT: nothing purchasable found for "${request.prompt}" in ${country}. (Agnic searches vetted Shopify shops, not the whole web.)`);
     if (pick.merchant?.merchant_id) return { kind: "target", merchantId: pick.merchant.merchant_id, sku: pick.sku };
-    const { merchantId, products: onboarded } = await discoverMerchant(this.deps.agnic, pick.onboard!.merchant_url!, request.prompt);
-    // The searched product's sku should be valid at the onboarded merchant; fall back to plan resolution if not.
-    if (pick.sku) return { kind: "target", merchantId, sku: pick.sku };
-    return this.resolvePlan(merchantId, onboarded, request, country);
+    const { merchantId } = await discoverMerchant(this.deps.agnic, pick.onboard!.merchant_url!, request.prompt);
+    return { kind: "target", merchantId, sku: pick.sku };
   }
 
   /**
-   * Turn a merchant's plans into one target: an explicit plan name wins, a single
-   * purchasable plan auto-selects, and several ambiguous plans become a CHOOSE_PLAN.
-   * If Explore inlined no products, search the merchant's catalogue for them.
+   * Several plans: the user picks — never the model. The hint only ranks them
+   * (best match first, marked recommended); nothing is priced or held yet.
    */
-  private async resolvePlan(merchantId: string, inlined: AgnicProduct[], request: ShopRequest, country: string): Promise<ResolveResult> {
-    let candidates = inlined.filter((p) => p.available !== false);
-    if (candidates.length === 0) {
-      const found = await listMerchantProducts(this.deps.agnic, merchantId, request.planHint ?? request.prompt, country);
-      candidates = found.filter((p) => p.available !== false);
+  private choosePlan(merchantId: string, plans: CatalogueItem[], planHint: string | undefined): ShopResult {
+    const hint = tokens(planHint ?? "");
+    const scores = plans.map((p) => (hint.length > 0 ? hintScore(hint, p) : 0));
+    const best = Math.max(0, ...scores);
+    const choices: PlanChoice[] = plans.map((p, i) => ({
+      sku: p.sku,
+      ...(p.title ? { title: p.title } : {}),
+      ...(p.price_minor !== undefined ? { price_minor: p.price_minor } : {}),
+      ...(p.currency ? { currency: p.currency } : {}),
+      ...(p.billing ? { billing: p.billing } : {}),
+      ...(best > 0 && scores[i] === best ? { recommended: true } : {}),
+    }));
+    choices.sort((a, b) => Number(b.recommended === true) - Number(a.recommended === true)); // stable: catalogue order otherwise
+
+    for (const p of plans) {
+      const key = planKey(merchantId, p.sku);
+      this.offeredPlans.delete(key); // re-insert as newest
+      this.offeredPlans.set(key, p);
     }
-    const pick = selectPlan(candidates, request.planHint);
-    if (pick) return { kind: "target", merchantId, sku: pick.sku };
-    if (candidates.length > 0) return { kind: "choose", merchantId, options: candidates };
-    throw new Error(
-      `EXPLORED_NO_PLAN: onboarded ${merchantId} but found no purchasable plan for "${request.planHint ?? request.prompt}". ` +
-        `Pass an explicit sku, a plan name, or a checkout URL that points at the specific plan.`,
-    );
+    while (this.offeredPlans.size > OFFERED_PLANS_MAX) {
+      const oldest = this.offeredPlans.keys().next().value;
+      if (oldest === undefined) break;
+      this.offeredPlans.delete(oldest);
+    }
+
+    return {
+      status: "CHOOSE_PLAN",
+      merchant_id: merchantId,
+      plans: choices,
+      next:
+        "Show the user these plans and let them choose — do not choose for them" +
+        (best > 0 ? " (`recommended` only marks the closest match to the plan hint)" : "") +
+        ". Then call aisle__shop again with merchant_id and the chosen sku (no explore_url needed).",
+    };
   }
 
   private persistPending(taskId: string, merchantId: string): string {
