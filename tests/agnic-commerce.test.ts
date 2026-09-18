@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { createAgnicClient, type AgnicFetch } from "../src/agnic/client.js";
-import { previewOrder, dispatchOrder, nextOrderAction, buildApprovedRequest, searchProducts } from "../src/agnic/commerce.js";
+import { previewOrder, dispatchOrder, nextOrderAction, buildApprovedRequest, searchProducts, discoverMerchant, listMerchantProducts } from "../src/agnic/commerce.js";
 import { AgnicCommerceManager } from "../src/agnic/manager.js";
 
 /** A scripted Agnic backend: handler(path, init) → {httpStatus, data}; records calls. */
@@ -71,6 +71,32 @@ describe("preview (quote)", () => {
     const ref = mockAgnic(() => ({ httpStatus: 409, data: { error: "shopify_amount_changed" } }));
     const r = await previewOrder(ref.agnic, { merchant_id: "M", items: [{ sku: "S", quantity: 1 }] });
     expect(r.state).toBe("refused");
+  });
+
+  it("treats a digital plan (priced, no fulfillment options) as ready", async () => {
+    const { agnic } = mockAgnic(() => ({ httpStatus: 200, data: { expected_amount_minor: 2000, currency: "USD", amount_is_final: true, line_item: "Pro plan", fulfillment_options: [] } }));
+    const r = await previewOrder(agnic, { merchant_id: "M", items: [{ sku: "pro", quantity: 1 }] });
+    expect(r.state).toBe("ready");
+    if (r.state === "ready") { expect(r.expected_amount_minor).toBe(2000); expect(r.request.fulfillment_option_id).toBeUndefined(); }
+  });
+});
+
+describe("SaaS discovery (explore + merchant catalogue)", () => {
+  it("discoverMerchant returns the products Explore surfaced", async () => {
+    const { agnic } = mockAgnic(() => ({ httpStatus: 200, data: { order_id: "E1", status: "explored", merchant_id: "M9", products: [{ sku: "pro", title: "Pro", price_minor: 2000, currency: "USD" }] } }));
+    const r = await discoverMerchant(agnic, "https://resend.com/pricing", "send email");
+    expect(r.merchantId).toBe("M9");
+    expect(r.products.map((p) => p.sku)).toEqual(["pro"]);
+  });
+
+  it("listMerchantProducts scopes results to the merchant", async () => {
+    const { agnic, calls } = mockAgnic(() => ({ httpStatus: 200, data: { products: [
+      { sku: "pro", title: "Pro", merchant: { merchant_id: "M9" } },
+      { sku: "other", title: "Other", merchant: { merchant_id: "M-other" } },
+    ] } }));
+    const r = await listMerchantProducts(agnic, "M9", "pro", "US");
+    expect(r.map((p) => p.sku)).toEqual(["pro"]);
+    expect(calls[0]?.path).toContain("merchant_id=M9");
   });
 });
 
@@ -169,5 +195,55 @@ describe("AgnicCommerceManager end-to-end", () => {
     if (stepUp.status === "APPROVAL_REQUIRED") expect(stepUp.reason).toBe("cvv_refresh_required");
     const done = await mgr.wait(started.shop_id); // polls approval, re-dispatches once, completes
     expect(done.status).toBe("COMPLETED");
+  });
+});
+
+describe("AgnicCommerceManager — SaaS via explore_url", () => {
+  /** A SaaS merchant: explore inlines `plans`, quote prices a digital plan (no delivery). */
+  function saasManager(plans: Array<Record<string, unknown>>, opts: { catalogue?: Array<Record<string, unknown>> } = {}) {
+    const { agnic } = mockAgnic((path, init) => {
+      if (path === "/api/autofill/explore") return { httpStatus: 200, data: { order_id: "E1", status: "explored", merchant_id: "M9", products: plans } };
+      if (path.startsWith("/api/autofill/products/search")) return { httpStatus: 200, data: { products: opts.catalogue ?? [] } };
+      if (path.startsWith("/api/autofill/shopify/quote")) {
+        const sku = ((init.body as { items?: Array<{ sku?: string }> }).items ?? [])[0]?.sku ?? "?";
+        return { httpStatus: 200, data: { expected_amount_minor: sku === "pro" ? 2000 : 1000, currency: "USD", amount_is_final: true, line_item: `${sku} plan`, fulfillment_options: [] } };
+      }
+      return { httpStatus: 404, data: {} };
+    });
+    return new AgnicCommerceManager({ agnic, publicUrl: () => "http://127.0.0.1:8787", defaultCountry: "US", pollMs: 0 });
+  }
+
+  it("auto-selects the only plan Explore surfaced and prices it (no sku needed)", async () => {
+    const mgr = saasManager([{ sku: "pro", title: "Pro", available: true }]);
+    const r = await mgr.shop({ taskId: "t", prompt: "Resend plan", exploreUrl: "https://resend.com/pricing" });
+    expect(r.status).toBe("AWAITING_APPROVAL");
+    if (r.status === "AWAITING_APPROVAL") { expect(r.total_minor).toBe(2000); expect(r.merchant_id).toBe("M9"); }
+  });
+
+  it("matches a plan by name via planHint", async () => {
+    const mgr = saasManager([
+      { sku: "starter", title: "Starter", available: true },
+      { sku: "pro", title: "Pro", available: true },
+    ]);
+    const r = await mgr.shop({ taskId: "t", prompt: "Resend", exploreUrl: "https://resend.com/pricing", planHint: "Pro" });
+    expect(r.status).toBe("AWAITING_APPROVAL");
+    if (r.status === "AWAITING_APPROVAL") expect(r.total_minor).toBe(2000);
+  });
+
+  it("returns CHOOSE_PLAN when several plans are ambiguous", async () => {
+    const mgr = saasManager([
+      { sku: "starter", title: "Starter", available: true },
+      { sku: "pro", title: "Pro", available: true },
+    ]);
+    const r = await mgr.shop({ taskId: "t", prompt: "Resend", exploreUrl: "https://resend.com/pricing" });
+    expect(r.status).toBe("CHOOSE_PLAN");
+    if (r.status === "CHOOSE_PLAN") { expect(r.options.map((o) => o.sku).sort()).toEqual(["pro", "starter"]); expect(r.explore_url).toContain("resend.com"); }
+  });
+
+  it("falls back to the merchant catalogue when Explore inlines nothing", async () => {
+    const mgr = saasManager([], { catalogue: [{ sku: "pro", title: "Pro", available: true, merchant: { merchant_id: "M9" } }] });
+    const r = await mgr.shop({ taskId: "t", prompt: "Resend", exploreUrl: "https://resend.com/pricing" });
+    expect(r.status).toBe("AWAITING_APPROVAL");
+    if (r.status === "AWAITING_APPROVAL") expect(r.total_minor).toBe(2000);
   });
 });

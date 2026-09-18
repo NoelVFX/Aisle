@@ -26,6 +26,7 @@ const resendReply = JSON.stringify({
   category: "Transactional email API",
   why: "Developer-first email with an official MCP server",
   checkout_url: "https://resend.com/pricing",
+  plan: "Pro",
   has_mcp: true,
   alternatives: [{ tool_name: "Postmark", why: "Reliable transactional email" }, { tool_name: "SendGrid", why: "Scales to volume" }],
 });
@@ -36,6 +37,7 @@ describe("recommendTool", () => {
     const rec = await recommendTool("an MCP tool for my site that sends email autonomously", { apiKey: "k", fetchImpl });
     expect(rec.tool_name).toBe("Resend");
     expect(rec.checkout_url).toBe("https://resend.com/pricing");
+    expect(rec.plan).toBe("Pro");
     expect(rec.has_mcp).toBe(true);
     expect(rec.alternatives.map((a) => a.tool_name)).toEqual(["Postmark", "SendGrid"]);
     expect(rec.model_used).toBe("qwen/qwen3.7-max");

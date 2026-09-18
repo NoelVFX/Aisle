@@ -32,6 +32,8 @@ export interface ToolRecommendation {
   why: string;
   /** Canonical pricing/checkout page — feed this to aisle__shop as explore_url. */
   checkout_url: string;
+  /** Suggested plan/tier to start on (e.g. "Pro", "Starter") — feed to aisle__shop as `plan`. */
+  plan: string;
   /** Whether the tool ships an MCP server (best-effort model knowledge). */
   has_mcp: boolean;
   /** Runner-up options the user might prefer. */
@@ -72,8 +74,9 @@ const PROMPT = (goal: string): string =>
   `Goal: ${goal}\n\n` +
   `Recommend the SINGLE best-fit, widely-used, reputable tool. Prefer tools that ship an official MCP server or a clean API. ` +
   `Give its CANONICAL pricing or checkout URL (the public pricing page), e.g. https://resend.com/pricing — a real, current https URL, no tracking params, no guesses at deep checkout links.\n\n` +
+  `Also name the entry paid plan/tier to start on (e.g. "Pro", "Starter", "Pay as you go").\n` +
   `Return ONLY minified JSON, no prose, no markdown fences:\n` +
-  `{"tool_name":"","vendor":"","category":"","why":"<=20 words","checkout_url":"https://...","has_mcp":true,"alternatives":[{"tool_name":"","why":"<=12 words"},{"tool_name":"","why":"<=12 words"}]}`;
+  `{"tool_name":"","vendor":"","category":"","why":"<=20 words","checkout_url":"https://...","plan":"","has_mcp":true,"alternatives":[{"tool_name":"","why":"<=12 words"},{"tool_name":"","why":"<=12 words"}]}`;
 
 /** Extract the first JSON object from a model reply, tolerating fences/prose around it. */
 function extractJson(text: string): Record<string, unknown> {
@@ -114,6 +117,7 @@ function coerce(obj: Record<string, unknown>, modelUsed: string | undefined): To
     category: str(obj["category"]),
     why: str(obj["why"]),
     checkout_url: url,
+    plan: str(obj["plan"]),
     has_mcp: obj["has_mcp"] === true,
     alternatives,
     ...(modelUsed ? { model_used: modelUsed } : {}),

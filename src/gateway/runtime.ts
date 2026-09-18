@@ -408,7 +408,7 @@ export function registerAisleTools(
         const result = {
           status: "RECOMMENDED",
           ...rec,
-          next: `Show the user "${rec.tool_name}" (${rec.checkout_url}) and its rationale. To buy its plan, call aisle__shop with explore_url set to that checkout_url. The user still approves before anything is charged.`,
+          next: `Show the user "${rec.tool_name}" (${rec.checkout_url}) and its rationale. To buy its plan, call aisle__shop with explore_url set to that checkout_url and plan set to ${JSON.stringify(rec.plan || "the tier the user wants")}. If it returns CHOOSE_PLAN, show the options and call aisle__shop again with the chosen sku. The user still approves before anything is charged.`,
         };
         return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result };
       } catch (err) {
@@ -429,11 +429,12 @@ export function registerAisleTools(
         merchant_id: z.string().optional().describe("Skip search: buy from this merchant."),
         sku: z.string().optional().describe("The exact product to buy (with merchant_id or explore_url)."),
         quantity: z.number().int().positive().max(50).optional(),
-        explore_url: z.string().url().optional().describe("Onboard this shop (Explore) before buying."),
+        explore_url: z.string().url().optional().describe("Onboard this shop (Explore) before buying — e.g. a SaaS pricing page."),
+        plan: z.string().optional().describe("Plan/tier to match after exploring a SaaS, e.g. \"Pro\" (used when no sku)."),
       },
       _meta: widgetMeta,
     },
-    async ({ prompt, country, merchant_id, sku, quantity, explore_url }, extra) => {
+    async ({ prompt, country, merchant_id, sku, quantity, explore_url, plan }, extra) => {
       if (!runtime.agnicCommerce) return agnicMissing;
       const result = await runtime.agnicCommerce.shop({
         taskId: taskFor(extra as unknown as Extra),
@@ -443,6 +444,7 @@ export function registerAisleTools(
         ...(sku ? { sku } : {}),
         ...(quantity ? { quantity } : {}),
         ...(explore_url ? { exploreUrl: explore_url } : {}),
+        ...(plan ? { planHint: plan } : {}),
       });
       return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result };
     },
@@ -537,8 +539,8 @@ export function registerAisleTools(
               `Complete this purchase through Aisle's Agnic checkout rail ONLY. Request: ${JSON.stringify(request)}. ` +
               `Do NOT use any other shopping, browser, payment, or marketplace tool — it must go through Aisle so it gets exactly one human approval and a verifiable receipt.\n` +
               `1. If the request describes a GOAL or a need for a tool (e.g. "an MCP tool that sends email") rather than a specific product, first call aisle__find_tool with goal set to the request, then show me the recommended tool and its checkout_url. If it is already a concrete product, skip this step.\n` +
-              `2. Call aisle__shop with prompt set to the request. If you used aisle__find_tool, also pass explore_url set to its checkout_url. Pass merchant_id/sku only if I gave them.\n` +
-              `3. On AWAITING_APPROVAL, show me the summary, total, and approve_url, then STOP and wait — I approve on that page. Never place payment yourself.\n` +
+              `2. Call aisle__shop with prompt set to the request. If you used aisle__find_tool, also pass explore_url set to its checkout_url and plan set to its suggested plan. Pass merchant_id/sku only if I gave them.\n` +
+              `3. If aisle__shop returns CHOOSE_PLAN, show me the plan options and call aisle__shop again with the same explore_url plus the sku I pick. On AWAITING_APPROVAL, show me the summary, total, and approve_url, then STOP and wait — I approve on that page. Never place payment yourself.\n` +
               `4. After I approve, call aisle__wait_for_purchase with the shop_id and poll it. If it returns APPROVAL_REQUIRED, show me the link, let me finish it, then call aisle__wait_for_purchase again. Do NOT re-run aisle__shop.\n` +
               `5. When COMPLETED, show me the receipt (order id, amount, currency, status).`,
           },

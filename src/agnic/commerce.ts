@@ -131,11 +131,14 @@ export async function discoverMerchant(
   merchantUrl: string,
   goal: string,
   opts: { timeoutMs?: number; pollMs?: number } = {},
-): Promise<{ merchantId: string }> {
+): Promise<{ merchantId: string; products: AgnicProduct[] }> {
+  const readProducts = (d: Record<string, unknown>): AgnicProduct[] =>
+    (Array.isArray(d["products"]) ? (d["products"] as AgnicProduct[]) : []).filter((p) => p && p.sku);
+
   const { httpStatus, data } = await agnic(`${AUTOFILL}/explore`, { method: "POST", body: { merchant_url: merchantUrl, goal: goal.slice(0, 200) } });
   if (httpStatus !== 200 || !str(data["order_id"])) throw new Error(`agnic.explore HTTP ${httpStatus}: ${str(data["error"]) ?? "no order_id"}`);
   const orderId = str(data["order_id"])!;
-  if (str(data["status"]) === "explored" && str(data["merchant_id"])) return { merchantId: str(data["merchant_id"])! };
+  if (str(data["status"]) === "explored" && str(data["merchant_id"])) return { merchantId: str(data["merchant_id"])!, products: readProducts(data) };
 
   const deadline = Date.now() + (opts.timeoutMs ?? 180_000);
   const pollMs = opts.pollMs ?? 4000;
@@ -143,8 +146,9 @@ export async function discoverMerchant(
     await sleep(pollMs);
     const order = await readOrder(agnic, orderId);
     if (order.status === "explored") {
-      const mid = str((order as Record<string, unknown>)["merchant_id"]) ?? str(data["merchant_id"]);
-      if (mid) return { merchantId: mid };
+      const o = order as unknown as Record<string, unknown>;
+      const mid = str(o["merchant_id"]) ?? str(data["merchant_id"]);
+      if (mid) return { merchantId: mid, products: readProducts(o) };
       throw new Error("agnic.explore: explored but no merchant_id returned.");
     }
     if (order.status && !["exploring", "processing", "pending"].includes(order.status)) {
@@ -152,6 +156,28 @@ export async function discoverMerchant(
     }
     if (Date.now() > deadline) throw new Error("agnic.explore timed out before 'explored'.");
   }
+}
+
+/**
+ * The purchasable products (SaaS plans, credit packs) at a merchant already in the
+ * network — the merchant-scoped catalogue Explore didn't inline. Used to resolve a
+ * plan/sku after an un-integrated SaaS is onboarded, so the caller need not know the
+ * sku up front. Results are filtered to this merchant even if the API returns a wider set.
+ */
+export async function listMerchantProducts(
+  agnic: AgnicFetch,
+  merchantId: string,
+  query = "",
+  country = "CA",
+  limit = 20,
+): Promise<AgnicProduct[]> {
+  const params = new URLSearchParams({ merchant_id: merchantId, country, limit: String(Math.min(50, Math.max(1, limit))) });
+  if (query) params.set("q", query);
+  const { httpStatus, data } = await agnic(`${AUTOFILL}/products/search?${params}`);
+  if (httpStatus !== 200) throw new Error(`agnic.merchantProducts HTTP ${httpStatus}: ${str(data["error"]) ?? "unknown"}`);
+  return (Array.isArray(data["products"]) ? (data["products"] as AgnicProduct[]) : [])
+    .filter((p) => p && p.sku)
+    .filter((p) => !p.merchant?.merchant_id || p.merchant.merchant_id === merchantId);
 }
 
 /**
@@ -171,21 +197,27 @@ export async function previewOrder(agnic: AgnicFetch, request: PreviewRequest): 
     (x) => x && x.type !== "pickup" && x.type !== "none",
   );
   const expected = num(data["expected_amount_minor"]);
-  if (data["requires_fulfillment_choice"] || expected === undefined) return { state: "choose_delivery", options };
+  // No single total yet, a $0 line, or the merchant explicitly wants a delivery choice → ask.
+  if (expected === undefined || expected < 1 || data["requires_fulfillment_choice"]) return { state: "choose_delivery", options };
 
-  const selected =
-    options.find((x) => x.id === snapshot.fulfillment_option_id) ?? options.find((x) => x.id === str(data["selected_option_id"]));
-  if (!selected || expected < 1) return { state: "choose_delivery", options };
-  snapshot.fulfillment_option_id = selected.id;
-
-  return {
+  const ready = (): ReadyQuote => ({
     state: "ready",
     request: snapshot,
     expected_amount_minor: expected,
     currency: str(data["currency"]) ?? "USD",
     amount_is_final: data["amount_is_final"] !== false,
     ...(str(data["line_item"]) ? { lineItem: str(data["line_item"])! } : {}),
-  };
+  });
+
+  // Digital goods — SaaS plans, credit packs — surface no fulfillment options; ready as priced.
+  if (options.length === 0) return ready();
+
+  // Physical goods: a specific delivery option must be locked into the snapshot.
+  const selected =
+    options.find((x) => x.id === snapshot.fulfillment_option_id) ?? options.find((x) => x.id === str(data["selected_option_id"]));
+  if (!selected) return { state: "choose_delivery", options };
+  snapshot.fulfillment_option_id = selected.id;
+  return ready();
 }
 
 /** The approved, dispatchable body: the same fields you quoted, plus the confirmation. */

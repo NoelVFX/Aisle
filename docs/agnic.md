@@ -26,17 +26,27 @@ SaaS/MCP tool and returns its **checkout URL**, which feeds straight into `aisle
 
 ```
 User → Hermes: "I want an MCP tool that sends email autonomously"
-Hermes → aisle__find_tool { goal }                 (Aisle: OpenRouter LLM picks the tool)
-  → RECOMMENDED { tool_name: "Resend", checkout_url, why, alternatives }
-Hermes → aisle__shop { prompt: "Resend plan", explore_url: <checkout_url> }
+Hermes → aisle__find_tool { goal }                 (Aisle: OpenRouter LLM picks the tool + plan)
+  → RECOMMENDED { tool_name: "Resend", checkout_url, plan: "Pro", why, alternatives }
+Hermes → aisle__shop { prompt: "Resend plan", explore_url: <checkout_url>, plan: "Pro" }
   → AWAITING_APPROVAL → approve → aisle__wait_for_purchase → COMPLETED { receipt }
 ```
 
-`aisle__find_tool` only *names* a tool and a URL — it never pays. Agnic (product search)
-indexes vetted Shopify goods, not SaaS/MCP subscriptions, so this recommendation is an LLM
+`aisle__find_tool` only *names* a tool, a URL, and a plan — it never pays. Agnic's product
+*search* indexes vetted Shopify goods, not SaaS subscriptions, so the recommendation is an LLM
 judgement (Qwen 3.7 Max by default, via `OPENROUTER_INFRA_KEY`; override with
 `OPENROUTER_RECOMMEND_MODEL`). Aisle then completes the plan's checkout through Agnic's
-Explore-then-Pay engine at that URL.
+**Explore-then-Pay** engine at that URL.
+
+**How the plan/SKU is resolved.** After Explore onboards the merchant, `aisle__shop` resolves
+which plan to buy without you knowing a SKU:
+1. an explicit `sku` you pass wins;
+2. else a `plan` name (from `find_tool` or you) is matched against the plans Explore surfaced;
+3. else, if the merchant exposes exactly one purchasable plan, it's auto-selected;
+4. else `aisle__shop` returns **`CHOOSE_PLAN`** with the options — show them and call `aisle__shop`
+   again with the chosen `sku`.
+
+Digital plans (no shipping) price straight to a total; physical goods still pick a delivery option.
 
 If Agnic raises a step-up (passkey / expired CVV / currency), `wait_for_purchase` returns
 `APPROVAL_REQUIRED` with a link — the user completes it, then Hermes calls
@@ -64,8 +74,8 @@ The slash command is the reliable one; the natural-language prefix is the conven
 
 | Tool | Does |
 |---|---|
-| `aisle__find_tool` | Goal → best-fit SaaS/MCP tool + its checkout URL (LLM). `{ goal }` → `{ tool_name, checkout_url, why, alternatives }`. Never pays. |
-| `aisle__shop` | Discover + price a purchase; returns a summary for one approval. `{ prompt, country?, merchant_id?, sku?, quantity?, explore_url? }` |
+| `aisle__find_tool` | Goal → best-fit SaaS/MCP tool + checkout URL + plan (LLM). `{ goal }` → `{ tool_name, checkout_url, plan, why, alternatives }`. Never pays. |
+| `aisle__shop` | Discover + price a purchase; returns a summary for one approval, or `CHOOSE_PLAN` when a SaaS has several plans. `{ prompt, country?, merchant_id?, sku?, quantity?, explore_url?, plan? }` |
 | `aisle__wait_for_purchase` | After approval, place the order and return the receipt. `{ shop_id }` |
 
 The HTTP surface for approval: `GET /shop/:id` (the confirm page), `POST /api/shop/:id/approve`,

@@ -17,11 +17,13 @@ import {
   buildApprovedRequest,
   discoverMerchant,
   dispatchOrder,
+  listMerchantProducts,
   nextOrderAction,
   previewOrder,
   readOrder,
   searchProducts,
   waitForApproval,
+  type AgnicProduct,
   type ApprovedRequest,
   type Constraints,
   type PreviewRequest,
@@ -42,6 +44,8 @@ export interface ShopRequest {
   constraints?: Constraints;
   /** A merchant URL to Explore (onboard) before buying, for a shop not yet in the network. */
   exploreUrl?: string;
+  /** A plan/tier name to match after exploring a SaaS ("Pro", "Starter") when no sku is given. */
+  planHint?: string;
 }
 
 export interface Receipt {
@@ -59,6 +63,7 @@ export interface Receipt {
 
 export type ShopResult =
   | { status: "AWAITING_APPROVAL"; shop_id: string; approve_url: string; summary: string; total_minor: number; currency: string; merchant_id: string; next: string }
+  | { status: "CHOOSE_PLAN"; merchant_id: string; explore_url?: string; options: Array<{ sku: string; title?: string; price_minor?: number; currency?: string }>; next: string }
   | { status: "CHOOSE_DELIVERY"; shop_id: string; options: Array<{ id: string; label?: string; amount_minor?: number }>; next: string }
   | { status: "APPROVAL_REQUIRED"; shop_id: string; approval_url?: string; reason?: string; next: string }
   | { status: "RUNNING"; shop_id: string }
@@ -76,6 +81,27 @@ interface ShopState {
   request?: ApprovedRequest;
   orderId?: string;
   stepUpToken?: string;
+}
+
+/** resolveTarget's outcome: a concrete buy, or several plans for the user to choose. */
+type ResolveResult =
+  | { kind: "target"; merchantId: string; sku: string }
+  | { kind: "choose"; merchantId: string; options: AgnicProduct[] };
+
+/**
+ * Pick a plan from a merchant's products. A hint (plan/tier name) matches by title;
+ * otherwise a single purchasable product auto-selects and anything ambiguous returns
+ * undefined so the caller offers a choice — never guess which paid plan to buy.
+ */
+function selectPlan(products: AgnicProduct[], hint?: string): AgnicProduct | undefined {
+  const avail = products.filter((p) => p.available !== false);
+  if (avail.length === 0) return undefined;
+  if (hint?.trim()) {
+    const h = hint.trim().toLowerCase();
+    const named = avail.find((p) => (p.title ?? "").toLowerCase().includes(h));
+    if (named) return named;
+  }
+  return avail.length === 1 ? avail[0] : undefined;
 }
 
 const money = (minor: number, currency: string): string => {
@@ -103,7 +129,22 @@ export class AgnicCommerceManager {
   async shop(request: ShopRequest): Promise<ShopResult> {
     try {
       const country = request.country ?? this.deps.defaultCountry ?? "CA";
-      const { merchantId, sku } = await this.resolveTarget(request, country);
+      const resolved = await this.resolveTarget(request, country);
+      if (resolved.kind === "choose") {
+        return {
+          status: "CHOOSE_PLAN",
+          merchant_id: resolved.merchantId,
+          ...(request.exploreUrl ? { explore_url: request.exploreUrl } : {}),
+          options: resolved.options.map((p) => ({
+            sku: p.sku,
+            ...(p.title ? { title: p.title } : {}),
+            ...(p.price_minor !== undefined ? { price_minor: p.price_minor } : {}),
+            ...(p.currency ? { currency: p.currency } : {}),
+          })),
+          next: "Several plans were found. Show them to the user, then call aisle__shop again with the same explore_url plus `sku` (or `plan`) set to the one they choose.",
+        };
+      }
+      const { merchantId, sku } = resolved;
       const preview: PreviewRequest = {
         merchant_id: merchantId,
         items: [{ sku, quantity: request.quantity ?? 1 }],
@@ -223,20 +264,49 @@ export class AgnicCommerceManager {
     return { summary: s.summary, total_minor: s.quote.expected_amount_minor, currency: s.quote.currency, approved: s.approved !== undefined };
   }
 
-  /** Resolve the NL ask (or explicit fields) to a concrete (merchant_id, sku). */
-  private async resolveTarget(request: ShopRequest, country: string): Promise<{ merchantId: string; sku: string }> {
-    if (request.merchantId && request.sku) return { merchantId: request.merchantId, sku: request.sku };
+  /**
+   * Resolve the NL ask (or explicit fields) to a concrete target, OR a list of plans
+   * to choose from. For an un-integrated SaaS (explore_url) with no sku, this onboards
+   * the merchant, then resolves the plan/sku from what Explore surfaced or a
+   * merchant-scoped Agnic product search — so the caller needn't know the sku.
+   */
+  private async resolveTarget(request: ShopRequest, country: string): Promise<ResolveResult> {
+    if (request.merchantId && request.sku) return { kind: "target", merchantId: request.merchantId, sku: request.sku };
+
     if (request.exploreUrl) {
-      const { merchantId } = await discoverMerchant(this.deps.agnic, request.exploreUrl, request.prompt);
-      if (!request.sku) throw new Error("A product sku is required after exploring a merchant.");
-      return { merchantId, sku: request.sku };
+      const { merchantId, products } = await discoverMerchant(this.deps.agnic, request.exploreUrl, request.prompt);
+      if (request.sku) return { kind: "target", merchantId, sku: request.sku };
+      return this.resolvePlan(merchantId, products, request, country);
     }
+
     const products = await searchProducts(this.deps.agnic, request.prompt, country);
     const pick = products.find((p) => p.available !== false && (p.merchant?.merchant_id || p.onboard?.merchant_url));
     if (!pick) throw new Error(`NO_PRODUCT: nothing purchasable found for "${request.prompt}" in ${country}. (Agnic searches vetted Shopify shops, not the whole web.)`);
-    if (pick.merchant?.merchant_id) return { merchantId: pick.merchant.merchant_id, sku: pick.sku };
-    const { merchantId } = await discoverMerchant(this.deps.agnic, pick.onboard!.merchant_url!, request.prompt);
-    return { merchantId, sku: pick.sku };
+    if (pick.merchant?.merchant_id) return { kind: "target", merchantId: pick.merchant.merchant_id, sku: pick.sku };
+    const { merchantId, products: onboarded } = await discoverMerchant(this.deps.agnic, pick.onboard!.merchant_url!, request.prompt);
+    // The searched product's sku should be valid at the onboarded merchant; fall back to plan resolution if not.
+    if (pick.sku) return { kind: "target", merchantId, sku: pick.sku };
+    return this.resolvePlan(merchantId, onboarded, request, country);
+  }
+
+  /**
+   * Turn a merchant's plans into one target: an explicit plan name wins, a single
+   * purchasable plan auto-selects, and several ambiguous plans become a CHOOSE_PLAN.
+   * If Explore inlined no products, search the merchant's catalogue for them.
+   */
+  private async resolvePlan(merchantId: string, inlined: AgnicProduct[], request: ShopRequest, country: string): Promise<ResolveResult> {
+    let candidates = inlined.filter((p) => p.available !== false);
+    if (candidates.length === 0) {
+      const found = await listMerchantProducts(this.deps.agnic, merchantId, request.planHint ?? request.prompt, country);
+      candidates = found.filter((p) => p.available !== false);
+    }
+    const pick = selectPlan(candidates, request.planHint);
+    if (pick) return { kind: "target", merchantId, sku: pick.sku };
+    if (candidates.length > 0) return { kind: "choose", merchantId, options: candidates };
+    throw new Error(
+      `EXPLORED_NO_PLAN: onboarded ${merchantId} but found no purchasable plan for "${request.planHint ?? request.prompt}". ` +
+        `Pass an explicit sku, a plan name, or a checkout URL that points at the specific plan.`,
+    );
   }
 
   private persistPending(taskId: string, merchantId: string): string {
