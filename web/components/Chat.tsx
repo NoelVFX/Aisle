@@ -27,13 +27,14 @@ function actionPhrase(payload: { text?: string; action?: AgentRequest["action"] 
   return "";
 }
 
-export default function Chat() {
+export default function Chat({ initialPrompt }: { initialPrompt?: string }) {
   const [messages, setMessages] = useState<Message[]>([INTRO]);
   const [busy, setBusy] = useState<null | "chat" | "shortlist">(null);
   const [input, setInput] = useState("");
   const stateRef = useRef({ purchasedSkus: [] as string[], profileTags: [] as string[] });
   const streamRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
+  const sentInitial = useRef(false);
 
   useEffect(() => {
     streamRef.current?.scrollTo({ top: streamRef.current.scrollHeight, behavior: "smooth" });
@@ -61,6 +62,11 @@ export default function Chat() {
       .catch(() => setMessages((m) => [...m, { id: "e" + Date.now(), role: "aisle", blocks: [{ type: "text", text: "Something went wrong reaching the agent. Try again in a moment." }] }]))
       .finally(() => setBusy(null));
   }, [busy]);
+
+  // Auto-send the prompt the user typed on the landing screen, exactly once.
+  useEffect(() => {
+    if (initialPrompt && !sentInitial.current) { sentInitial.current = true; send({ text: initialPrompt }); }
+  }, [initialPrompt, send]);
 
   const submit = () => {
     const t = input.trim();

@@ -1,13 +1,13 @@
 /* Aisle — design tokens + system. One dark theme, one accent, one radius scale. */
 
 :root {
-  /* Surfaces: warm-neutral near-black, never pure #000. */
-  --bg: #0a0b0c;
-  --surface: #101214;
-  --surface-2: #16191c;
-  --surface-3: #1d2125;
-  --border: rgba(255, 255, 255, 0.08);
-  --border-strong: rgba(255, 255, 255, 0.14);
+  /* Deep indigo base; surfaces are translucent glass so the moving aurora tints through. */
+  --bg: #0b0819;
+  --surface: rgba(24, 20, 46, 0.55);
+  --surface-2: rgba(30, 25, 54, 0.72);
+  --surface-3: rgba(48, 42, 78, 0.66);
+  --border: rgba(255, 255, 255, 0.10);
+  --border-strong: rgba(255, 255, 255, 0.18);
 
   /* Text */
   --text: #eef1f3;
@@ -52,16 +52,32 @@ body {
 }
 .mono { font-family: var(--font-geist-mono), ui-monospace, monospace; font-feature-settings: "tnum" 1; }
 
-/* Ambient backdrop: a single soft accent bloom, top-left. No AI-purple mesh. */
-body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  z-index: -1;
-  background:
-    radial-gradient(70% 60% at 12% -8%, rgba(198, 242, 78, 0.09), transparent 60%),
-    radial-gradient(50% 50% at 100% 0%, rgba(120, 160, 200, 0.05), transparent 55%);
-  pointer-events: none;
+/* ---- Moving aurora background (recreated from the purple reference, license-safe) ---- */
+.bg-layer { position: fixed; inset: 0; pointer-events: none; }
+.aurora {
+  z-index: -5;
+  overflow: hidden;
+  background: radial-gradient(130% 120% at 50% -10%, #2a1c63 0%, #1a1140 40%, #0c0820 75%, #080513 100%);
+}
+.blob { position: absolute; border-radius: 50%; filter: blur(70px); mix-blend-mode: screen; will-change: transform; }
+.blob-1 { width: 62vw; height: 62vw; top: -20vw; left: 6vw;  background: radial-gradient(circle, #e089e6 0%, rgba(224,137,230,0) 62%); opacity: 0.95; animation: drift1 24s var(--ease-in-out) infinite alternate; }
+.blob-2 { width: 58vw; height: 58vw; top: -4vw;  right: -14vw; background: radial-gradient(circle, #7a5cf0 0%, rgba(122,92,240,0) 60%); opacity: 0.9; animation: drift2 30s var(--ease-in-out) infinite alternate; }
+.blob-3 { width: 54vw; height: 54vw; bottom: -22vw; left: -10vw; background: radial-gradient(circle, #4b3ac2 0%, rgba(75,58,194,0) 60%); opacity: 0.85; animation: drift3 27s var(--ease-in-out) infinite alternate; }
+.blob-4 { width: 42vw; height: 42vw; bottom: -14vw; right: 8vw;  background: radial-gradient(circle, #c96fd8 0%, rgba(201,111,216,0) 62%); opacity: 0.7; animation: drift4 33s var(--ease-in-out) infinite alternate; }
+@keyframes drift1 { from { transform: translate3d(0,0,0) scale(1); } to { transform: translate3d(9vw, 7vw, 0) scale(1.16); } }
+@keyframes drift2 { from { transform: translate3d(0,0,0) scale(1.05); } to { transform: translate3d(-11vw, 9vw, 0) scale(0.92); } }
+@keyframes drift3 { from { transform: translate3d(0,0,0) scale(1); } to { transform: translate3d(12vw, -8vw, 0) scale(1.2); } }
+@keyframes drift4 { from { transform: translate3d(0,0,0) scale(0.95); } to { transform: translate3d(-8vw, -10vw, 0) scale(1.14); } }
+
+/* Scrim keeps text readable over the bright aurora without killing the colour. */
+.scrim { z-index: -4; background: linear-gradient(180deg, rgba(9,6,22,0.42) 0%, rgba(9,6,22,0.30) 42%, rgba(8,5,20,0.62) 100%); }
+/* Vignette darkens the edges. */
+.vignette { z-index: -3; background: radial-gradient(125% 105% at 50% 42%, transparent 52%, rgba(4,3,12,0.70) 100%); }
+/* Film grain, matching the reference texture. */
+.grain {
+  z-index: -2; opacity: 0.14; mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 160px 160px;
 }
 
 ::selection { background: var(--accent-glow); }
@@ -79,7 +95,8 @@ a { color: inherit; }
 .shell { display: grid; grid-template-columns: 300px 1fr; height: 100dvh; }
 .rail {
   border-right: 1px solid var(--border);
-  background: linear-gradient(180deg, var(--surface), var(--bg));
+  background: linear-gradient(180deg, rgba(16, 12, 36, 0.66), rgba(11, 8, 25, 0.5));
+  backdrop-filter: blur(16px);
   padding: 22px 20px;
   display: flex;
   flex-direction: column;
@@ -154,7 +171,9 @@ a { color: inherit; }
 .card {
   background: var(--surface-2); border: 1px solid var(--border);
   border-radius: var(--r-card); overflow: hidden; box-shadow: var(--shadow);
+  backdrop-filter: blur(14px);
 }
+.product, .comp, .bubble-user, .composer-box { backdrop-filter: blur(14px); }
 .card-pad { padding: 16px; }
 
 /* Product shortlist */
@@ -281,6 +300,40 @@ a { color: inherit; }
   .stream-inner, .composer { padding-left: 16px; padding-right: 16px; }
   .chat-head, .composer-wrap { padding-left: 16px; padding-right: 16px; }
 }
+
+/* ---- Landing / entry screen ---- */
+.landing { position: relative; z-index: 1; min-height: 100dvh; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px; }
+.landing-brand { position: absolute; top: 26px; left: 28px; display: flex; align-items: center; gap: 11px; }
+.landing-inner { width: min(760px, 94vw); text-align: center; animation: landing-in 700ms var(--ease-out) both; }
+@keyframes landing-in { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+.greeting { font-size: clamp(30px, 5.4vw, 58px); font-weight: 600; letter-spacing: -0.025em; line-height: 1.08; margin: 0; text-wrap: balance; text-shadow: 0 2px 30px rgba(0, 0, 0, 0.45); }
+.greeting .accent { color: var(--accent); }
+.landing-sub { color: var(--text-2); font-size: clamp(15px, 1.6vw, 18px); margin-top: 16px; }
+
+.prompt-wrap { margin-top: 40px; position: relative; }
+.prompt-box {
+  display: flex; align-items: center; gap: 10px;
+  background: rgba(18, 14, 38, 0.5); backdrop-filter: blur(20px);
+  border: 1px solid var(--border-strong); border-radius: 18px;
+  padding: 12px 12px 12px 22px; text-align: left;
+  box-shadow: 0 24px 70px -24px rgba(0, 0, 0, 0.75), 0 1px 0 rgba(255, 255, 255, 0.06) inset;
+  transition: border-color 180ms var(--ease-out), box-shadow 180ms var(--ease-out);
+}
+.prompt-box:focus-within { border-color: color-mix(in srgb, var(--accent) 60%, var(--border-strong)); box-shadow: 0 24px 70px -22px rgba(0, 0, 0, 0.8), 0 0 0 4px var(--accent-glow); }
+.prompt-field { position: relative; flex: 1; min-width: 0; }
+.prompt-input { width: 100%; font: inherit; font-size: 18px; background: transparent; border: none; color: var(--text); padding: 12px 0; }
+.prompt-input:focus { outline: none; }
+/* Typewriter placeholder overlay (shown only when the field is empty). */
+.typewriter { position: absolute; inset: 0; display: flex; align-items: center; font-size: 18px; color: var(--muted); pointer-events: none; white-space: nowrap; overflow: hidden; }
+.caret { display: inline-block; width: 2px; height: 1.15em; margin-left: 2px; background: var(--accent); vertical-align: middle; animation: caret 1.05s step-end infinite; }
+@keyframes caret { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+.prompt-send { width: 46px; height: 46px; border-radius: 13px; flex: none; display: grid; place-items: center; border: none; cursor: pointer; background: var(--accent); color: var(--accent-ink); transition: transform 140ms var(--ease-out), opacity 140ms var(--ease-out); }
+.prompt-send:active { transform: scale(0.94); }
+.prompt-send:disabled { opacity: 0.4; cursor: default; background: var(--surface-3); color: var(--muted); }
+.landing-chips { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; margin-top: 22px; }
+.landing-chip { font: inherit; font-size: 13.5px; cursor: pointer; padding: 8px 14px; border-radius: var(--r-pill); background: rgba(255, 255, 255, 0.06); backdrop-filter: blur(12px); border: 1px solid var(--border); color: var(--text-2); transition: all 150ms var(--ease-out); }
+.landing-chip:hover { border-color: var(--border-strong); color: var(--text); background: rgba(255, 255, 255, 0.1); }
+.landing-chip:active { transform: scale(0.97); }
 
 /* Reduced motion: keep opacity/color, drop movement. */
 @media (prefers-reduced-motion: reduce) {

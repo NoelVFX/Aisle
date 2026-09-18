@@ -1,13 +1,5 @@
-import Rail from "@/components/Rail";
-import Chat from "@/components/Chat";
+import App from "@/components/App";
 
 export default function Page() {
-  return (
-    <div className="shell">
-      <Rail />
-      <main className="main">
-        <Chat />
-      </main>
-    </div>
-  );
+  return <App />;
 }
