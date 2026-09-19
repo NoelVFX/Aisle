@@ -1,4 +1,4 @@
-import type { ToolRec } from "./types";
+import type { Product, ToolRec } from "./types";
 
 /**
  * General tool discovery: given ANY goal ("a tool to design premium UI", "add auth",
@@ -9,6 +9,74 @@ import type { ToolRec } from "./types";
 
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 const clean = (s: unknown, fallback = ""): string => (typeof s === "string" && s.trim() ? s.trim().replace(/\s*[—–]\s*/g, ", ") : fallback);
+
+const KEY = () => process.env.OPENROUTER_API_KEY || process.env.OPENROUTER_INFRA_KEY;
+const MODEL = () => process.env.AISLE_CHAT_MODEL || "deepseek/deepseek-chat-v3.1";
+
+async function chatJson(prompt: string, maxTokens: number): Promise<string | null> {
+  const key = KEY();
+  if (!key) return null;
+  try {
+    const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", "HTTP-Referer": "https://aisle.dev", "X-Title": "Aisle" },
+      body: JSON.stringify({ model: MODEL(), max_tokens: maxTokens, temperature: 0.5, messages: [{ role: "user", content: prompt }] }),
+      signal: AbortSignal.timeout(18000),
+    });
+    if (!resp.ok) return null;
+    const data = (await resp.json()) as { choices?: Array<{ message?: { content?: unknown } }> };
+    const c = data.choices?.[0]?.message?.content;
+    return typeof c === "string" ? c : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Complementary tools to pair with a SaaS purchase (e.g. an email API, also a domain and
+ * an analytics tool). Returned as saas: "products" so they render as checkout complements.
+ */
+export async function complementTools(product: Product): Promise<Product[]> {
+  const name = product.title.replace(/\s+(plan|pro|standard|starter|grow)\b/gi, "").trim() || product.title;
+  const raw = await chatJson(
+    `A developer is buying "${product.title}". Suggest 2 DIFFERENT complementary tools/SaaS that pair well with ${name} in a real stack (not competitors, not the same tool). ` +
+      `For each give a short name, one-word category, and an approximate US price per month in whole dollars (0 if free). ` +
+      `Return ONLY minified JSON: [{"tool":"","category":"","price_usd":0},{"tool":"","category":"","price_usd":0}]`,
+    200,
+  );
+  if (!raw) return [];
+  const s = raw.indexOf("["), e = raw.lastIndexOf("]");
+  if (s < 0 || e < s) return [];
+  try {
+    const arr = JSON.parse(raw.slice(s, e + 1)) as unknown[];
+    const seen = new Set<string>([product.sku]);
+    const out: Product[] = [];
+    for (const el of arr.slice(0, 3)) {
+      if (!el || typeof el !== "object") continue;
+      const o = el as Record<string, unknown>;
+      const tool = clean(o["tool"]);
+      if (!tool) continue;
+      const sku = `saas:${slug(tool)}`;
+      if (seen.has(sku)) continue;
+      seen.add(sku);
+      const price = typeof o["price_usd"] === "number" && Number.isFinite(o["price_usd"]) ? Math.max(0, Math.round(o["price_usd"])) : 0;
+      out.push({
+        sku,
+        title: `${tool} plan`,
+        priceMinor: price * 100,
+        currency: "USD",
+        merchantId: slug(tool),
+        image: "",
+        tone: "expert",
+        pitch: clean(o["category"], "pairs well with your stack"),
+        attrs: ["saas"],
+      });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
 
 export async function recommendTool(goal: string): Promise<ToolRec | null> {
   const key = process.env.OPENROUTER_API_KEY || process.env.OPENROUTER_INFRA_KEY;

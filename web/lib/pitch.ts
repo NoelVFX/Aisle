@@ -38,15 +38,27 @@ function rankForProfile(products: Product[], tags: string[]): Product[] {
   return [...products].sort((a, b) => score(b) - score(a));
 }
 
-async function llmPitches(items: Product[]): Promise<Map<number, string>> {
+/** A short persona descriptor from the saved profile (freeform context first, then tags). */
+function personaDescriptor(tags: string[], context: string): string {
+  const ctx = context.trim().slice(0, 160);
+  const t = tags.filter((x) => !["man", "woman", "male", "female"].includes(x)).join(", ");
+  if (ctx && t) return `${ctx} (${t})`;
+  return ctx || t;
+}
+
+async function llmPitches(items: Product[], persona: string): Promise<Map<number, string>> {
   const out = new Map<number, string>();
   const key = process.env.OPENROUTER_API_KEY || process.env.OPENROUTER_INFRA_KEY;
   if (!key) return out;
   const model = process.env.AISLE_CHAT_MODEL || "deepseek/deepseek-chat-v3.1";
   const lines = items.map((p, i) => `${i}. "${p.title}" (${money(p.priceMinor, p.currency)}) tone: ${TONE_GUIDE[p.tone]}`).join("\n");
+  const personaLine = persona
+    ? `The shopper is: ${persona}. In roughly half the pitches, weave ONE short phrase that speaks to who they are (their role, life stage, or taste), e.g. "great for a sophomore juggling classes". Keep it natural, do not force it into every line.\n`
+    : "";
   const prompt =
-    `Write a ONE-sentence shopping pitch (max 16 words) for each product below, in its given tone.\n` +
-    `Use ONLY the product's name. Do NOT invent specs, materials, features, or prices not in the name. No em dashes, no emojis.\n${lines}\n\n` +
+    `Write a ONE-sentence shopping pitch (max 18 words) for each product below, in its given tone.\n` +
+    personaLine +
+    `Use ONLY the product's name for facts. Do NOT invent specs, materials, features, or prices not in the name. No em dashes, no emojis.\n${lines}\n\n` +
     `Return ONLY a minified JSON array: [{"i":0,"pitch":"..."}], one per product, same order.`;
   try {
     const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -76,9 +88,10 @@ async function llmPitches(items: Product[]): Promise<Map<number, string>> {
   return out;
 }
 
-/** Rank real products for the profile, assign a distinct tone to each, and pitch them. */
-export async function pitchProducts(products: Product[], profileTags: string[] = []): Promise<Product[]> {
+/** Rank real products for the profile, assign a distinct tone to each, and pitch them
+ *  (pitches are tailored to the persona when a profile is present). */
+export async function pitchProducts(products: Product[], profileTags: string[] = [], profileContext = ""): Promise<Product[]> {
   const ranked = rankForProfile(products, profileTags).map((p, i) => ({ ...p, tone: TONES[i % TONES.length]! }));
-  const pitches = await llmPitches(ranked);
+  const pitches = await llmPitches(ranked, personaDescriptor(profileTags, profileContext));
   return ranked.map((p, i) => ({ ...p, pitch: pitches.get(i) || FALLBACK[p.tone] }));
 }

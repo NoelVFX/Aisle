@@ -90,10 +90,12 @@ function Approval({ b, send }: { b: Extract<Block, { type: "approval" }>; send: 
           <div className="comp-row">
             {complements.map((c) => (
               <button key={c.sku} className="comp" onClick={() => send({ action: { kind: "pick", product: c } })}>
-                {c.image ? <img src={c.image} alt={c.title} loading="lazy" /> : <div style={{ width: "100%", aspectRatio: "3/2", background: "var(--surface-3)" }} />}
+                {c.image
+                  ? <img src={c.image} alt={c.title} loading="lazy" />
+                  : <div style={{ width: "100%", aspectRatio: "3/2", background: "var(--surface-3)", display: "grid", placeItems: "center", color: "var(--accent)", fontWeight: 700, fontSize: 22 }}>{c.title[0]}</div>}
                 <div className="comp-info">
                   <div className="t">{c.title}</div>
-                  <div className="p mono">{money(c.priceMinor, c.currency)}</div>
+                  <div className="p mono">{c.priceMinor > 0 ? money(c.priceMinor, c.currency) : (c.sku.startsWith("saas:") ? "See pricing" : "Free")}</div>
                 </div>
               </button>
             ))}

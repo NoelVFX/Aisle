@@ -123,10 +123,45 @@ const COMP_MAP: ReadonlyArray<readonly [RegExp, readonly string[]]> = [
   [/laptop|macbook/i, ["laptop sleeve", "wireless mouse"]],
 ];
 
-/** Real complementary products for the checkout moment, pulled from Agnic. */
+function heuristicComplements(title: string): string[] {
+  for (const [re, c] of COMP_MAP) if (re.test(title)) return [...c];
+  return [];
+}
+
+/** Complement search terms for ANY product, via the LLM, with the map as a floor. */
+async function complementQueries(title: string): Promise<string[]> {
+  const heur = heuristicComplements(title);
+  const key = process.env.OPENROUTER_API_KEY || process.env.OPENROUTER_INFRA_KEY;
+  if (!key) return heur;
+  const model = process.env.AISLE_CHAT_MODEL || "deepseek/deepseek-chat-v3.1";
+  const prompt =
+    `A shopper is buying: "${title}". List 3 DIFFERENT complementary products that genuinely pair with it ` +
+    `(accessories or natural add-ons a store suggests at checkout). Not the same item, not substitutes. ` +
+    `Each is a short, generic search term (2 to 3 words). Return ONLY a minified JSON array of strings.`;
+  try {
+    const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", "HTTP-Referer": "https://aisle.dev", "X-Title": "Aisle" },
+      body: JSON.stringify({ model, max_tokens: 120, temperature: 0.5, messages: [{ role: "user", content: prompt }] }),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!resp.ok) return heur;
+    const data = (await resp.json()) as { choices?: Array<{ message?: { content?: unknown } }> };
+    const c = data.choices?.[0]?.message?.content;
+    if (typeof c !== "string") return heur;
+    const s = c.indexOf("["), e = c.lastIndexOf("]");
+    if (s < 0 || e < s) return heur;
+    const arr = JSON.parse(c.slice(s, e + 1)) as unknown[];
+    const qs = arr.filter((x): x is string => typeof x === "string").map((x) => x.trim()).filter(Boolean).slice(0, 3);
+    return qs.length ? qs : heur;
+  } catch {
+    return heur;
+  }
+}
+
+/** Real complementary products for the checkout moment, pulled from Agnic. Works for any item. */
 export async function searchComplements(product: Product, country = "US"): Promise<Product[]> {
-  let queries: readonly string[] = [];
-  for (const [re, c] of COMP_MAP) if (re.test(product.title)) { queries = c; break; }
+  const queries = await complementQueries(product.title);
   if (!queries.length) return [];
   const found: Product[] = [];
   const seen = new Set<string>([product.sku]);

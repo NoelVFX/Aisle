@@ -43,25 +43,43 @@ export function profileWanted(t: string): boolean {
 
 export const forYouWanted = (t: string): boolean => /for you|recommend|surprise me|what should i (buy|get)/i.test(t);
 
-/** True for product-shopping phrasings. Questions and greetings are handled elsewhere. */
+/** Talking about the product/app itself, not shopping. Keep these on the LLM. */
+const ABOUT_SYSTEM = /\b(aisle|agnic|vaulted?|checkout|receipt|how (do|does|can)|what is|who are you|why|explain|demo|profile|price of)\b/i;
+/** A desire to acquire a product, anywhere in the sentence (not only at the start). */
+const SHOP_DESIRE = /\b(buy|purchase|order|shop|want|need|get me|find me|show me|looking for|browse|pick up|shopping for)\b/i;
+
+/** True for product-shopping phrasings, including mid-sentence ones like "...I want male clothing". */
 export function isBrowse(t: string): boolean {
   if (isSaasIntent(t) || isToolIntent(t)) return false;
   if (IMPERATIVE.test(t)) return true; // "find me a keyboard", "show me blazers"
-  if (isQuestion(t) || isGreeting(t)) return false; // questions/greetings go to the LLM
+  if (isGreeting(t)) return false;
+  if (ABOUT_SYSTEM.test(t)) return false; // "how does Aisle work", "what is my vaulted card"
+  if (SHOP_DESIRE.test(t)) return true; // "but i'm a 60 year old man, I want male clothing"
+  if (isQuestion(t)) return false;
   const words = t.trim().split(/\s+/).length;
   return words <= 7 && t.trim().length > 1; // short noun phrase, e.g. "keyboard"
 }
 
-/** Strip shopping verbs, articles and filler to a clean product query for Agnic. */
+/** Gender the message itself implies (overrides/augments the saved profile for this search). */
+export function messageGender(t: string): "man" | "woman" | undefined {
+  if (/\b(male|man|men|guy|gentleman|boys?|his)\b/i.test(t)) return "man";
+  if (/\b(female|woman|women|lady|ladies|girls?|hers?)\b/i.test(t)) return "woman";
+  return undefined;
+}
+
+/** Strip conjunctions, self-description, age, shopping verbs and articles to a clean query. */
 export function cleanQuery(t: string): string {
-  return t
-    .replace(/\b(please|for me|can you|could you|i(?:'m| am)?|would like to|want to|looking to)\b/gi, " ")
-    .replace(/\b(buy|shop for|shop|order|find|show|browse|get me|get|need|want|purchase|search for|search|looking for|look for)\b/gi, " ")
-    .replace(/^\s*(me|a|an|the|some|any)\b/gi, " ")
-    .replace(/\b(a|an|the)\b/gi, " ")
-    .replace(/[?.!,]+$/g, "")
+  const cleaned = t
+    .replace(/[?.!,]+/g, " ")
+    .replace(/\b(but|so|well|actually|also|hmm|okay|ok|now|please|thanks?)\b/gi, " ")
+    .replace(/\b\d+\s*(years?\s*old|y\/?o|yo)\b/gi, " ") // "60 years old"
+    .replace(/\bi(?:'m| am| ?m)?\b/gi, " ") // I / I'm / im
+    .replace(/\b(would like to|want to|looking to|can you|could you|for me)\b/gi, " ")
+    .replace(/\b(buy|shop for|shop|order|find|show|browse|get me|get|need|want|purchase|search for|search|looking for|look for|see)\b/gi, " ")
+    .replace(/\b(a|an|the|some|any|my|me)\b/gi, " ")
     .replace(/\s+/g, " ")
-    .trim() || t.trim();
+    .trim();
+  return cleaned || t.trim();
 }
 
 /** Bias the search query with the saved persona (mainly gender) so Agnic returns relevant items. */

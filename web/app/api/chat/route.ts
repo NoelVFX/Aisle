@@ -2,10 +2,10 @@ import { NextResponse } from "next/server";
 import type { AgentRequest, AgentResponse, ChatTurn, Product } from "@/lib/types";
 import { searchAgnic, searchComplements, agnicConfigured } from "@/lib/agnic";
 import { pitchProducts } from "@/lib/pitch";
-import { recommendTool } from "@/lib/recommend";
+import { recommendTool, complementTools } from "@/lib/recommend";
 import {
   approveResp, cleanQuery, fallbackAnswer, findToolResp, forYouWanted, isBrowse,
-  isGreeting, isSaasIntent, isToolIntent, personaQuery, profileFormResp, profileWanted, saasTopic, saveProfileResp,
+  isGreeting, isSaasIntent, isToolIntent, messageGender, personaQuery, profileFormResp, profileWanted, saasTopic, saveProfileResp,
 } from "@/lib/agent";
 
 export const runtime = "nodejs";
@@ -45,19 +45,22 @@ async function llmAnswer(history: ChatTurn[], text: string): Promise<string | nu
     if (!resp.ok) return null;
     const data = (await resp.json()) as { choices?: Array<{ message?: { content?: unknown } }> };
     const c = data.choices?.[0]?.message?.content;
-    return typeof c === "string" && c.trim() ? c.trim().replace(/\s*[—–]\s*/g, ", ") : null;
+    if (typeof c !== "string" || !c.trim()) return null;
+    // The model sometimes fakes UI ("[showed options]"); strip those markers, never claim cards.
+    const cleaned = c.trim().replace(/\s*[—–]\s*/g, ", ").replace(/\[(?:searching|search|show(?:s|ed|ing)?\s*options?|loading|results?|generating|thinking)\]/gi, "").replace(/\s{2,}/g, " ").trim();
+    return cleaned || null;
   } catch {
     return null;
   }
 }
 
-async function browse(query: string, country: string, tags: string[]): Promise<AgentResponse> {
+async function browse(query: string, country: string, tags: string[], context: string): Promise<AgentResponse> {
   if (!agnicConfigured()) return noAgnic;
   const q = personaQuery(query, tags); // bias by saved persona (e.g. men's) before searching
   let products = await searchAgnic(q, country, 5);
   if (!products.length && q !== query) products = await searchAgnic(query, country, 5); // retry unbiased
   if (!products.length) return { blocks: [{ type: "text", text: `I could not find "${query}" in the Agnic network right now. Try different wording, or another item.` }] };
-  const pitched = await pitchProducts(products, tags);
+  const pitched = await pitchProducts(products, tags, context);
   return {
     blocks: [
       { type: "text", text: `Here are ${pitched.length}, pulled from Shopify via Agnic and pitched for you. Pick one and I will price it.` },
@@ -68,7 +71,8 @@ async function browse(query: string, country: string, tags: string[]): Promise<A
 
 async function pick(product: Product, country: string): Promise<AgentResponse> {
   const isSaas = product.sku.startsWith("saas:");
-  const complements = !isSaas && agnicConfigured() ? await searchComplements(product, country) : [];
+  // Complements at checkout for ANY item: SaaS -> paired tools (LLM); physical -> real Agnic results.
+  const complements = isSaas ? await complementTools(product) : agnicConfigured() ? await searchComplements(product, country) : [];
   return {
     blocks: [
       { type: "text", text: isSaas ? "Here is the plan and total before anything is charged. Nothing moves until you approve." : "Good pick. Here is the total before anything is charged. Nothing moves until you approve." },
@@ -102,7 +106,7 @@ async function forYou(state: AgentRequest["state"], country: string): Promise<Ag
     for (const p of await searchAgnic(t, country, 3)) if (!seen.has(p.sku)) { seen.add(p.sku); products.push(p); }
   }
   if (!products.length) return { blocks: [{ type: "forYouEmpty" }] };
-  const pitched = await pitchProducts(products.slice(0, 3), state.profileTags);
+  const pitched = await pitchProducts(products.slice(0, 3), state.profileTags, state.profileContext ?? "");
   return {
     blocks: [
       { type: "text", text: "Built from what you have bought, pulled fresh from Agnic." },
@@ -131,7 +135,11 @@ export async function POST(req: Request) {
   if (isToolIntent(text) || isSaasIntent(text)) return NextResponse.json(await findTool(text));
   if (profileWanted(text)) { await delay(320); return NextResponse.json(profileFormResp()); }
   if (forYouWanted(text)) return NextResponse.json(await forYou(state, country));
-  if (isBrowse(text)) return NextResponse.json(await browse(cleanQuery(text), country, state.profileTags));
+  if (isBrowse(text)) {
+    const g = messageGender(text); // "I want male clothing" -> bias men's even without a saved profile
+    const tags = g && !state.profileTags.includes(g) ? [...state.profileTags, g] : state.profileTags;
+    return NextResponse.json(await browse(cleanQuery(text), country, tags, state.profileContext ?? ""));
+  }
 
   if (isGreeting(text)) { await delay(300); }
   const answer = await llmAnswer(body.history ?? [], text);
