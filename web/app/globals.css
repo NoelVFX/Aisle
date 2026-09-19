@@ -100,6 +100,17 @@ body {
   to { transform: translate3d(-6%, 5%, 0) rotate(-4deg) scale(0.96); }
 }
 
+/* Bold drifting green light-blobs over the base, for clearly visible motion. */
+.blob { position: absolute; border-radius: 50%; filter: blur(66px); mix-blend-mode: screen; will-change: transform; }
+.blob-1 { width: 60vw; height: 60vw; top: -18vw; left: -6vw;  background: radial-gradient(circle, #21d38f 0%, rgba(33,211,143,0) 62%); opacity: 0.85; animation: gdrift1 22s var(--ease-in-out) infinite alternate; }
+.blob-2 { width: 54vw; height: 54vw; top: -12vw; right: -12vw; background: radial-gradient(circle, #c6f24e 0%, rgba(198,242,78,0) 60%); opacity: 0.75; animation: gdrift2 28s var(--ease-in-out) infinite alternate; }
+.blob-3 { width: 56vw; height: 56vw; bottom: -22vw; left: 6vw;  background: radial-gradient(circle, #0ea371 0%, rgba(14,163,113,0) 62%); opacity: 0.8; animation: gdrift3 25s var(--ease-in-out) infinite alternate; }
+.blob-4 { width: 44vw; height: 44vw; bottom: -16vw; right: -6vw; background: radial-gradient(circle, #a3e635 0%, rgba(163,230,53,0) 62%); opacity: 0.6; animation: gdrift4 31s var(--ease-in-out) infinite alternate; }
+@keyframes gdrift1 { from { transform: translate3d(0,0,0) scale(1); } to { transform: translate3d(11vw, 8vw, 0) scale(1.18); } }
+@keyframes gdrift2 { from { transform: translate3d(0,0,0) scale(1.06); } to { transform: translate3d(-12vw, 10vw, 0) scale(0.9); } }
+@keyframes gdrift3 { from { transform: translate3d(0,0,0) scale(1); } to { transform: translate3d(13vw, -9vw, 0) scale(1.2); } }
+@keyframes gdrift4 { from { transform: translate3d(0,0,0) scale(0.94); } to { transform: translate3d(-9vw, -11vw, 0) scale(1.16); } }
+
 /* Scrim keeps text readable over the bright aurora without killing the colour. */
 .scrim { z-index: -4; background: linear-gradient(180deg, rgba(2,12,9,0.48) 0%, rgba(2,16,11,0.26) 42%, rgba(1,9,7,0.68) 100%); }
 /* Vignette darkens the edges. */
