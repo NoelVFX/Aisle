@@ -32,7 +32,7 @@ export interface HttpGateway {
 }
 
 export function startHttpGateway(
-  runtime: Pick<AisleRuntime, "gateway" | "log"> & { externalActions?: AisleRuntime["externalActions"] },
+  runtime: Pick<AisleRuntime, "gateway" | "log" | "orderTracker" | "orderWaiter"> & { externalActions?: AisleRuntime["externalActions"] },
   opts: { port?: number; host?: string; key?: string } = {},
 ): Promise<HttpGateway> {
   const transports = new Map<string, StreamableHTTPServerTransport>();
