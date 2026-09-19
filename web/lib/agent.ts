@@ -29,6 +29,13 @@ export function isSaasIntent(t: string): boolean {
   return !!saasTopic(t) && looksSaas(t);
 }
 
+/** Broad "find me a tool/SaaS/MCP for <goal>" intent, for any goal (not just known topics). */
+export function isToolIntent(t: string): boolean {
+  const wantsTool = /\b(mcp|saas|api|tool|service|platform|software|library|integration|framework)\b/i.test(t);
+  const seeking = /\b(find|recommend|suggest|need|want|looking|which|best|help me|get me|set up|add|build)\b/i.test(t) || /\bfor\b/i.test(t);
+  return wantsTool && seeking;
+}
+
 export function profileWanted(t: string): boolean {
   const negated = /\b(skip|no|not|don'?t|without|later|nah|cancel|nevermind|never mind)\b/i.test(t);
   return !negated && (/\b(set ?up|create|edit|update|fill|do)\b.*\bprofile\b/i.test(t) || /\bprofile\b.*\b(set ?up|please)\b/i.test(t) || /about me|personali[sz]e|remember me|tell you about me|my preferences/i.test(t));
@@ -38,7 +45,7 @@ export const forYouWanted = (t: string): boolean => /for you|recommend|surprise 
 
 /** True for product-shopping phrasings. Questions and greetings are handled elsewhere. */
 export function isBrowse(t: string): boolean {
-  if (isSaasIntent(t)) return false;
+  if (isSaasIntent(t) || isToolIntent(t)) return false;
   if (IMPERATIVE.test(t)) return true; // "find me a keyboard", "show me blazers"
   if (isQuestion(t) || isGreeting(t)) return false; // questions/greetings go to the LLM
   const words = t.trim().split(/\s+/).length;

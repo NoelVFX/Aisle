@@ -2,9 +2,10 @@ import { NextResponse } from "next/server";
 import type { AgentRequest, AgentResponse, ChatTurn, Product } from "@/lib/types";
 import { searchAgnic, searchComplements, agnicConfigured } from "@/lib/agnic";
 import { pitchProducts } from "@/lib/pitch";
+import { recommendTool } from "@/lib/recommend";
 import {
   approveResp, cleanQuery, fallbackAnswer, findToolResp, forYouWanted, isBrowse,
-  isGreeting, isSaasIntent, profileFormResp, profileWanted, saasTopic, saveProfileResp,
+  isGreeting, isSaasIntent, isToolIntent, profileFormResp, profileWanted, saasTopic, saveProfileResp,
 } from "@/lib/agent";
 
 export const runtime = "nodejs";
@@ -21,6 +22,7 @@ const SYSTEM = [
   "Vaulted card: the user stores a card once (with Agnic for physical goods, or the vendor for SaaS) so you can pay at checkout WITHOUT ever seeing or typing the number. You never handle card details.",
   "IMPORTANT: this is a DEMO deployment. No real payment happens, purchases are simulated, and there is no real vaulted card on file yet. Be upfront about that if asked whether something was really bought or charged.",
   "You never invent product details: real products come from Agnic's catalogue. If the user wants to shop, tell them to name what they want and the app shows real options; do not list products in prose.",
+  "You CANNOT render product or tool cards yourself, the app does that. Never write '[searching]', '[shows options]', or claim that results are displayed. If the user asks for a tool or product, tell them to ask plainly (for example: 'find me an MCP tool for UI design') and the app will show real cards.",
   "Style: concise (2 to 4 sentences), concrete, friendly. Never use em dashes. Never invent order numbers, prices, or claim a real charge occurred.",
 ].join("\n");
 
@@ -73,6 +75,21 @@ async function pick(product: Product, country: string): Promise<AgentResponse> {
   };
 }
 
+async function findTool(text: string): Promise<AgentResponse> {
+  const rec = await recommendTool(text);
+  if (rec) {
+    return {
+      blocks: [
+        { type: "text", text: `For that I would reach for **${rec.toolName}**. Here is the pick and why. When you want it, I buy the plan through their checkout with one approval.` },
+        { type: "toolRec", rec },
+      ],
+    };
+  }
+  const topic = saasTopic(text);
+  if (topic) return findToolResp(topic);
+  return { blocks: [{ type: "text", text: "I could not pin down a solid tool for that just now. Try naming the job plainly, like \"send email\", \"add auth\", or \"hosted search\"." }] };
+}
+
 async function forYou(state: AgentRequest["state"], country: string): Promise<AgentResponse> {
   const titles = state.purchasedTitles ?? [];
   if (!titles.length) return { blocks: [{ type: "forYouEmpty" }] };
@@ -109,7 +126,7 @@ export async function POST(req: Request) {
   if (action?.kind === "forYou") return NextResponse.json(await forYou(state, country));
 
   const text = body.text ?? "";
-  if (isSaasIntent(text)) { await delay(420); return NextResponse.json(findToolResp(saasTopic(text)!)); }
+  if (isToolIntent(text) || isSaasIntent(text)) return NextResponse.json(await findTool(text));
   if (profileWanted(text)) { await delay(320); return NextResponse.json(profileFormResp()); }
   if (forYouWanted(text)) return NextResponse.json(await forYou(state, country));
   if (isBrowse(text)) return NextResponse.json(await browse(cleanQuery(text), country, state.profileTags));
