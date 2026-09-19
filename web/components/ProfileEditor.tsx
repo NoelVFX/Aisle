@@ -53,8 +53,13 @@ export default function ProfileEditor({
     try {
       const res = await fetch("/api/profile", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ profile_context: context, profile_tags: tags }) });
       if (res.status === 401) { setStatus("saved"); setMessage("Saved on this device. Sign in to sync it across devices."); }
-      else if (!res.ok) { setStatus("error"); setMessage("Could not sync to your account, but it is saved on this device."); }
-      else { setStatus("saved"); setMessage("Preferences saved."); }
+      else if (!res.ok) {
+        let detail = "";
+        try { const j = await res.json() as { error?: unknown }; detail = typeof j.error === "string" ? j.error : ""; } catch { /* ignore */ }
+        setStatus("error");
+        setMessage(detail ? `Could not sync: ${detail} (saved on this device)` : "Could not sync to your account, but it is saved on this device.");
+      }
+      else { setStatus("saved"); setMessage("Preferences saved to your account."); }
     } catch {
       setStatus("saved"); setMessage("Saved on this device.");
     }
