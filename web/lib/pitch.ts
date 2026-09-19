@@ -28,11 +28,21 @@ function rankForProfile(products: Product[], tags: string[]): Product[] {
   if (!tags.length) return products;
   const men = tags.some((x) => ["mens", "man", "male", "menswear", "men"].includes(x));
   const women = tags.some((x) => ["womens", "woman", "female", "womenswear", "women"].includes(x));
+  const budget = tags.some((x) => ["budget-conscious", "budget", "student", "cheap", "frugal"].includes(x));
+  const premium = tags.some((x) => ["premium-seeker", "premium", "luxury", "splurge"].includes(x));
+  const prices = products.map((p) => p.priceMinor).filter((n) => n > 0);
+  const min = prices.length ? Math.min(...prices) : 0;
+  const span = (prices.length ? Math.max(...prices) : 0) - min || 1;
   const score = (p: Product) => {
     let s = p.attrs.filter((x) => tags.includes(x)).length;
     const t = p.title.toLowerCase();
     if (men) { if (/\b(women|woman|ladies|female|her)\b/.test(t)) s -= 4; if (/\b(men|man|male|guys?)\b/.test(t)) s += 2; }
     if (women) { if (/\b(men|man|male|guys?)\b/.test(t)) s -= 4; if (/\b(women|woman|ladies|female)\b/.test(t)) s += 2; }
+    // Budget preference: nudge cheaper up for budget-conscious, pricier up for premium.
+    if (p.priceMinor > 0 && (budget || premium)) {
+      const norm = (p.priceMinor - min) / span; // 0 = cheapest, 1 = priciest
+      s += budget ? (1 - norm) * 2.5 : norm * 2.5;
+    }
     return s;
   };
   return [...products].sort((a, b) => score(b) - score(a));

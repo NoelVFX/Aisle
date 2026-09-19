@@ -3,7 +3,7 @@
 import { useState } from "react";
 import {
   ShieldCheck, Sparkle, CheckCircle, PlusCircle, Lock, Storefront,
-  Cardholder, Plugs, ArrowSquareOut, Compass,
+  Cardholder, Plugs, ArrowSquareOut, Compass, Truck,
 } from "@phosphor-icons/react";
 import type { AgentRequest, Block, Product, Tone } from "@/lib/types";
 import { money, toneLabel } from "@/lib/demoData";
@@ -123,8 +123,17 @@ function ReceiptCard({ b }: { b: Extract<Block, { type: "receipt" }> }) {
           <div className="receipt-row" key={k}><span>{k}</span><span className="mono">{v}</span></div>
         ))}
       </div>
+      <a
+        className="btn btn-primary btn-sm"
+        style={{ marginTop: 16 }}
+        href={`/order/${encodeURIComponent(r.orderId)}?item=${encodeURIComponent(r.item)}&amount=${encodeURIComponent((r.amountMinor / 100).toFixed(2))}&currency=${encodeURIComponent(r.currency)}&merchant=${encodeURIComponent(r.merchantId.replace("m_", ""))}`}
+        target="_blank"
+        rel="noreferrer"
+      >
+        <Truck size={16} weight="fill" /> View order
+      </a>
       {r.demo ? (
-        <div className="tag" style={{ marginTop: 14, alignSelf: "center", color: "var(--warn)", borderColor: "color-mix(in srgb, var(--warn) 40%, transparent)" }}>
+        <div className="tag" style={{ marginTop: 12, alignSelf: "center", color: "var(--warn)", borderColor: "color-mix(in srgb, var(--warn) 40%, transparent)" }}>
           <Lock size={13} weight="fill" /> Simulated in demo mode. No real charge.
         </div>
       ) : null}
