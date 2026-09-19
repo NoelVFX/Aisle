@@ -14,6 +14,7 @@ const INTRO: Message = {
 };
 
 const SUGGESTIONS = ["Show me a blazer", "Find me a keyboard", "Set up my profile", "I need an MCP tool that sends email", "My For You"];
+const PROFILE_STORAGE_KEY = "aisle-profile-v1";
 
 function actionPhrase(payload: { text?: string; action?: AgentRequest["action"] }): string {
   if (payload.text) return payload.text;
@@ -31,10 +32,22 @@ export default function Chat({ initialPrompt }: { initialPrompt?: string }) {
   const [messages, setMessages] = useState<Message[]>([INTRO]);
   const [busy, setBusy] = useState<null | "chat" | "shortlist">(null);
   const [input, setInput] = useState("");
-  const stateRef = useRef({ purchasedSkus: [] as string[], purchasedTitles: [] as string[], profileTags: [] as string[] });
+  const stateRef = useRef({ purchasedSkus: [] as string[], purchasedTitles: [] as string[], profileTags: [] as string[], profileContext: "" });
   const streamRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
   const sentInitial = useRef(false);
+
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(PROFILE_STORAGE_KEY) || "null") as { tags?: unknown; context?: unknown } | null;
+      if (saved) {
+        stateRef.current.profileTags = Array.isArray(saved.tags) ? saved.tags.filter((x): x is string => typeof x === "string") : [];
+        stateRef.current.profileContext = typeof saved.context === "string" ? saved.context : "";
+      }
+    } catch {
+      // Ignore malformed local state.
+    }
+  }, []);
 
   useEffect(() => {
     streamRef.current?.scrollTo({ top: streamRef.current.scrollHeight, behavior: "smooth" });
@@ -63,6 +76,10 @@ export default function Chat({ initialPrompt }: { initialPrompt?: string }) {
         if (res.purchasedSku) stateRef.current.purchasedSkus = [...stateRef.current.purchasedSkus, res.purchasedSku];
         if (res.purchasedTitle) stateRef.current.purchasedTitles = [...stateRef.current.purchasedTitles, res.purchasedTitle];
         if (res.profileTags) stateRef.current.profileTags = res.profileTags;
+        if (typeof res.profileContext === "string") stateRef.current.profileContext = res.profileContext;
+        if (res.profileTags || typeof res.profileContext === "string") {
+          localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify({ tags: stateRef.current.profileTags, context: stateRef.current.profileContext }));
+        }
         setMessages((m) => [...m, { id: "a" + Date.now(), role: "aisle", blocks: res.blocks }]);
       })
       .catch(() => setMessages((m) => [...m, { id: "e" + Date.now(), role: "aisle", blocks: [{ type: "text", text: "Something went wrong reaching the agent. Try again in a moment." }] }]))

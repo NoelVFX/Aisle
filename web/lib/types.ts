@@ -73,7 +73,7 @@ export interface AgentRequest {
     | { kind: "browse"; query?: string }
     | { kind: "saveProfile"; about: string; tags: string[]; budget?: string }
     | { kind: "forYou"; purchasedTitles?: string[] };
-  state: { purchasedSkus: string[]; purchasedTitles?: string[]; profileTags: string[] };
+  state: { purchasedSkus: string[]; purchasedTitles?: string[]; profileTags: string[]; profileContext?: string };
 }
 
 export interface AgentResponse {
@@ -82,4 +82,5 @@ export interface AgentResponse {
   purchasedSku?: string;
   purchasedTitle?: string;
   profileTags?: string[];
+  profileContext?: string;
 }

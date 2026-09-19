@@ -190,8 +190,8 @@ function ProfileForm({ send }: { send: Sender }) {
   return (
     <div className="card card-pad" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <div className="field">
-        <label className="label" htmlFor="about">A little about you (optional)</label>
-        <textarea id="about" className="textarea" placeholder="e.g. uni student on a budget, prefer smart-casual, into mechanical keyboards" value={about} onChange={(e) => setAbout(e.target.value)} />
+        <label className="label" htmlFor="about">Context for better recommendations (optional)</label>
+        <textarea id="about" className="textarea" placeholder="e.g. I am a Hong Kong-based product designer, prefer smart-casual, and shop on a budget" value={about} onChange={(e) => setAbout(e.target.value)} />
       </div>
       <div className="field">
         <span className="label">Or tap what fits</span>
@@ -201,7 +201,7 @@ function ProfileForm({ send }: { send: Sender }) {
           ))}
         </div>
       </div>
-      <div className="consent-note"><Lock size={14} /> Stored on your device only. Never sent to a merchant. Used just to rank what I show you.</div>
+      <div className="consent-note"><Lock size={14} /> Stored on your device and sent only to Aisle for ranking. Never sent to a merchant. Do not share anything you do not want remembered.</div>
       <div style={{ display: "flex", gap: 10 }}>
         <button
           className="btn btn-primary btn-sm"

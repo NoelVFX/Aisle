@@ -24,13 +24,16 @@ const FALLBACK: Record<Tone, string> = {
   playful: "Say hello to a new favourite.",
 };
 
-function rankForProfile(products: Product[], tags: string[]): Product[] {
-  if (!tags.length) return products;
+function rankForProfile(products: Product[], tags: string[], context = ""): Product[] {
+  if (!tags.length && !context.trim()) return products;
   const men = tags.some((x) => ["mens", "man", "male", "menswear", "men"].includes(x));
   const women = tags.some((x) => ["womens", "woman", "female", "womenswear", "women"].includes(x));
   const score = (p: Product) => {
     let s = p.attrs.filter((x) => tags.includes(x)).length;
-    const t = p.title.toLowerCase();
+    const t = `${p.title} ${p.attrs.join(" ")}`.toLowerCase();
+    for (const word of context.toLowerCase().match(/[a-z][a-z-]{3,}/g) ?? []) {
+      if (t.includes(word)) s += 1;
+    }
     if (men) { if (/\b(women|woman|ladies|female|her)\b/.test(t)) s -= 4; if (/\b(men|man|male|guys?)\b/.test(t)) s += 2; }
     if (women) { if (/\b(men|man|male|guys?)\b/.test(t)) s -= 4; if (/\b(women|woman|ladies|female)\b/.test(t)) s += 2; }
     return s;
@@ -38,7 +41,7 @@ function rankForProfile(products: Product[], tags: string[]): Product[] {
   return [...products].sort((a, b) => score(b) - score(a));
 }
 
-async function llmPitches(items: Product[]): Promise<Map<number, string>> {
+async function llmPitches(items: Product[], context = ""): Promise<Map<number, string>> {
   const out = new Map<number, string>();
   const key = process.env.OPENROUTER_API_KEY || process.env.OPENROUTER_INFRA_KEY;
   if (!key) return out;
@@ -48,11 +51,14 @@ async function llmPitches(items: Product[]): Promise<Map<number, string>> {
     `Write a ONE-sentence shopping pitch (max 16 words) for each product below, in its given tone.\n` +
     `Use ONLY the product's name. Do NOT invent specs, materials, features, or prices not in the name. No em dashes, no emojis.\n${lines}\n\n` +
     `Return ONLY a minified JSON array: [{"i":0,"pitch":"..."}], one per product, same order.`;
+  const contextualPrompt = context.trim()
+    ? `The shopper voluntarily shared this context: "${context.trim().slice(0, 500).replace(/[\r\n"]+/g, " ")}". Use it only for relevance and tone. Never infer or mention sensitive traits.\n${prompt}`
+    : prompt;
   try {
     const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", "HTTP-Referer": "https://aisle.dev", "X-Title": "Aisle" },
-      body: JSON.stringify({ model, max_tokens: 500, temperature: 0.6, messages: [{ role: "user", content: prompt }] }),
+      body: JSON.stringify({ model, max_tokens: 500, temperature: 0.6, messages: [{ role: "user", content: contextualPrompt }] }),
       signal: AbortSignal.timeout(20000),
     });
     if (!resp.ok) return out;
@@ -77,8 +83,8 @@ async function llmPitches(items: Product[]): Promise<Map<number, string>> {
 }
 
 /** Rank real products for the profile, assign a distinct tone to each, and pitch them. */
-export async function pitchProducts(products: Product[], profileTags: string[] = []): Promise<Product[]> {
-  const ranked = rankForProfile(products, profileTags).map((p, i) => ({ ...p, tone: TONES[i % TONES.length]! }));
-  const pitches = await llmPitches(ranked);
+export async function pitchProducts(products: Product[], profileTags: string[] = [], profileContext = ""): Promise<Product[]> {
+  const ranked = rankForProfile(products, profileTags, profileContext).map((p, i) => ({ ...p, tone: TONES[i % TONES.length]! }));
+  const pitches = await llmPitches(ranked, profileContext);
   return ranked.map((p, i) => ({ ...p, pitch: pitches.get(i) || FALLBACK[p.tone] }));
 }
