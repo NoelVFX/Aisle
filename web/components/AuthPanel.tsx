@@ -30,8 +30,13 @@ export default function AuthPanel({ email: currentEmail, profile, onProfile, onC
     try {
       const supabase = getSupabaseBrowserClient();
       if (mode === "signup") {
+        const parsedBirthYear = Number(birthYear);
+        if (!Number.isInteger(parsedBirthYear) || parsedBirthYear < 1900 || parsedBirthYear > new Date().getUTCFullYear()) throw new Error("Enter a valid birth year.");
         const { error: signupError } = await supabase.auth.signUp({ email: email.trim(), password, options: { emailRedirectTo: `${window.location.origin}/auth/confirm`, data: { username: username.trim(), birth_year: Number(birthYear) } } });
-        if (signupError) throw signupError;
+        if (signupError) {
+          if (/database error saving new user/i.test(signupError.message)) throw new Error("Supabase profile setup is incomplete. Run supabase/migrations/001_profiles.sql and 002_repair_profile_trigger.sql, then try again.");
+          throw signupError;
+        }
         setNotice("Check your email for the verification code."); setMode("verify"); return;
       }
       if (mode === "verify") {

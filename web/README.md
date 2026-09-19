@@ -23,6 +23,10 @@ Copy `.env.example` to `.env.local` and set `NEXT_PUBLIC_SUPABASE_URL` and
 `NEXT_PUBLIC_SUPABASE_ANON_KEY`. Run `supabase/migrations/001_profiles.sql` in
 the Supabase SQL editor first.
 
+If the database was already configured from the earlier profile schema, also
+run `supabase/migrations/002_repair_profile_trigger.sql`. It repairs the auth
+trigger and prevents profile metadata problems from blocking signup.
+
 In Supabase Authentication → URL Configuration, add these redirect URLs:
 
 ```text
