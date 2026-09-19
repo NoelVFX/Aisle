@@ -15,6 +15,22 @@ export interface ProfileRecord {
 
 type Mode = "login" | "signup" | "verify";
 
+/** Accept a 6-digit OTP, a pasted confirmation link, or a bare token_hash from the email. */
+function parseConfirmation(input: string): { kind: "otp"; token: string } | { kind: "code"; code: string } | { kind: "token_hash"; token_hash: string; type: string } | null {
+  const v = input.trim();
+  if (/^\d{4,8}$/.test(v)) return { kind: "otp", token: v };
+  try {
+    const u = new URL(v);
+    const code = u.searchParams.get("code");
+    const tokenHash = u.searchParams.get("token_hash");
+    const type = u.searchParams.get("type") || "signup";
+    if (code) return { kind: "code", code };
+    if (tokenHash) return { kind: "token_hash", token_hash: tokenHash, type };
+  } catch { /* not a URL */ }
+  if (v.length > 12 && !/\s/.test(v)) return { kind: "token_hash", token_hash: v, type: "signup" };
+  return null;
+}
+
 export default function AuthPanel({ email: currentEmail, profile, onProfile, onClose }: { email?: string; profile?: ProfileRecord | null; onProfile: (profile: ProfileRecord | null, email?: string) => void; onClose: () => void }) {
   const [mode, setMode] = useState<Mode>(currentEmail ? "login" : "signup");
   const [email, setEmail] = useState(currentEmail ?? "");
@@ -38,11 +54,17 @@ export default function AuthPanel({ email: currentEmail, profile, onProfile, onC
           if (/database error saving new user/i.test(signupError.message)) throw new Error("Supabase profile setup is incomplete. Run supabase/migrations/001_profiles.sql and 002_repair_profile_trigger.sql, then try again.");
           throw signupError;
         }
-        setNotice("Check your email for the verification code."); setMode("verify"); return;
+        setNotice("Check your email. Click the confirmation link, or paste the 6-digit code (or the whole link) below."); setMode("verify"); return;
       }
       if (mode === "verify") {
-        const { error: verifyError } = await supabase.auth.verifyOtp({ email: email.trim(), token: code.trim(), type: "signup" });
-        if (verifyError) throw verifyError;
+        const parsed = parseConfirmation(code);
+        if (!parsed) throw new Error("Enter the 6-digit code from the email, or paste the confirmation link.");
+        const result = parsed.kind === "otp"
+          ? await supabase.auth.verifyOtp({ email: email.trim(), token: parsed.token, type: "signup" })
+          : parsed.kind === "code"
+            ? await supabase.auth.exchangeCodeForSession(parsed.code)
+            : await supabase.auth.verifyOtp({ token_hash: parsed.token_hash, type: parsed.type as "signup" });
+        if (result.error) throw result.error;
         await loadProfile(); setNotice("Email verified. You are signed in."); return;
       }
       const { error: loginError } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
@@ -79,10 +101,10 @@ export default function AuthPanel({ email: currentEmail, profile, onProfile, onC
         <button className="btn btn-ghost" onClick={() => void signOut()}><Lock size={15} /> Sign out</button>
       </> : <>
         {mode === "signup" ? <><div className="field"><label className="label">Username</label><input className="input" value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" /></div><div className="field"><label className="label">Birth year</label><input className="input" value={birthYear} onChange={(event) => setBirthYear(event.target.value)} inputMode="numeric" /></div></> : null}
-        {mode !== "verify" ? <><div className="field"><label className="label">Email</label><input className="input" type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" /></div><div className="field"><label className="label">Password</label><input className="input" type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode === "signup" ? "new-password" : "current-password"} /></div></> : <div className="field"><label className="label">6-digit verification code</label><input className="input" value={code} onChange={(event) => setCode(event.target.value)} inputMode="numeric" maxLength={6} /></div>}
+        {mode !== "verify" ? <><div className="field"><label className="label">Email</label><input className="input" type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" /></div><div className="field"><label className="label">Password</label><input className="input" type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode === "signup" ? "new-password" : "current-password"} /></div></> : <div className="field"><label className="label">6-digit code, or paste the confirmation link</label><input className="input" value={code} onChange={(event) => setCode(event.target.value)} placeholder="123456 or https://…/auth/confirm?…" autoComplete="one-time-code" /></div>}
         {error ? <div style={{ color: "#ffb4a8", fontSize: 13 }}>{error}</div> : null}
         {notice ? <div style={{ color: "var(--accent)", fontSize: 13 }}>{notice}</div> : null}
-        <button className="btn btn-primary" disabled={busy || (mode === "verify" ? code.length < 6 : !email || !password || (mode === "signup" && (!username || !birthYear)))} onClick={() => void submit()}><ShieldCheck size={16} weight="fill" />{busy ? "Working…" : mode === "signup" ? "Create account" : mode === "verify" ? "Verify email" : "Sign in"}</button>
+        <button className="btn btn-primary" disabled={busy || (mode === "verify" ? code.trim().length < 4 : !email || !password || (mode === "signup" && (!username || !birthYear)))} onClick={() => void submit()}><ShieldCheck size={16} weight="fill" />{busy ? "Working…" : mode === "signup" ? "Create account" : mode === "verify" ? "Verify email" : "Sign in"}</button>
         {mode === "verify" ? <button className="btn btn-ghost" onClick={() => setMode("signup")}>Back to signup</button> : <button className="btn btn-ghost" onClick={() => setMode(mode === "signup" ? "login" : "signup")}>{mode === "signup" ? "Already have an account? Sign in" : "Need an account? Sign up"}</button>}
         <div className="consent-note"><Lock size={14} /> Supabase Auth stores the password securely. Aisle stores only your profile preferences.</div>
       </>}

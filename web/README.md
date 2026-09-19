@@ -34,10 +34,31 @@ http://localhost:3000/auth/confirm
 https://your-production-domain.com/auth/confirm
 ```
 
-The app supports both Supabase confirmation links and six-digit OTPs. For a
-code-only email, edit Authentication → Email Templates → Confirm signup and
-include `{{ .Token }}`. If the default confirmation link is retained, Aisle
-handles it at `/auth/confirm` and exchanges it for a session.
+### Email verification: pick one
+
+Supabase's **default** "Confirm signup" email sends a **link** (to your Site URL,
+which on dev is `http://localhost:3000`), not a 6-digit code. The verify screen
+accepts either, but choose the flow you want:
+
+- **Fastest for a demo, no email step:** Authentication → Providers → Email →
+  turn **Confirm email OFF**. Signup then signs the user in immediately. (Re-enable
+  it for production.)
+
+- **Send a real 6-digit OTP:** Authentication → Email Templates → **Confirm signup**,
+  and put the token in the body, e.g.
+
+  ```html
+  <h2>Confirm your signup</h2>
+  <p>Your Aisle verification code is: <strong>{{ .Token }}</strong></p>
+  ```
+
+  Then enter that code on the verify screen.
+
+- **Keep the default link:** just **click the link** in the email (Aisle confirms it
+  at `/auth/confirm` and signs you in), or **paste the whole link** into the verify
+  box. Make sure `.../auth/confirm` is in Authentication → URL Configuration →
+  Redirect URLs (above), and set **Site URL** to your real domain for production so
+  the link is not localhost.
 
 ## Deploy on Vercel
 
