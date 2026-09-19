@@ -3,7 +3,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowUp } from "@phosphor-icons/react";
 
-const NAME = "Anson";
 const EXAMPLES = [
   "a mechanical keyboard under $130",
   "an MCP tool that sends email autonomously",
@@ -13,7 +12,7 @@ const EXAMPLES = [
 ];
 const CHIPS = ["A mechanical keyboard", "An email-sending MCP tool", "A navy wool blazer"];
 
-export default function Landing({ onStart }: { onStart: (prompt: string) => void }) {
+export default function Landing({ onStart, name = "user" }: { onStart: (prompt: string) => void; name?: string }) {
   const [value, setValue] = useState("");
   const [typed, setTyped] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
@@ -58,7 +57,7 @@ export default function Landing({ onStart }: { onStart: (prompt: string) => void
       </div>
 
       <div className="landing-inner">
-        <h1 className="greeting">Hi {NAME}, what do you want to <span className="accent">buy</span> today?</h1>
+        <h1 className="greeting">Hi {name}, what do you want to <span className="accent">buy</span> today?</h1>
         <p className="landing-sub">One prompt. Aisle finds it, prices it, and gets your one approval before anything is charged.</p>
 
         <div className="prompt-wrap">

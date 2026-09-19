@@ -53,7 +53,7 @@ export default function App() {
   return <>
     <Aurora />
     <button className="btn btn-ghost btn-sm" style={{ position: "fixed", top: 16, right: 16, zIndex: 10 }} onClick={() => setAccountOpen(true)}>{email ? email : "Sign in"}</button>
-    {!started ? <Landing onStart={(p) => { setInitialPrompt(p); setStarted(true); }} /> : <div className="shell"><Rail /><main className="main"><Chat initialPrompt={initialPrompt} profileSeed={profile} /></main></div>}
+    {!started ? <Landing name={profile?.username?.trim() || (email ? email.split("@")[0] : "user")} onStart={(p) => { setInitialPrompt(p); setStarted(true); }} /> : <div className="shell"><Rail /><main className="main"><Chat initialPrompt={initialPrompt} profileSeed={profile} /></main></div>}
     {accountOpen ? <AuthPanel email={email} profile={profile} onProfile={(next, nextEmail) => { applyProfile(next); if (nextEmail) setEmail(nextEmail); }} onClose={() => setAccountOpen(false)} /> : null}
   </>;
 }
