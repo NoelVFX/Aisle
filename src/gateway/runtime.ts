@@ -12,6 +12,10 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { InMemoryOrderStore } from "../order-tracking/order-store.js";
+import { OrderEventBus } from "../order-tracking/order-events.js";
+import { OrderTracker } from "../order-tracking/order-tracker.js";
+import { OrderWaiter } from "../order-tracking/order-waiter.js";
 import { createGateway, type Gateway, type Progress } from "./gateway.js";
 import { loadUpstreams, type Upstreams } from "./upstreams.js";
 import { startApprovalServer, type ApprovalServer } from "./approval-server.js";
@@ -38,6 +42,8 @@ export interface AisleRuntime {
   approval: ApprovalServer;
   browsing: BrowsingManager;
   externalActions?: ExternalActionManager;
+  orderTracker: OrderTracker;
+  orderWaiter: OrderWaiter;
   enrollments: FileEnrollmentStore;
   log: (line: string) => void;
   close(): Promise<void>;
@@ -92,6 +98,10 @@ export async function startAisleRuntime(): Promise<AisleRuntime> {
   const upstreams = loadUpstreams();
   const balanceReaders = createBalanceReaders(upstreams, process.env);
   const store = new InMemoryIdempotencyStore(); // one "did we buy?" answer for both lanes
+  const orderStore = new InMemoryOrderStore();
+  const orderEvents = new OrderEventBus();
+  const orderTracker = new OrderTracker(orderStore, orderEvents);
+  const orderWaiter = new OrderWaiter(orderEvents);
   const openedViewers = new Set<string>();
   let publicUrl = "http://127.0.0.1:8787";
 
@@ -249,6 +259,8 @@ export async function startAisleRuntime(): Promise<AisleRuntime> {
     approval,
     browsing,
     externalActions,
+    orderTracker,
+    orderWaiter,
     enrollments,
     log,
     close: async () => {
@@ -300,10 +312,10 @@ function progressFor(extra: Extra, log: (line: string) => void): Progress {
 /** Register Aisle's namespaced vendor tools plus its own tools on an MCP server. */
 export function registerAisleTools(
   server: McpServer,
-  runtime: Pick<AisleRuntime, "gateway" | "log"> & { externalActions?: ExternalActionManager },
+  runtime: Pick<AisleRuntime, "gateway" | "log" | "orderTracker" | "orderWaiter"> & { externalActions?: ExternalActionManager },
   taskFor: (extra: { sessionId?: string }) => string,
 ): void {
-  const { gateway, log } = runtime;
+  const { gateway, log, orderTracker, orderWaiter } = runtime;
 
   // MCP Apps: visual agents (Claude, ChatGPT) render the live top-up next to the tool call.
   // CLI agents ignore this and show the /browse link from the tool result instead.
@@ -379,6 +391,170 @@ export function registerAisleTools(
     "aisle__spend_report",
     { description: "Report what Aisle has spent and every recovery opened in this session." },
     async (extra) => gateway.spendReport(taskFor(extra as unknown as Extra)),
+  );
+
+  server.registerTool(
+    "aisle__create_order",
+    {
+      description:
+        "Create a tracked order for an agent task. Returns the order ID and current status.",
+      inputSchema: {
+        vendor: z.string(),
+        amount: z.number().positive(),
+        currency: z.string().default("USD"),
+      },
+    },
+    async ({ vendor, amount, currency }, extra) => {
+      const taskId = taskFor(extra as unknown as Extra);
+      const now = new Date().toISOString();
+
+      const order = await orderTracker.create({
+        id: `order_${randomUUID()}`,
+        agentId: "local-agent",
+        taskId,
+        vendor,
+        status: "PENDING",
+        amount,
+        currency,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(order),
+          },
+        ],
+        structuredContent:
+          order as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  server.registerTool(
+    "aisle__get_order",
+    {
+      description:
+        "Get the current status and details of a tracked order.",
+      inputSchema: {
+        order_id: z.string(),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ order_id }) => {
+      const order = await orderTracker.get(order_id);
+
+      if (!order) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "NOT_FOUND",
+                order_id,
+              }),
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(order),
+          },
+        ],
+        structuredContent:
+          order as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  server.registerTool(
+    "aisle__update_order_status",
+    {
+      description:
+        "Update a tracked order's status and emit an order event.",
+      inputSchema: {
+        order_id: z.string(),
+        status: z.enum([
+          "PENDING",
+          "CONFIRMED",
+          "PROCESSING",
+          "SHIPPED",
+          "IN_TRANSIT",
+          "OUT_FOR_DELIVERY",
+          "DELIVERED",
+          "CANCELLED",
+          "EXCEPTION",
+        ]),
+      },
+    },
+    async ({ order_id, status }) => {
+      const order = await orderTracker.updateStatus(
+        order_id,
+        status,
+      );
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(order),
+          },
+        ],
+        structuredContent:
+          order as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  server.registerTool(
+    "aisle__wait_for_order",
+    {
+      description:
+        "Wait for a tracked order to receive its next status update.",
+      inputSchema: {
+        order_id: z.string(),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ order_id }) => {
+      try {
+        const event = await orderWaiter.waitForOrder(order_id);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(event),
+            },
+          ],
+          structuredContent:
+            event as unknown as Record<string, unknown>,
+        };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "TIMEOUT",
+                order_id,
+                error:
+                  err instanceof Error
+                    ? err.message
+                    : String(err),
+              }),
+            },
+          ],
+        };
+      }
+    },
   );
 
   // A slash command in MCP clients (Claude Code: /mcp__aisle__topup <request>) that
