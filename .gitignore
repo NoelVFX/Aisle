@@ -1,16 +1,3 @@
 node_modules/
-dist/
-*.log
-.DS_Store
-coverage/
-.vitest/
 .env
-.env.*
-!.env.example
-
-# Smoke-test artifacts
-steel-smoke.png
-.profiles/
-
-# Gateway state (events, screenshots)
-.aisle/
+generated/

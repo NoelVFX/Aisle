@@ -1,0 +1,30 @@
+// Prisma schema for the order-integration project.
+// Auth (email, password, the 6-digit signup verification code) is handled
+// entirely by Supabase Auth (auth.users) — this schema only models the
+// extra profile fields that live alongside it in `public.profiles`.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  // Pooled connection (Supabase "Transaction" pooler, port 6543) — used by the app at runtime.
+  url       = env("DATABASE_URL")
+  // Direct connection (Supabase "Session" connection, port 5432) — used only for migrations.
+  directUrl = env("DIRECT_URL")
+}
+
+// One row per Supabase Auth user, created automatically by the
+// `on_auth_user_created` trigger (see supabase/schema.sql) right after
+// signup — never insert into this table directly from the app.
+model Profile {
+  // Same value as the corresponding auth.users.id (Supabase's user id).
+  id        String   @id @db.Uuid
+  username  String   @unique
+  birthYear Int      @map("birth_year")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("profiles")
+}
