@@ -19,7 +19,7 @@ function actionPhrase(payload: { text?: string; action?: AgentRequest["action"] 
   if (payload.text) return payload.text;
   const a = payload.action;
   if (!a) return "";
-  if (a.kind === "pick") return "I'll take that one.";
+  if (a.kind === "pick") return `I'll take the ${a.product.title}.`;
   if (a.kind === "approve") return "Approve and buy.";
   if (a.kind === "saveProfile") return "Here is my profile.";
   if (a.kind === "forYou") return "Show my For You.";
@@ -31,7 +31,7 @@ export default function Chat({ initialPrompt }: { initialPrompt?: string }) {
   const [messages, setMessages] = useState<Message[]>([INTRO]);
   const [busy, setBusy] = useState<null | "chat" | "shortlist">(null);
   const [input, setInput] = useState("");
-  const stateRef = useRef({ purchasedSkus: [] as string[], profileTags: [] as string[] });
+  const stateRef = useRef({ purchasedSkus: [] as string[], purchasedTitles: [] as string[], profileTags: [] as string[] });
   const streamRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
   const sentInitial = useRef(false);
@@ -61,6 +61,7 @@ export default function Chat({ initialPrompt }: { initialPrompt?: string }) {
       .then((r) => r.json() as Promise<AgentResponse>)
       .then((res) => {
         if (res.purchasedSku) stateRef.current.purchasedSkus = [...stateRef.current.purchasedSkus, res.purchasedSku];
+        if (res.purchasedTitle) stateRef.current.purchasedTitles = [...stateRef.current.purchasedTitles, res.purchasedTitle];
         if (res.profileTags) stateRef.current.profileTags = res.profileTags;
         setMessages((m) => [...m, { id: "a" + Date.now(), role: "aisle", blocks: res.blocks }]);
       })

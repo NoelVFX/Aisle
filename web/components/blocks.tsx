@@ -16,9 +16,10 @@ function ToneTag({ tone }: { tone: Tone }) {
 
 function ProductCard({ p, send }: { p: Product; send: Sender }) {
   return (
-    <button className="product" onClick={() => send({ action: { kind: "pick", sku: p.sku } })}>
-      {/* Demo imagery from picsum; swap for real merchant photos when wired to a live gateway. */}
-      <img className="product-img" src={p.image} alt={p.title} loading="lazy" />
+    <button className="product" onClick={() => send({ action: { kind: "pick", product: p } })}>
+      {p.image
+        ? <img className="product-img" src={p.image} alt={p.title} loading="lazy" />
+        : <div className="product-img" />}
       <div className="product-info">
         <div className="product-top">
           <span className="product-title">{p.title}</span>
@@ -52,7 +53,7 @@ function Approval({ b, send }: { b: Extract<Block, { type: "approval" }>; send: 
     <div className="card">
       <div className="approve">
         <div className="approve-head">
-          <img className="approve-thumb" src={product.image} alt="" />
+          {product.image ? <img className="approve-thumb" src={product.image} alt="" /> : <div className="approve-thumb" />}
           <div style={{ minWidth: 0 }}>
             <div style={{ fontWeight: 580, letterSpacing: "-0.01em" }}>{product.title}</div>
             <div style={{ color: "var(--muted)", fontSize: 12.5, marginTop: 2 }}>
@@ -69,7 +70,7 @@ function Approval({ b, send }: { b: Extract<Block, { type: "approval" }>; send: 
           <div className="tag tag-accent" style={{ alignSelf: "flex-start" }}><CheckCircle size={14} weight="fill" /> Approved</div>
         ) : (
           <div style={{ display: "flex", gap: 10 }}>
-            <button className="btn btn-primary" onClick={() => { setDone(true); send({ action: { kind: "approve", sku: product.sku } }); }}>
+            <button className="btn btn-primary" onClick={() => { setDone(true); send({ action: { kind: "approve", product } }); }}>
               <CheckCircle size={17} weight="fill" /> Approve and buy
             </button>
             <button className="btn btn-ghost" onClick={() => send({ text: "not now, show me something else" })}>Cancel</button>
@@ -81,8 +82,8 @@ function Approval({ b, send }: { b: Extract<Block, { type: "approval" }>; send: 
           <div className="comp-title"><PlusCircle size={14} weight="bold" /> Frequently bought together</div>
           <div className="comp-row">
             {complements.map((c) => (
-              <button key={c.sku} className="comp" onClick={() => send({ action: { kind: "pick", sku: c.sku } })}>
-                <img src={c.image} alt={c.title} loading="lazy" />
+              <button key={c.sku} className="comp" onClick={() => send({ action: { kind: "pick", product: c } })}>
+                {c.image ? <img src={c.image} alt={c.title} loading="lazy" /> : <div style={{ width: "100%", aspectRatio: "3/2", background: "var(--surface-3)" }} />}
                 <div className="comp-info">
                   <div className="t">{c.title}</div>
                   <div className="p mono">{money(c.priceMinor, c.currency)}</div>
@@ -149,7 +150,20 @@ function ToolRecCard({ b, send }: { b: Extract<Block, { type: "toolRec" }>; send
             Start free <ArrowSquareOut size={15} />
           </a>
         ) : (
-          <button className="btn btn-primary btn-sm" onClick={() => send({ action: { kind: "pick", sku: r.buySku } })}>
+          <button
+            className="btn btn-primary btn-sm"
+            onClick={() => send({ action: { kind: "pick", product: {
+              sku: r.buySku,
+              title: `${r.toolName} ${r.plan} plan`,
+              priceMinor: r.planPriceMinor,
+              currency: r.planCurrency,
+              merchantId: r.checkoutUrl.replace(/^https?:\/\//, "").replace(/\/.*$/, ""),
+              image: "",
+              tone: "expert",
+              pitch: r.why,
+              attrs: ["saas"],
+            } } })}
+          >
             <Cardholder size={16} weight="fill" /> Buy the {r.plan} plan
           </button>
         )}

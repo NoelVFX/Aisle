@@ -66,17 +66,18 @@ export interface AgentRequest {
   text?: string;
   history?: ChatTurn[];
   action?:
-    | { kind: "pick"; sku: string }
-    | { kind: "approve"; sku: string }
+    | { kind: "pick"; product: Product }
+    | { kind: "approve"; product: Product }
     | { kind: "browse"; query?: string }
     | { kind: "saveProfile"; about: string; tags: string[]; budget?: string }
-    | { kind: "forYou" };
-  state: { purchasedSkus: string[]; profileTags: string[] };
+    | { kind: "forYou"; purchasedTitles?: string[] };
+  state: { purchasedSkus: string[]; purchasedTitles?: string[]; profileTags: string[] };
 }
 
 export interface AgentResponse {
   blocks: Block[];
-  /** Client state updates the demo agent computes. */
+  /** Client state updates. */
   purchasedSku?: string;
+  purchasedTitle?: string;
   profileTags?: string[];
 }

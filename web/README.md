@@ -42,6 +42,17 @@ npx vercel --prod
 | "I need an MCP tool that sends email" | A SaaS recommendation (Resend) with a buyable plan |
 | "My For You" | Empty for a first-time user; fills after a purchase |
 
+## Real products (Agnic) and intelligent chat (OpenRouter)
+
+Products shown are **real Shopify products pulled live from Agnic** (title, price, image, sku),
+never fabricated. Only the tone pitch on each card is written by the LLM. Set these env vars
+(locally in `.env.local`, or in the Vercel project):
+
+- `AGNIC_TOKEN` — required for browse. Without it, browse says "connect Agnic" and shows nothing.
+- `OPENROUTER_API_KEY` — makes chat answer real questions and write the pitches. This project's
+  key blocks OpenAI/Google/Anthropic providers, so the default model is `deepseek/deepseek-chat-v3.1`
+  (override with `AISLE_CHAT_MODEL`).
+
 ## Wiring to a live Aisle gateway (optional)
 
 The chat endpoint is [`app/api/chat/route.ts`](app/api/chat/route.ts). In demo mode it runs the
