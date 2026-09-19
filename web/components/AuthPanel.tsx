@@ -30,7 +30,7 @@ export default function AuthPanel({ email: currentEmail, profile, onProfile, onC
     try {
       const supabase = getSupabaseBrowserClient();
       if (mode === "signup") {
-        const { error: signupError } = await supabase.auth.signUp({ email: email.trim(), password, options: { data: { username: username.trim(), birth_year: Number(birthYear) } } });
+        const { error: signupError } = await supabase.auth.signUp({ email: email.trim(), password, options: { emailRedirectTo: `${window.location.origin}/auth/confirm`, data: { username: username.trim(), birth_year: Number(birthYear) } } });
         if (signupError) throw signupError;
         setNotice("Check your email for the verification code."); setMode("verify"); return;
       }

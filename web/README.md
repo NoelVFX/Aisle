@@ -17,6 +17,24 @@ npm run dev
 
 Open http://localhost:3000.
 
+## Supabase authentication
+
+Copy `.env.example` to `.env.local` and set `NEXT_PUBLIC_SUPABASE_URL` and
+`NEXT_PUBLIC_SUPABASE_ANON_KEY`. Run `supabase/migrations/001_profiles.sql` in
+the Supabase SQL editor first.
+
+In Supabase Authentication → URL Configuration, add these redirect URLs:
+
+```text
+http://localhost:3000/auth/confirm
+https://your-production-domain.com/auth/confirm
+```
+
+The app supports both Supabase confirmation links and six-digit OTPs. For a
+code-only email, edit Authentication → Email Templates → Confirm signup and
+include `{{ .Token }}`. If the default confirmation link is retained, Aisle
+handles it at `/auth/confirm` and exchanges it for a session.
+
 ## Deploy on Vercel
 
 1. Push this repo to GitHub (already on the `Agnic` branch).
