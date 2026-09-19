@@ -11,6 +11,7 @@ export interface ProfileRecord {
   birth_year?: number | null;
   profile_context?: string | null;
   profile_tags?: string[] | null;
+  profile_address?: string | null;
 }
 
 type Mode = "login" | "signup" | "verify";
@@ -106,7 +107,8 @@ export default function AuthPanel({ email: currentEmail, profile, onProfile, onC
         <ProfileEditor
           initialTags={profile?.profile_tags ?? []}
           initialContext={profile?.profile_context ?? ""}
-          onSaved={(tags, context) => onProfile({ ...(profile ?? {}), profile_tags: tags, profile_context: context }, currentEmail)}
+          initialAddress={profile?.profile_address ?? ""}
+          onSaved={(tags, context, address) => onProfile({ ...(profile ?? {}), profile_tags: tags, profile_context: context, profile_address: address }, currentEmail)}
         />
         <button className="btn btn-ghost" onClick={() => void signOut()}><Lock size={15} /> Sign out</button>
       </> : <>

@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { ShieldCheck, Lock } from "@phosphor-icons/react";
+import { ShieldCheck, Lock, MapPin } from "@phosphor-icons/react";
 
 const PROFILE_STORAGE_KEY = "aisle-profile-v1";
 
@@ -14,16 +14,19 @@ const STYLE = ["smart-casual", "casual", "formal", "minimalist", "sporty", "tech
 export default function ProfileEditor({
   initialTags = [],
   initialContext = "",
+  initialAddress = "",
   onSaved,
   heading = "Your shopping preferences",
 }: {
   initialTags?: string[];
   initialContext?: string;
-  onSaved?: (tags: string[], context: string) => void;
+  initialAddress?: string;
+  onSaved?: (tags: string[], context: string, address: string) => void;
   heading?: string;
 }) {
   const [tags, setTags] = useState<string[]>(initialTags);
   const [about, setAbout] = useState(initialContext);
+  const [address, setAddress] = useState(initialAddress);
   const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [message, setMessage] = useState("");
 
@@ -49,9 +52,10 @@ export default function ProfileEditor({
   const save = async () => {
     setStatus("saving"); setMessage("");
     const context = about.trim();
-    try { localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify({ tags, context })); } catch { /* ignore */ }
+    const addr = address.trim();
+    try { localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify({ tags, context, address: addr })); } catch { /* ignore */ }
     try {
-      const res = await fetch("/api/profile", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ profile_context: context, profile_tags: tags }) });
+      const res = await fetch("/api/profile", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ profile_context: context, profile_tags: tags, profile_address: addr }) });
       if (res.status === 401) { setStatus("saved"); setMessage("Saved on this device. Sign in to sync it across devices."); }
       else if (!res.ok) {
         let detail = "";
@@ -63,7 +67,7 @@ export default function ProfileEditor({
     } catch {
       setStatus("saved"); setMessage("Saved on this device.");
     }
-    onSaved?.(tags, context);
+    onSaved?.(tags, context, addr);
   };
 
   return (
@@ -79,6 +83,11 @@ export default function ProfileEditor({
           </div>
         </div>
       ))}
+      <div className="field">
+        <label className="label" htmlFor="address"><MapPin size={13} weight="fill" style={{ verticalAlign: "-2px", marginRight: 4, color: "var(--accent)" }} />Location / delivery address (optional)</label>
+        <input id="address" className="input" placeholder="e.g. 128 Rowan Street, Apt 4B, Toronto, ON M5V 2T6" value={address} onChange={(e) => setAddress(e.target.value)} autoComplete="street-address" />
+        <span style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>Used to prefill delivery at checkout. Never shared with a merchant until you approve a purchase.</span>
+      </div>
       <div className="field">
         <label className="label" htmlFor="about">Anything else (optional)</label>
         <textarea id="about" className="textarea" placeholder="e.g. 19 y/o male university student, into mechanical keyboards, tight budget" value={about} onChange={(e) => setAbout(e.target.value)} />
