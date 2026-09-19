@@ -259,6 +259,16 @@ export class ExternalActionManager {
     },
   ) {}
 
+  /** Resolve a vendor/URL from the ask without running anything — for routers deciding
+   *  whether to check out on the vendor's own site or fall back to discovery. */
+  resolveOrNull(prompt: string, url?: string): ExternalActionTarget | undefined {
+    try {
+      return resolveExternalTarget(prompt, this.deps.upstreams, url, this.deps.profilesDir);
+    } catch {
+      return undefined;
+    }
+  }
+
   async execute(request: ExternalActionRequest): Promise<ExternalActionResult> {
     const target = resolveExternalTarget(request.prompt, this.deps.upstreams, request.url, this.deps.profilesDir);
 

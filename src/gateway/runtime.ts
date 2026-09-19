@@ -32,6 +32,15 @@ import { ExternalActionManager, LocalExternalActionExecutor } from "../web/exter
 import { LoginManager } from "../web/login-manager.js";
 import { loginPage } from "../web/login-page.js";
 import { FileProfileStore } from "../slow-lane/profiles.js";
+import { createAgnicClient } from "../agnic/client.js";
+import { AgnicCommerceManager } from "../agnic/manager.js";
+import type { AgnicProduct } from "../agnic/commerce.js";
+import { recommendTool } from "../agnic/recommend.js";
+import { classifyTrack } from "../agnic/classify.js";
+import { PreferenceModel } from "../agnic/personalization.js";
+import { generatePitches, distillPersona } from "../agnic/pitch.js";
+import { complementQueries } from "../agnic/complements.js";
+import { shopPage } from "../web/shop-page.js";
 import { MCP_APP_MIME, RECOVERY_WIDGET_CSP, RECOVERY_WIDGET_HTML, RECOVERY_WIDGET_URI } from "./widget.js";
 
 export interface AisleRuntime {
@@ -44,6 +53,10 @@ export interface AisleRuntime {
   externalActions?: ExternalActionManager;
   orderTracker: OrderTracker;
   orderWaiter: OrderWaiter;
+  /** Agnic checkout rail (buy through any merchant's existing checkout). Present when AGNIC_TOKEN is set. */
+  agnicCommerce?: AgnicCommerceManager;
+  /** Local, consented preference model powering personalised Explore (ranking, pitches, learning). */
+  personalization: PreferenceModel;
   enrollments: FileEnrollmentStore;
   log: (line: string) => void;
   close(): Promise<void>;
@@ -156,6 +169,18 @@ export async function startAisleRuntime(): Promise<AisleRuntime> {
     loginManager,
     publicUrl: () => publicUrl,
   });
+  // Agnic checkout rail: buy through any merchant's existing checkout (hosted engine,
+  // vaulted card, verifiable receipt). Present only when a server-side token is set.
+  const agnicToken = process.env["AGNIC_TOKEN"];
+  const agnicCommerce = agnicToken
+    ? new AgnicCommerceManager({
+        agnic: createAgnicClient(agnicToken, process.env["AGNIC_BASE_URL"] ? { baseUrl: process.env["AGNIC_BASE_URL"] } : {}),
+        publicUrl: () => publicUrl,
+        ...(process.env["AGNIC_DEFAULT_COUNTRY"] ? { defaultCountry: process.env["AGNIC_DEFAULT_COUNTRY"] } : {}),
+      })
+    : undefined;
+  // Local, consented preference model for personalised Explore (ranking + pitch tone learning).
+  const personalization = new PreferenceModel(join(stateDir, "personalization.json"));
 
   const webRoutes = async (req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> => {
     const send = (status: number, body?: unknown, type = "application/json") => {
@@ -235,6 +260,27 @@ export async function startAisleRuntime(): Promise<AisleRuntime> {
         return send(400, { error: err instanceof Error ? err.message : String(err) }), true;
       }
     }
+    // Agnic purchase approval: GET the page, POST approve, GET status.
+    const shopPageMatch = p.match(/^\/shop\/([^/]+)$/);
+    if (req.method === "GET" && shopPageMatch?.[1]) {
+      const pend = agnicCommerce?.pending(decodeURIComponent(shopPageMatch[1]));
+      if (!pend) return send(404, "<h1>Unknown or expired purchase</h1>", "text/html; charset=utf-8"), true;
+      const total = (() => { try { return new Intl.NumberFormat("en", { style: "currency", currency: pend.currency }).format(pend.total_minor / 100); } catch { return `${(pend.total_minor / 100).toFixed(2)} ${pend.currency}`; } })();
+      return send(200, shopPage(decodeURIComponent(shopPageMatch[1]), pend.summary, total), "text/html; charset=utf-8"), true;
+    }
+    const shopApi = p.match(/^\/api\/shop\/([^/]+)\/(approve|status)$/);
+    if (shopApi?.[1] && shopApi[2] && agnicCommerce) {
+      const id = decodeURIComponent(shopApi[1]);
+      if (req.method === "POST" && shopApi[2] === "approve") {
+        const body = await readJson(req);
+        const r = agnicCommerce.approve(id, typeof body["text"] === "string" ? body["text"] : undefined);
+        return r.ok ? (send(200, r), true) : (send(400, r), true);
+      }
+      if (req.method === "GET" && shopApi[2] === "status") {
+        const pend = agnicCommerce.pending(id);
+        return send(pend ? 200 : 404, pend ?? { error: "UNKNOWN_SHOP" }), true;
+      }
+    }
     return false;
   };
 
@@ -261,6 +307,8 @@ export async function startAisleRuntime(): Promise<AisleRuntime> {
     externalActions,
     orderTracker,
     orderWaiter,
+    ...(agnicCommerce ? { agnicCommerce } : {}),
+    personalization,
     enrollments,
     log,
     close: async () => {
@@ -312,7 +360,7 @@ function progressFor(extra: Extra, log: (line: string) => void): Progress {
 /** Register Aisle's namespaced vendor tools plus its own tools on an MCP server. */
 export function registerAisleTools(
   server: McpServer,
-  runtime: Pick<AisleRuntime, "gateway" | "log" | "orderTracker" | "orderWaiter"> & { externalActions?: ExternalActionManager },
+  runtime: Pick<AisleRuntime, "gateway" | "log" | "orderTracker" | "orderWaiter"> & { externalActions?: ExternalActionManager; agnicCommerce?: AgnicCommerceManager; personalization?: PreferenceModel },
   taskFor: (extra: { sessionId?: string }) => string,
 ): void {
   const { gateway, log, orderTracker, orderWaiter } = runtime;
@@ -340,7 +388,7 @@ export function registerAisleTools(
   server.registerTool(
     "aisle__execute_web_action",
     {
-      description: "Run a prompt-driven action on a SaaS in a local browser signed in with your saved profile — e.g. \"generate an image on textto-image\" or \"top up credits on higgsfield\". Name the vendor OR paste its https link; a bare name resolves to a vendor you've configured or logged in to (never a guessed domain). Works for any vendor with no merchant integration. Use it to generate/act or to top up on demand, not only after a 402. The model operates the site but never pays: any checkout goes through the normal one-approval Aisle top-up flow.",
+      description: "USE THIS TOOL to DO something on a SaaS the user already uses (signed in with their saved profile), or to top up credits on that site — e.g. \"generate an image on textto-image\", \"top up credits on higgsfield\", or \"use Aisle to top up on <site>\". This is for acting on / topping up an EXISTING account on a named site; to buy a NEW product or subscribe to a plan through checkout, use aisle__shop instead. Name the vendor OR paste its https link; a bare name resolves to a vendor you've configured or logged in to (never a guessed domain). Works for any vendor with no integration. The model operates the site but never pays: any checkout goes through the normal one-approval Aisle top-up flow.",
       inputSchema: { prompt: z.string(), url: z.string().url().optional(), max_steps: z.number().int().positive().max(20).optional() },
       _meta: widgetMeta,
     },
@@ -361,6 +409,253 @@ export function registerAisleTools(
     async ({ recovery_id }) => {
       if (!runtime.externalActions) return { content: [{ type: "text", text: JSON.stringify({ status: "RECOVERY_FAILED", error: "EXTERNAL_ACTIONS_NOT_CONFIGURED" }) }], isError: true };
       const result = await runtime.externalActions.wait(recovery_id);
+      return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result };
+    },
+  );
+
+  // --- Agnic commerce rail: buy through any merchant's checkout with one approval. ---
+  const agnicMissing = { content: [{ type: "text" as const, text: JSON.stringify({ status: "FAILED", error: "AGNIC_NOT_CONFIGURED: set AGNIC_TOKEN on the server to enable purchases." }) }], isError: true };
+  const asJson = (obj: unknown, isError = false) => ({ content: [{ type: "text" as const, text: JSON.stringify(obj) }], structuredContent: obj as Record<string, unknown>, ...(isError ? { isError: true } : {}) });
+
+  // shop_id → sku, so a completed purchase can add extra weight on top of proceed-to-buy.
+  const shopSku = new Map<string, string>();
+  const shapeItem = (p: { product: AgnicProduct; tone: string; pitch: string; why?: string }) => ({
+    sku: p.product.sku,
+    title: p.product.title,
+    ...(p.product.price_minor !== undefined ? { price_minor: p.product.price_minor } : {}),
+    ...(p.product.currency ? { currency: p.product.currency } : {}),
+    ...(p.product.merchant?.merchant_id ? { merchant_id: p.product.merchant.merchant_id } : {}),
+    tone: p.tone,
+    pitch: p.pitch,
+    ...(p.why ? { why: p.why } : {}),
+  });
+
+  /** The personalised shortlist for the Explore step. No prompt ⇒ the "For You" feed from memory. */
+  const buildShortlist = async (prompt: string | undefined, country: string | undefined, count: number): Promise<Record<string, unknown>> => {
+    if (!runtime.agnicCommerce) return { status: "FAILED", error: "AGNIC_NOT_CONFIGURED" };
+    if (!runtime.personalization) return { status: "FAILED", error: "PERSONALIZATION_UNAVAILABLE" };
+    const pm = runtime.personalization;
+    let products: AgnicProduct[] = [];
+    if (prompt && prompt.trim()) {
+      products = await runtime.agnicCommerce.search(prompt, country, Math.max(count * 2, 8));
+    } else {
+      const seeds = pm.purchaseSeeds(3); // empty for a first-time user ⇒ blank For You page
+      if (seeds.length === 0) return { status: "BROWSING", products: [], note: "No recommendations yet — buy something, or set a profile with aisle__set_profile, and your For You list fills in." };
+      const seen = new Set<string>();
+      for (const seed of seeds) for (const p of await runtime.agnicCommerce.search(seed, country, 4)) if (!seen.has(p.sku)) { seen.add(p.sku); products.push(p); }
+    }
+    if (products.length === 0) return { status: "NO_RESULTS", note: "No products found. Try different wording or a different country." };
+    const pitched = await generatePitches(pm.rank(products, count), pm.profile());
+    pm.recordImpressions(pitched.map((p) => ({ sku: p.product.sku, ...(p.product.title ? { title: p.product.title } : {}), tone: p.tone, attrs: p.attrs })));
+    return { status: "BROWSING", products: pitched.map(shapeItem), next: "Show these with their pitches. When the user picks one, call aisle__shop with its merchant_id + sku (records their choice to improve future picks). Nothing is charged until they approve." };
+  };
+
+  /** Complementary items for the checkout moment ("frequently bought together"). Best-effort. */
+  const complementsFor = async (seed: string, country: string | undefined): Promise<Array<Record<string, unknown>>> => {
+    if (!runtime.agnicCommerce || !runtime.personalization) return [];
+    try {
+      const queries = await complementQueries(seed, { max: 3 });
+      const found: AgnicProduct[] = [];
+      const seen = new Set<string>();
+      for (const q of queries.slice(0, 3)) {
+        const p = (await runtime.agnicCommerce.search(q, country, 2)).find((x) => !seen.has(x.sku));
+        if (p) { seen.add(p.sku); found.push(p); }
+      }
+      if (found.length === 0) return [];
+      const pitched = await generatePitches(runtime.personalization.rank(found, Math.min(3, found.length)), runtime.personalization.profile());
+      runtime.personalization.recordImpressions(pitched.map((p) => ({ sku: p.product.sku, ...(p.product.title ? { title: p.product.title } : {}), tone: p.tone, attrs: p.attrs })));
+      return pitched.map((p) => { const { why: _why, ...rest } = shapeItem(p); return rest; });
+    } catch {
+      return [];
+    }
+  };
+
+  // The single smart entry: classify the ask (physical good vs digital SaaS/plan/credits)
+  // and route to the right engine — Agnic's Shopify rail, the vendor's own browser
+  // checkout, or (for a goal with no named vendor) discovery. The model never pays.
+  server.registerTool(
+    "aisle__buy",
+    {
+      description:
+        "USE THIS as the ONE entry to buy anything with Aisle. It classifies the request — physical product vs digital SaaS/plan/credits — and automatically routes to the right checkout, so the user needn't say which. Prefer this for ANY \"buy / purchase / order / subscribe / top up …\" ask and whenever the user says \"use Aisle\". Examples: \"a hex token fidget\" (physical → Agnic), \"the Resend Pro plan\" or a pricing URL (SaaS → the vendor's own checkout), \"an MCP tool that sends email\" (goal → discovery). The model never pays; it returns an approval link and, for a goal, a recommendation to confirm first.",
+      inputSchema: {
+        prompt: z.string().min(1).describe("What to buy, or the goal, in plain language."),
+        country: z.string().length(2).optional().describe("Market for physical search: US, GB, CA, AU."),
+        plan: z.string().optional().describe("Plan/tier for a SaaS, e.g. \"Pro\"."),
+      },
+      _meta: widgetMeta,
+    },
+    async ({ prompt, country, plan }, extra) => {
+      const taskId = taskFor(extra as unknown as Extra);
+      const classification = await classifyTrack(prompt);
+
+      if (classification.track === "physical") {
+        if (!runtime.agnicCommerce) return asJson({ track: "physical", status: "FAILED", classification, error: "AGNIC_NOT_CONFIGURED: set AGNIC_TOKEN to buy physical goods." }, true);
+        // Default physical path is the personalised shortlist — the user picks, then aisle__shop buys.
+        const shortlist = await buildShortlist(prompt, country, 5);
+        return asJson({ track: "physical", classification, ...shortlist });
+      }
+
+      // SaaS: check out on the vendor's own site when a vendor/URL is resolvable; else discover.
+      const target = runtime.externalActions?.resolveOrNull(prompt);
+      if (runtime.externalActions && target) {
+        const r = await runtime.externalActions.execute({ taskId, prompt });
+        return asJson({ track: "saas", mode: "checkout", classification, ...r });
+      }
+      try {
+        const rec = await recommendTool(prompt);
+        return asJson({
+          track: "saas",
+          mode: "discover",
+          classification,
+          ...rec,
+          next: `Recommended ${rec.tool_name} (${rec.checkout_url}). Show it to the user to confirm; then to buy it call aisle__buy again with the tool named and its URL in the prompt (e.g. "the ${rec.plan || "Pro"} plan on ${rec.checkout_url}"), which routes to the vendor's own checkout with one approval. Never pay without approval.`,
+        });
+      } catch (err) {
+        return asJson({ track: "saas", mode: "discover", status: "FAILED", classification, error: err instanceof Error ? err.message : String(err) }, true);
+      }
+    },
+  );
+
+  server.registerTool(
+    "aisle__find_tool",
+    {
+      description:
+        "USE THIS TOOL when the user wants a tool/SaaS/MCP server for a GOAL but hasn't named a specific product — e.g. \"I want an MCP tool that sends email autonomously\", \"what should I use to add payments?\", \"find me a SaaS for X\", or \"use Aisle to find a tool for …\". It recommends the best-fit tool and returns its checkout URL + suggested plan: { tool_name, checkout_url, plan, why, alternatives }. Show the user the pick, then to buy it call aisle__shop with explore_url = checkout_url and plan = the suggested plan. This only names a tool and a URL — it never pays.",
+      inputSchema: { goal: z.string().min(1).describe("What the user wants a tool to do.") },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ goal }) => {
+      try {
+        const rec = await recommendTool(goal);
+        const result = {
+          status: "RECOMMENDED",
+          ...rec,
+          next: `Show the user "${rec.tool_name}" (${rec.checkout_url}) and its rationale. To buy its plan, call aisle__shop with explore_url set to that checkout_url and plan set to ${JSON.stringify(rec.plan || "the tier the user wants")}. If it returns CHOOSE_PLAN, show the plans and let the user pick, then call aisle__shop again with merchant_id + the chosen sku. The user still approves before anything is charged.`,
+        };
+        return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result };
+      } catch (err) {
+        const result = { status: "FAILED", error: err instanceof Error ? err.message : String(err) };
+        return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result, isError: true };
+      }
+    },
+  );
+
+  // --- Personalised Explore: a ranked, pitched shortlist that learns from what the user buys. ---
+  server.registerTool(
+    "aisle__browse",
+    {
+      description:
+        "Explore physical products and return a RANKED, PITCHED shortlist — Aisle's personalised discovery over Agnic's Shopify catalogue. With a `prompt`, browses that request (\"show me options for …\", \"what blazers can I get\"). WITHOUT a prompt, returns the user's \"For You\" feed built from what they've bought before — empty for a first-time user. Each result carries a one-line pitch + merchant_id + sku; when the user picks one, call aisle__shop with that merchant_id + sku (the choice tailors future picks). Ranking/pitches use the local, consented profile (aisle__set_profile). Never pays.",
+      inputSchema: {
+        prompt: z.string().min(1).optional().describe("What to shop for; omit for the personalised For You feed."),
+        country: z.string().length(2).optional().describe("Market: US, GB, CA or AU."),
+        count: z.number().int().positive().max(8).optional().describe("How many to show (default 5)."),
+      },
+    },
+    async ({ prompt, country, count }) => {
+      if (!runtime.agnicCommerce) return agnicMissing;
+      if (!runtime.personalization) return asJson({ status: "FAILED", error: "PERSONALIZATION_UNAVAILABLE" }, true);
+      try {
+        const result = await buildShortlist(prompt, country, count ?? 5);
+        return asJson(result, result["status"] === "FAILED");
+      } catch (err) {
+        return asJson({ status: "FAILED", error: err instanceof Error ? err.message : String(err) }, true);
+      }
+    },
+  );
+
+  server.registerTool(
+    "aisle__set_profile",
+    {
+      description:
+        "Save (or clear) the user's shopping profile so Aisle can personalise Explore — used with their CONSENT before their first purchase, or when they want tailored picks. Pass `about` (a short freeform self-description, e.g. \"uni student on a budget, smart-casual style\") which is distilled into coarse persona tags, and/or an explicit budget_band. Stored LOCALLY only, never sent to the merchant, and used solely to rank/pitch products. Call with consent=false to erase everything stored.",
+      inputSchema: {
+        consent: z.boolean().describe("Must be true to store anything; false clears the profile."),
+        about: z.string().max(600).optional().describe("Short freeform self-description; distilled to persona tags."),
+        budget_band: z.enum(["low", "mid", "high"]).optional(),
+        country: z.string().length(2).optional(),
+      },
+    },
+    async ({ consent, about, budget_band, country }) => {
+      if (!runtime.personalization) return asJson({ status: "FAILED", error: "PERSONALIZATION_UNAVAILABLE" }, true);
+      if (!consent) {
+        runtime.personalization.setProfile({ consent: false });
+        return asJson({ status: "PROFILE_CLEARED", note: "Your shopping profile was erased. Nothing personal is stored." });
+      }
+      const distilled = about ? await distillPersona(about) : { tags: [] as string[] };
+      const profile = runtime.personalization.setProfile({
+        consent: true,
+        tags: distilled.tags,
+        ...(budget_band ? { budgetBand: budget_band } : distilled.budgetBand ? { budgetBand: distilled.budgetBand } : {}),
+        ...(country ? { country } : {}),
+        ...(about ? { note: about } : {}),
+      });
+      return asJson({ status: "PROFILE_SAVED", profile, note: "Stored locally only — never sent to the merchant; used solely to rank and pitch products for you." });
+    },
+  );
+
+  server.registerTool(
+    "aisle__shop",
+    {
+      description:
+        "USE THIS TOOL to buy, purchase, order, check out, or pay for anything — a product, a SaaS/MCP plan or subscription, or a credits pack — through a real merchant's existing checkout (Agnic rail, no merchant integration). This is Aisle's purchase tool: it is the correct choice for ANY request like \"buy me …\", \"purchase …\", \"order …\", \"get me …\", \"subscribe to …\", or \"check out …\", and ALWAYS when the user says \"use Aisle\" / \"with Aisle\" to buy something. Do NOT use a generic web/browser/search tool for a purchase — use this. Describe the item in `prompt` (e.g. \"a hex token fidget\"); optionally pin merchant_id + sku, or pass explore_url (a SaaS pricing page) to onboard the shop and read its plans from Agnic's catalogue. With several plans it returns CHOOSE_PLAN { merchant_id, plans } — show them and let the USER pick (the optional `plan` only ranks them, never picks), then call again with merchant_id + the chosen sku. The model never pays — it returns AWAITING_APPROVAL with an approve link; after the user approves, call aisle__wait_for_purchase. Ends at a receipt.",
+      inputSchema: {
+        prompt: z.string().min(1).describe("What to buy, in plain language."),
+        country: z.string().length(2).optional().describe("Market for search: US, GB, CA or AU."),
+        merchant_id: z.string().optional().describe("Skip search: buy from this merchant."),
+        sku: z.string().optional().describe("The exact product to buy (with merchant_id or explore_url)."),
+        quantity: z.number().int().positive().max(50).optional(),
+        explore_url: z.string().url().optional().describe("Onboard this shop (Explore) before buying — e.g. a SaaS pricing page."),
+        plan: z.string().optional().describe("With explore_url: the plan that likely fits, e.g. \"Pro\". Only ranks the CHOOSE_PLAN list; never picks a plan."),
+      },
+      _meta: widgetMeta,
+    },
+    async ({ prompt, country, merchant_id, sku, quantity, explore_url, plan }, extra) => {
+      if (!runtime.agnicCommerce) return agnicMissing;
+      const result = await runtime.agnicCommerce.shop({
+        taskId: taskFor(extra as unknown as Extra),
+        prompt,
+        ...(country ? { country } : {}),
+        ...(merchant_id ? { merchantId: merchant_id } : {}),
+        ...(sku ? { sku } : {}),
+        ...(quantity ? { quantity } : {}),
+        ...(explore_url ? { exploreUrl: explore_url } : {}),
+        ...(plan ? { planHint: plan } : {}),
+      });
+      // Proceed-to-buy = conversion: the user chose this specific sku (from a browse), so
+      // credit the tone/attributes it was shown with (weight 1). Remember shop_id → sku so a
+      // completed purchase can add more on top.
+      if (sku && result.status === "AWAITING_APPROVAL") {
+        runtime.personalization?.recordConversion(sku);
+        shopSku.set(result.shop_id, sku);
+      }
+      // Checkout-moment upsell: complementary products for a physical buy ("frequently bought together").
+      let out: Record<string, unknown> = result;
+      if (result.status === "AWAITING_APPROVAL" && !explore_url && result.merchant_id) {
+        const complements = await complementsFor(prompt, country);
+        if (complements.length > 0) out = { ...result, complements, complements_note: "Frequently bought together — offer these before the user approves; to add one, call aisle__shop with its merchant_id + sku." };
+      }
+      return { content: [{ type: "text", text: JSON.stringify(out) }], structuredContent: out };
+    },
+  );
+
+  server.registerTool(
+    "aisle__wait_for_purchase",
+    {
+      description:
+        "After the user approves a purchase (from aisle__shop's AWAITING_APPROVAL), place and follow the order and return the receipt. Poll this with the shop_id; do NOT re-run aisle__shop. If it returns APPROVAL_REQUIRED, show the link, let the user complete the step-up, then call this again.",
+      inputSchema: { shop_id: z.string() },
+      _meta: widgetMeta,
+    },
+    async ({ shop_id }) => {
+      if (!runtime.agnicCommerce) return agnicMissing;
+      const result = await runtime.agnicCommerce.wait(shop_id);
+      // Completed purchase is a much stronger signal than proceed-to-buy: add extra weight.
+      if (result.status === "COMPLETED") {
+        const sku = shopSku.get(shop_id);
+        if (sku) { runtime.personalization?.recordPurchase(sku); shopSku.delete(shop_id); }
+      }
       return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result };
     },
   );
@@ -577,6 +872,36 @@ export function registerAisleTools(
               `Use ONLY that tool — do not use any other image, media, or payment tool, because this must run through Aisle so any top-up gets one human approval. ` +
               `If the result is AWAITING_APPROVAL, show me the approve_url and recovery_id, then call aisle__wait_for_external_action with that recovery_id and wait until it resolves. ` +
               `When it resolves, report the final result and, if a purchase happened, a one-line spend note.`,
+          },
+        },
+      ],
+    }),
+  );
+
+  // A slash command (Claude Code: /mcp__aisle__buy <request>) that deterministically
+  // routes a PURCHASE through Aisle's Agnic checkout rail — no tool ambiguity, so the
+  // agent never wanders off to some other shopping/web skill.
+  server.registerPrompt(
+    "buy",
+    {
+      title: "Aisle buy (Agnic checkout)",
+      description: 'Buy a product, plan, or credits through Aisle\'s Agnic checkout, or find the best tool for a goal first. Argument: what to buy or the goal — e.g. "a hex token fidget" or "an MCP tool that sends email autonomously".',
+      argsSchema: { request: z.string().describe('What to buy or the goal, e.g. "a hex token fidget" or "an email-sending MCP tool".') },
+    },
+    ({ request }) => ({
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text:
+              `Complete this purchase through Aisle's Agnic checkout rail ONLY. Request: ${JSON.stringify(request)}. ` +
+              `Do NOT use any other shopping, browser, payment, or marketplace tool — it must go through Aisle so it gets exactly one human approval and a verifiable receipt.\n` +
+              `1. If the request describes a GOAL or a need for a tool (e.g. "an MCP tool that sends email") rather than a specific product, first call aisle__find_tool with goal set to the request, then show me the recommended tool and its checkout_url. If it is already a concrete product, skip this step.\n` +
+              `2. Call aisle__shop with prompt set to the request. If you used aisle__find_tool, also pass explore_url set to its checkout_url and plan set to its suggested plan. Pass merchant_id/sku only if I gave them.\n` +
+              `3. If aisle__shop returns CHOOSE_PLAN, show me the plan options and call aisle__shop again with the same explore_url plus the sku I pick. On AWAITING_APPROVAL, show me the summary, total, and approve_url, then STOP and wait — I approve on that page. Never place payment yourself.\n` +
+              `4. After I approve, call aisle__wait_for_purchase with the shop_id and poll it. If it returns APPROVAL_REQUIRED, show me the link, let me finish it, then call aisle__wait_for_purchase again. Do NOT re-run aisle__shop.\n` +
+              `5. When COMPLETED, show me the receipt (order id, amount, currency, status).`,
           },
         },
       ],
