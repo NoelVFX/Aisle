@@ -15,6 +15,14 @@ export interface ProfileRecord {
 
 type Mode = "login" | "signup" | "verify";
 
+/** Base URL for confirmation links. Set NEXT_PUBLIC_SITE_URL to your real domain so the
+ *  email link never points at localhost, even when you sign up from a local dev server. */
+function siteOrigin(): string {
+  const configured = process.env.NEXT_PUBLIC_SITE_URL?.trim().replace(/\/+$/, "");
+  if (configured) return configured;
+  return typeof window !== "undefined" ? window.location.origin : "";
+}
+
 /** Accept a 6-digit OTP, a pasted confirmation link, or a bare token_hash from the email. */
 function parseConfirmation(input: string): { kind: "otp"; token: string } | { kind: "code"; code: string } | { kind: "token_hash"; token_hash: string; type: string } | null {
   const v = input.trim();
@@ -49,7 +57,7 @@ export default function AuthPanel({ email: currentEmail, profile, onProfile, onC
       if (mode === "signup") {
         const parsedBirthYear = Number(birthYear);
         if (!Number.isInteger(parsedBirthYear) || parsedBirthYear < 1900 || parsedBirthYear > new Date().getUTCFullYear()) throw new Error("Enter a valid birth year.");
-        const { data: signupData, error: signupError } = await supabase.auth.signUp({ email: email.trim(), password, options: { emailRedirectTo: `${window.location.origin}/auth/confirm`, data: { username: username.trim(), birth_year: Number(birthYear) } } });
+        const { data: signupData, error: signupError } = await supabase.auth.signUp({ email: email.trim(), password, options: { emailRedirectTo: `${siteOrigin()}/auth/confirm`, data: { username: username.trim(), birth_year: Number(birthYear) } } });
         if (signupError) {
           if (/database error saving new user/i.test(signupError.message)) throw new Error("Supabase profile setup is incomplete. Run supabase/migrations/001_profiles.sql and 002_repair_profile_trigger.sql, then try again.");
           throw signupError;

@@ -56,11 +56,16 @@ accepts either, but choose the flow you want:
 
   Then enter that code on the verify screen.
 
-- **Keep the default link:** just **click the link** in the email (Aisle confirms it
-  at `/auth/confirm` and signs you in), or **paste the whole link** into the verify
-  box. Make sure `.../auth/confirm` is in Authentication → URL Configuration →
-  Redirect URLs (above), and set **Site URL** to your real domain for production so
-  the link is not localhost.
+- **Keep the default link, but not on localhost:** to send the confirmation link to
+  your real domain (even while signing up from a local dev server):
+  1. Set `NEXT_PUBLIC_SITE_URL=https://your-domain` in the env (no trailing slash).
+     The app uses it to build the link's redirect instead of `window.location.origin`.
+  2. In Supabase → Authentication → **URL Configuration**, set **Site URL** to the same
+     domain and add `https://your-domain/auth/confirm` to **Redirect URLs**.
+
+  Then click the link in the email (Aisle confirms it at `/auth/confirm` and signs you
+  in) or paste the whole link into the verify box. Without both, Supabase falls back to
+  its Site URL, so if that is still localhost the link will be localhost.
 
 ## Deploy on Vercel
 
