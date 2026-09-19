@@ -1,0 +1,174 @@
+import type { Product, Tone } from "./types";
+
+/**
+ * Live product data from Agnic (real Shopify catalogue). We NEVER fabricate products:
+ * title, price, image, sku and merchant all come from Agnic's search response. Only the
+ * tone pitch is added later by the LLM (see pitch.ts).
+ *
+ * Requires AGNIC_TOKEN (server-side). The response shape is parsed defensively because
+ * Agnic's field names aren't fully pinned in the docs.
+ */
+
+const BASE = () => process.env.AGNIC_BASE_URL || "https://api.agnic.ai";
+export const agnicConfigured = () => Boolean(process.env.AGNIC_TOKEN);
+
+type Raw = Record<string, unknown>;
+const str = (v: unknown): string | undefined => (typeof v === "string" && v.trim() ? v.trim() : undefined);
+const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+
+function pickImage(p: Raw): string {
+  const imgs = p["images"];
+  const first = Array.isArray(imgs) && imgs.length ? imgs[0] : undefined;
+  const fromArray = typeof first === "string" ? first : first && typeof first === "object" ? str((first as Raw)["url"]) ?? str((first as Raw)["src"]) : undefined;
+  const cands = [str(p["image"]), str(p["image_url"]), str(p["imageUrl"]), str(p["featured_image"]), str(p["thumbnail"]), fromArray];
+  return cands.find((x) => x && /^https?:\/\//.test(x)) ?? "";
+}
+
+function priceMinor(p: Raw): number {
+  const m = num(p["price_minor"]) ?? num(p["priceMinor"]) ?? num(p["amount_minor"]);
+  if (m !== undefined) return m;
+  const dollars = num(p["price"]) ?? num(p["amount"]);
+  return dollars !== undefined ? Math.round(dollars * 100) : 0;
+}
+
+function merchantId(p: Raw): string {
+  const m = p["merchant"];
+  return (m && typeof m === "object" ? str((m as Raw)["merchant_id"]) ?? str((m as Raw)["id"]) : undefined) ?? str(p["merchant_id"]) ?? str(p["merchantId"]) ?? "";
+}
+
+/** The product's Shopify storefront URL, from a direct field or constructed from a handle. */
+function productUrl(p: Raw): string | undefined {
+  const direct = str(p["url"]) ?? str(p["product_url"]) ?? str(p["productUrl"]) ?? str(p["link"]) ?? str(p["online_store_url"]) ?? str(p["onlineStoreUrl"]) ?? str(p["permalink"]);
+  if (direct && /^https?:\/\//.test(direct)) return direct;
+  const handle = str(p["handle"]) ?? str(p["product_handle"]);
+  const m = p["merchant"];
+  const domain = str(p["domain"]) ?? (m && typeof m === "object" ? str((m as Raw)["domain"]) : undefined);
+  if (handle && domain) return `https://${domain.replace(/^https?:\/\//, "").replace(/\/$/, "")}/products/${handle}`;
+  return undefined;
+}
+
+/** Coarse attributes for ranking (derived, not claimed as product facts). */
+function deriveAttrs(title: string, cents: number): string[] {
+  const a: string[] = [];
+  if (cents) a.push(cents < 3000 ? "budget-friendly" : cents < 15000 ? "mid-range" : "premium");
+  const t = title.toLowerCase();
+  if (/blazer|suit|shirt|tie|dress/.test(t)) a.push("formal");
+  if (/tee|hoodie|casual|sneaker/.test(t)) a.push("casual");
+  if (/keyboard|mouse|usb|wireless|tech|charger|cable/.test(t)) a.push("tech");
+  if (/desk|lamp|mug|home|chair/.test(t)) a.push("home");
+  return a;
+}
+
+function mapProduct(raw: unknown): Product | null {
+  if (!raw || typeof raw !== "object") return null;
+  const p = raw as Raw;
+  const sku = str(p["sku"]) ?? str(p["id"]) ?? str(p["variant_id"]);
+  const title = str(p["title"]) ?? str(p["name"]);
+  if (!sku || !title) return null;
+  if (p["available"] === false) return null;
+  const cents = priceMinor(p);
+  return {
+    sku,
+    title,
+    priceMinor: cents,
+    currency: str(p["currency"]) ?? "USD",
+    merchantId: merchantId(p),
+    image: pickImage(p),
+    ...(productUrl(p) ? { url: productUrl(p) } : {}),
+    tone: "value" as Tone, // replaced by the pitch layer
+    pitch: "",
+    attrs: deriveAttrs(title, cents),
+  };
+}
+
+async function get(path: string): Promise<Raw | null> {
+  const token = process.env.AGNIC_TOKEN;
+  if (!token) return null;
+  try {
+    const resp = await fetch(`${BASE()}${path}`, { headers: { "X-Agnic-Token": token }, signal: AbortSignal.timeout(15000) });
+    if (!resp.ok) return null;
+    return (await resp.json()) as Raw;
+  } catch {
+    return null;
+  }
+}
+
+/** Search the Agnic network for real products. Returns [] on no token / error / no results. */
+export async function searchAgnic(query: string, country = "US", limit = 5): Promise<Product[]> {
+  const q = query.trim();
+  if (!q) return [];
+  const params = new URLSearchParams({ q, country, limit: String(limit) });
+  const data = await get(`/api/autofill/products/search?${params}`);
+  const arr = data && Array.isArray(data["products"]) ? (data["products"] as unknown[]) : [];
+  const out: Product[] = [];
+  for (const r of arr) {
+    const m = mapProduct(r);
+    if (m) out.push(m);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+/** What pairs with what (the mapping is generic; the returned products are real Agnic results). */
+const COMP_MAP: ReadonlyArray<readonly [RegExp, readonly string[]]> = [
+  [/keyboard/i, ["mouse", "mouse pad"]],
+  [/\bmouse\b/i, ["keyboard", "mouse pad"]],
+  [/blazer|jacket|suit/i, ["dress shirt", "tie"]],
+  [/\bshirt/i, ["tie", "cufflinks"]],
+  [/desk\b/i, ["desk lamp", "office chair"]],
+  [/lamp/i, ["desk organizer"]],
+  [/shoe|sneaker|derby|loafer/i, ["socks"]],
+  [/phone|iphone|pixel/i, ["phone case", "charger"]],
+  [/camera/i, ["memory card", "tripod"]],
+  [/laptop|macbook/i, ["laptop sleeve", "wireless mouse"]],
+];
+
+function heuristicComplements(title: string): string[] {
+  for (const [re, c] of COMP_MAP) if (re.test(title)) return [...c];
+  return [];
+}
+
+/** Complement search terms for ANY product, via the LLM, with the map as a floor. */
+async function complementQueries(title: string): Promise<string[]> {
+  const heur = heuristicComplements(title);
+  const key = process.env.OPENROUTER_API_KEY || process.env.OPENROUTER_INFRA_KEY;
+  if (!key) return heur;
+  const model = process.env.AISLE_CHAT_MODEL || "deepseek/deepseek-chat-v3.1";
+  const prompt =
+    `A shopper is buying: "${title}". List 3 DIFFERENT complementary products that genuinely pair with it ` +
+    `(accessories or natural add-ons a store suggests at checkout). Not the same item, not substitutes. ` +
+    `Each is a short, generic search term (2 to 3 words). Return ONLY a minified JSON array of strings.`;
+  try {
+    const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", "HTTP-Referer": "https://aisle.dev", "X-Title": "Aisle" },
+      body: JSON.stringify({ model, max_tokens: 120, temperature: 0.5, messages: [{ role: "user", content: prompt }] }),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!resp.ok) return heur;
+    const data = (await resp.json()) as { choices?: Array<{ message?: { content?: unknown } }> };
+    const c = data.choices?.[0]?.message?.content;
+    if (typeof c !== "string") return heur;
+    const s = c.indexOf("["), e = c.lastIndexOf("]");
+    if (s < 0 || e < s) return heur;
+    const arr = JSON.parse(c.slice(s, e + 1)) as unknown[];
+    const qs = arr.filter((x): x is string => typeof x === "string").map((x) => x.trim()).filter(Boolean).slice(0, 3);
+    return qs.length ? qs : heur;
+  } catch {
+    return heur;
+  }
+}
+
+/** Real complementary products for the checkout moment, pulled from Agnic. Works for any item. */
+export async function searchComplements(product: Product, country = "US"): Promise<Product[]> {
+  const queries = await complementQueries(product.title);
+  if (!queries.length) return [];
+  const found: Product[] = [];
+  const seen = new Set<string>([product.sku]);
+  for (const q of queries.slice(0, 3)) {
+    const r = await searchAgnic(q, country, 2);
+    const pick = r.find((x) => !seen.has(x.sku));
+    if (pick) { seen.add(pick.sku); found.push(pick); }
+  }
+  return found;
+}
