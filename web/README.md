@@ -27,6 +27,11 @@ If the database was already configured from the earlier profile schema, also
 run `supabase/migrations/002_repair_profile_trigger.sql`. It repairs the auth
 trigger and prevents profile metadata problems from blocking signup.
 
+If saving preferences fails with "Could not find the 'profile_context' column …
+in the schema cache", the table predates the preference columns. Run
+`supabase/migrations/003_profile_columns.sql` (adds the columns and reloads the
+API schema cache).
+
 In Supabase Authentication → URL Configuration, add these redirect URLs:
 
 ```text
