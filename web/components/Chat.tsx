@@ -28,7 +28,7 @@ function actionPhrase(payload: { text?: string; action?: AgentRequest["action"] 
   return "";
 }
 
-export default function Chat({ initialPrompt }: { initialPrompt?: string }) {
+export default function Chat({ initialPrompt, profileSeed }: { initialPrompt?: string; profileSeed?: { profile_context?: string | null; profile_tags?: string[] | null } | null }) {
   const [messages, setMessages] = useState<Message[]>([INTRO]);
   const [busy, setBusy] = useState<null | "chat" | "shortlist">(null);
   const [input, setInput] = useState("");
@@ -44,10 +44,14 @@ export default function Chat({ initialPrompt }: { initialPrompt?: string }) {
         stateRef.current.profileTags = Array.isArray(saved.tags) ? saved.tags.filter((x): x is string => typeof x === "string") : [];
         stateRef.current.profileContext = typeof saved.context === "string" ? saved.context : "";
       }
-    } catch {
-      // Ignore malformed local state.
-    }
+    } catch { /* Ignore malformed local state. */ }
   }, []);
+
+  useEffect(() => {
+    if (!profileSeed) return;
+    stateRef.current.profileTags = profileSeed.profile_tags ?? [];
+    stateRef.current.profileContext = profileSeed.profile_context ?? "";
+  }, [profileSeed]);
 
   useEffect(() => {
     streamRef.current?.scrollTo({ top: streamRef.current.scrollHeight, behavior: "smooth" });
@@ -79,6 +83,7 @@ export default function Chat({ initialPrompt }: { initialPrompt?: string }) {
         if (typeof res.profileContext === "string") stateRef.current.profileContext = res.profileContext;
         if (res.profileTags || typeof res.profileContext === "string") {
           localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify({ tags: stateRef.current.profileTags, context: stateRef.current.profileContext }));
+          void fetch("/api/profile", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ profile_context: stateRef.current.profileContext, profile_tags: stateRef.current.profileTags }) });
         }
         setMessages((m) => [...m, { id: "a" + Date.now(), role: "aisle", blocks: res.blocks }]);
       })

@@ -16,7 +16,6 @@ export async function recommendTool(goal: string): Promise<ToolRec | null> {
   const model = process.env.AISLE_CHAT_MODEL || "deepseek/deepseek-chat-v3.1";
   const prompt =
     `A developer wants a SaaS or MCP tool for this goal: "${goal}".\n` +
-    `If the goal names a specific vendor or company, recommend that exact vendor and its own plan. Do not substitute a larger competitor just because the named vendor is less well known. If you cannot verify a real pricing URL, return an empty checkout_url rather than inventing one.\n` +
     `Recommend the SINGLE best-fit, widely-used, reputable tool. Prefer ones with an official MCP server or clean API.\n` +
     `Give its canonical public pricing or checkout URL (a real https URL, no tracking params). Name a sensible starting paid plan and its approximate US price per month in whole dollars (use 0 if it is free or you are unsure). List 2 alternatives. No em dashes.\n` +
     `Return ONLY minified JSON: {"tool_name":"","category":"","checkout_url":"https://...","plan":"","price_usd":0,"has_mcp":true,"why":"<=20 words","alternatives":[{"tool_name":"","why":"<=10 words"},{"tool_name":"","why":"<=10 words"}]}`;

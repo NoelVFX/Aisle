@@ -1,25 +1,7 @@
 import { randomUUID } from "node:crypto";
-
-import type { Order, OrderStatus } from "./order.js";
+import type { MerchantOrderSnapshot, Order, OrderEventRecord, OrderEventSource, OrderStatus } from "./order.js";
+import { OrderEventBus, eventTypeForStatus, makeOrderEvent, type OrderEvent, type OrderEventType } from "./order-events.js";
 import type { OrderStore } from "./order-store.js";
-import {
-  OrderEventBus,
-  type OrderEventType,
-} from "./order-events.js";
-
-const EVENT_FOR_STATUS: Partial<
-  Record<OrderStatus, OrderEventType>
-> = {
-  PENDING: "ORDER_CREATED",
-  CONFIRMED: "ORDER_CONFIRMED",
-  PROCESSING: "ORDER_PROCESSING",
-  SHIPPED: "ORDER_SHIPPED",
-  IN_TRANSIT: "ORDER_IN_TRANSIT",
-  OUT_FOR_DELIVERY: "ORDER_OUT_FOR_DELIVERY",
-  DELIVERED: "ORDER_DELIVERED",
-  CANCELLED: "ORDER_CANCELLED",
-  EXCEPTION: "ORDER_EXCEPTION",
-};
 
 export class OrderTracker {
   constructor(
@@ -27,24 +9,9 @@ export class OrderTracker {
     private readonly events: OrderEventBus,
   ) {}
 
-  async create(order: Order): Promise<Order> {
+  async create(order: Order, source: OrderEventSource = "manual", merchantEventId?: string): Promise<Order> {
     await this.store.create(order);
-
-    const eventType = EVENT_FOR_STATUS[order.status];
-
-    if (eventType !== undefined) {
-      this.events.publish({
-        id: randomUUID(),
-        type: eventType,
-        orderId: order.id,
-        agentId: order.agentId,
-        taskId: order.taskId,
-        status: order.status,
-        timestamp: order.createdAt,
-        order,
-      });
-    }
-
+    await this.publish(makeOrderEvent({ order, source, merchantEventId }));
     return order;
   }
 
@@ -52,43 +19,84 @@ export class OrderTracker {
     return this.store.get(orderId);
   }
 
-  async updateStatus(
-    orderId: string,
-    status: OrderStatus,
-  ): Promise<Order> {
+  async listByTask(taskId: string): Promise<Order[]> {
+    return this.store.listByTask(taskId);
+  }
+
+  async findByMerchantOrder(merchantId: string | undefined, merchantOrderId: string): Promise<Order | undefined> {
+    return this.store.findByMerchantOrder(merchantId, merchantOrderId);
+  }
+
+  async activeOrders(): Promise<Order[]> {
+    return this.store.listActive();
+  }
+
+  async eventsFor(orderId: string, limit = 100): Promise<OrderEventRecord[]> {
+    return this.store.listEvents(orderId, limit);
+  }
+
+  async updateStatus(orderId: string, status: OrderStatus, source: OrderEventSource = "manual", merchantEventId?: string): Promise<Order> {
     const order = await this.store.get(orderId);
+    if (!order) throw new Error(`Order not found: ${orderId}`);
+    if (order.status === status && !merchantEventId) return order;
+    return this.update(order, { status, source, merchantEventId });
+  }
 
-    if (!order) {
-      throw new Error(`Order not found: ${orderId}`);
-    }
+  async ingestMerchantSnapshot(orderId: string, snapshot: MerchantOrderSnapshot, source: OrderEventSource = "merchant_webhook", merchantEventId?: string): Promise<Order> {
+    const order = await this.store.get(orderId);
+    if (!order) throw new Error(`Order not found: ${orderId}`);
+    return this.update(order, {
+      status: snapshot.status,
+      rawStatus: snapshot.rawStatus,
+      merchantOrderId: snapshot.merchantOrderId,
+      merchantOrderNumber: snapshot.merchantOrderNumber,
+      trackingNumber: snapshot.trackingNumber,
+      carrier: snapshot.carrier,
+      trackingUrl: snapshot.trackingUrl,
+      estimatedDelivery: snapshot.estimatedDelivery,
+      lastSyncedAt: snapshot.updatedAt ?? new Date().toISOString(),
+      source,
+      merchantEventId,
+    });
+  }
 
-    if (order.status === status) {
-      return order;
-    }
-
+  private async update(order: Order, change: Partial<Order> & { source: OrderEventSource; merchantEventId?: string }): Promise<Order> {
     const updatedOrder: Order = {
       ...order,
-      status,
+      ...change,
       updatedAt: new Date().toISOString(),
     };
-
+    delete (updatedOrder as Partial<Order> & { source?: unknown }).source;
+    delete (updatedOrder as Partial<Order> & { merchantEventId?: unknown }).merchantEventId;
     await this.store.update(updatedOrder);
-
-    const eventType = EVENT_FOR_STATUS[status];
-
-    if (eventType !== undefined) {
-      this.events.publish({
-        id: randomUUID(),
-        type: eventType,
-        orderId: updatedOrder.id,
-        agentId: updatedOrder.agentId,
-        taskId: updatedOrder.taskId,
-        status: updatedOrder.status,
-        timestamp: updatedOrder.updatedAt,
-        order: updatedOrder,
-      });
-    }
-
+    await this.publish(makeOrderEvent({ order: updatedOrder, source: change.source, merchantEventId: change.merchantEventId, type: eventTypeForStatus(updatedOrder.status) }));
     return updatedOrder;
   }
+
+  private async publish(event: OrderEvent): Promise<void> {
+    if (this.store.recordEvent && !(await this.store.recordEvent(event))) return;
+    this.events.publish(event);
+  }
 }
+
+export const orderFromAgnicReceipt = (input: {
+  receipt: { order_id: string; merchant_id: string; amount_authorized_minor: number; amount_charged_minor?: number; currency: string; status: string };
+  taskId: string;
+}): Order => {
+  const now = new Date().toISOString();
+  return {
+    id: `order_${randomUUID()}`,
+    agentId: "local-agent",
+    taskId: input.taskId,
+    vendor: input.receipt.merchant_id,
+    merchantId: input.receipt.merchant_id,
+    merchantOrderId: input.receipt.order_id,
+    status: "CONFIRMED",
+    rawStatus: input.receipt.status,
+    amount: (input.receipt.amount_charged_minor ?? input.receipt.amount_authorized_minor) / 100,
+    currency: input.receipt.currency,
+    createdAt: now,
+    updatedAt: now,
+    lastSyncedAt: now,
+  };
+};

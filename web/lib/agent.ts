@@ -36,34 +36,6 @@ export function isToolIntent(t: string): boolean {
   return wantsTool && seeking;
 }
 
-/** Requests to buy or compare a named software/vendor plan belong to the SaaS track. */
-export function isVendorPlanIntent(t: string): boolean {
-  return /\b(plan|plans|pricing|subscription|credits?)\b/i.test(t) &&
-    /\b(buy|get|find|show|recommend|compare|from|for|at)\b/i.test(t);
-}
-
-/** Explicitly skip profile setup instead of treating the phrase as a product query. */
-export function isProfileSkip(t: string): boolean {
-  return /\b(skip|skipping|without)\b.*\b(profile|personaliz|personalise|persona)\b/i.test(t) ||
-    /\b(profile|personaliz|personalise|persona)\b.*\b(skip|later|cancel)\b/i.test(t);
-}
-
-/** Keep Aisle focused on commerce rather than turning the chat into a general-purpose LLM. */
-export function isOutOfScope(t: string): boolean {
-  const s = t.trim();
-  if (!s) return false;
-  const research = /\b(research|research paper|economic model|economics|macroeconom|microeconom|gdp|inflation model|literature review|academic)\b/i.test(s);
-  const coding = /\b(write|create|generate|build|debug|explain|review|run)\b.*\b(python|javascript|typescript|java|c\+\+|sql|bash|code|script|program|function|regex)\b/i.test(s) ||
-    /\b(python|javascript|typescript|sql|bash)\b.*\b(code|program|script|function)\b/i.test(s);
-  const math = /\b(calculate|solve|equation|integral|derivative|proof|math problem|mathematics)\b/i.test(s) ||
-    /\d\s*[+*/=-]\s*\d/.test(s);
-  return research || coding || math;
-}
-
-export function outOfScopeResp(): AgentResponse {
-  return { blocks: [{ type: "text", text: "I am Aisle, so I can help discover products, compare options, or find software plans to buy. I cannot write programs, solve math problems, or conduct general research here. Try a shopping prompt such as \"find me a keyboard\" or \"buy a plan from [vendor]\"." }] };
-}
-
 export function profileWanted(t: string): boolean {
   const negated = /\b(skip|no|not|don'?t|without|later|nah|cancel|nevermind|never mind)\b/i.test(t);
   return !negated && (/\b(set ?up|create|edit|update|fill|do)\b.*\bprofile\b/i.test(t) || /\bprofile\b.*\b(set ?up|please)\b/i.test(t) || /about me|personali[sz]e|remember me|tell you about me|my preferences/i.test(t));
@@ -73,7 +45,7 @@ export const forYouWanted = (t: string): boolean => /for you|recommend|surprise 
 
 /** True for product-shopping phrasings. Questions and greetings are handled elsewhere. */
 export function isBrowse(t: string): boolean {
-  if (isSaasIntent(t) || isToolIntent(t) || isVendorPlanIntent(t) || isProfileSkip(t) || isOutOfScope(t)) return false;
+  if (isSaasIntent(t) || isToolIntent(t)) return false;
   if (IMPERATIVE.test(t)) return true; // "find me a keyboard", "show me blazers"
   if (isQuestion(t) || isGreeting(t)) return false; // questions/greetings go to the LLM
   const words = t.trim().split(/\s+/).length;
@@ -103,14 +75,14 @@ export function personaQuery(query: string, tags: string[]): string {
 }
 
 export function profileFormResp(): AgentResponse {
-  return { blocks: [{ type: "text", text: "Happy to tailor things. Tell me as much or as little as you like. It is saved locally and used only by Aisle for recommendations." }, { type: "profileForm" }] };
+  return { blocks: [{ type: "text", text: "Happy to tailor things. Tell me as much or as little as you like. It is saved locally and, when signed in, synced to your private Aisle profile." }, { type: "profileForm" }] };
 }
 
 export function saveProfileResp(tags: string[], about = ""): AgentResponse {
   return {
     blocks: [
       { type: "profileSaved", tags },
-      { type: "text", text: "Saved on your device and used by Aisle to shape what I put first. It is never sent to a merchant. Ask me to show you something." },
+      { type: "text", text: "Saved locally and synced to your private Aisle profile when signed in. It is never sent to a merchant. It just shapes what I put first. Ask me to show you something." },
     ],
     profileTags: tags,
     profileContext: about.trim(),
