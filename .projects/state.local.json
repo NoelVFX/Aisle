@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "project": {
+    "catalog": "prod",
+    "initializedAt": "2026-09-19T19:08:51.583Z",
+    "merchantDisplayName": "Preferences AI",
+    "merchantId": "acct_1TjerbPJmoYyDM2p",
+    "projectId": "project_61VQ6Oz8osojcdMB516Ut2oy1USQ2W0bkDeJyaRVIODw",
+    "projectName": "Anson"
+  },
+  "providers": {
+    "openrouter": {
+      "accountRequestId": "fprvcnn_61VQqXQGAsL8Nw5O016Ut2oy1USQ2W0bkDeJyaRVI31s",
+      "configuration": {},
+      "linkedAt": "2026-09-19T18:01:44.679Z",
+      "providerId": "prvdr_61URImmFACEuDHEx651IO",
+      "providerName": "OpenRouter",
+      "redirectUrl": null,
+      "requestedAt": "2026-09-19T18:01:44.679Z",
+      "status": "complete"
+    }
+  },
+  "resources": {
+    "openrouter-api": {
+      "configuration": {},
+      "createdAt": "2026-09-19T18:02:09.119Z",
+      "lastRevealedAt": null,
+      "lastStatus": "complete",
+      "name": "openrouter-api",
+      "providerId": "prvdr_61URImmFACEuDHEx651IO",
+      "providerName": "OpenRouter",
+      "resourceId": "fres_61VQqXonKYSR5EJbO16Ut2oy1USQ2W0bkDeJyaRVINwe",
+      "serviceId": "api"
+    }
+  }
+}
