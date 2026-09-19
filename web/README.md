@@ -44,8 +44,10 @@ accepts either, but choose the flow you want:
   turn **Confirm email OFF**. Signup then signs the user in immediately. (Re-enable
   it for production.)
 
-- **Send a real 6-digit OTP:** Authentication → Email Templates → **Confirm signup**,
-  and put the token in the body, e.g.
+- **Send a real 6-digit OTP:** requires editing the email template, which Supabase
+  only allows for the project **Owner/Admin** and often only after you configure a
+  **custom SMTP** provider (otherwise the editor is read-only). If you can edit it:
+  Authentication → Email Templates → **Confirm signup**, and put the token in the body, e.g.
 
   ```html
   <h2>Confirm your signup</h2>

@@ -49,11 +49,13 @@ export default function AuthPanel({ email: currentEmail, profile, onProfile, onC
       if (mode === "signup") {
         const parsedBirthYear = Number(birthYear);
         if (!Number.isInteger(parsedBirthYear) || parsedBirthYear < 1900 || parsedBirthYear > new Date().getUTCFullYear()) throw new Error("Enter a valid birth year.");
-        const { error: signupError } = await supabase.auth.signUp({ email: email.trim(), password, options: { emailRedirectTo: `${window.location.origin}/auth/confirm`, data: { username: username.trim(), birth_year: Number(birthYear) } } });
+        const { data: signupData, error: signupError } = await supabase.auth.signUp({ email: email.trim(), password, options: { emailRedirectTo: `${window.location.origin}/auth/confirm`, data: { username: username.trim(), birth_year: Number(birthYear) } } });
         if (signupError) {
           if (/database error saving new user/i.test(signupError.message)) throw new Error("Supabase profile setup is incomplete. Run supabase/migrations/001_profiles.sql and 002_repair_profile_trigger.sql, then try again.");
           throw signupError;
         }
+        // If "Confirm email" is off in Supabase, signUp returns a session and the user is signed in now.
+        if (signupData.session) { await loadProfile(); setNotice("Account created. You are signed in."); return; }
         setNotice("Check your email. Click the confirmation link, or paste the 6-digit code (or the whole link) below."); setMode("verify"); return;
       }
       if (mode === "verify") {
