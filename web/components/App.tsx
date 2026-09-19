@@ -30,8 +30,12 @@ export default function App() {
           if (alive) applyProfile(payload.profile ?? null);
         }
       }).catch(() => {});
-      const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
-        if (!session?.user) { setEmail(undefined); setProfile(null); return; }
+      const { data: listener } = supabase.auth.onAuthStateChange((event, session) => {
+        if (!session?.user) {
+          setEmail(undefined); setProfile(null);
+          if (event === "SIGNED_OUT") { setStarted(false); setInitialPrompt(undefined); setAccountOpen(false); } // back to home
+          return;
+        }
         setEmail(session.user.email);
         void fetch("/api/profile", { cache: "no-store" })
           .then((response) => response.ok ? response.json() as Promise<{ profile?: ProfileRecord | null }> : null)
