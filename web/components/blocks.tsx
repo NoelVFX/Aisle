@@ -106,13 +106,18 @@ function ReceiptCard({ b }: { b: Extract<Block, { type: "receipt" }> }) {
       <div className="receipt-rows">
         {[
           ["Order", r.orderId],
-          ["Charged", money(r.amountMinor, r.currency)],
+          [r.demo ? "Amount" : "Charged", money(r.amountMinor, r.currency)],
           ["Merchant", r.merchantId.replace("m_", "")],
           ["Status", r.status],
         ].map(([k, v]) => (
           <div className="receipt-row" key={k}><span>{k}</span><span className="mono">{v}</span></div>
         ))}
       </div>
+      {r.demo ? (
+        <div className="tag" style={{ marginTop: 14, alignSelf: "center", color: "var(--warn)", borderColor: "color-mix(in srgb, var(--warn) 40%, transparent)" }}>
+          <Lock size={13} weight="fill" /> Simulated in demo mode. No real charge.
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -48,10 +48,15 @@ export default function Chat({ initialPrompt }: { initialPrompt?: string }) {
       payload.action?.kind === "forYou" ||
       payload.action?.kind === "browse" ||
       (!!payload.text && /blazer|keyboard|desk|show me|find me|for you|recommend/i.test(payload.text));
+    // Plain-text transcript so the LLM branch has conversation context.
+    const history = messages.slice(-10).map((m) => ({
+      role: (m.role === "user" ? "user" : "assistant") as "user" | "assistant",
+      content: m.blocks.map((b) => (b.type === "text" ? b.text : `[${b.type === "shortlist" ? "showed options" : b.type}]`)).join(" ").slice(0, 600),
+    }));
     setMessages((m) => [...m, userMsg]);
     setBusy(likelyList ? "shortlist" : "chat");
 
-    const req: AgentRequest = { ...payload, state: { ...stateRef.current } } as AgentRequest;
+    const req: AgentRequest = { ...payload, history, state: { ...stateRef.current } } as AgentRequest;
     fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(req) })
       .then((r) => r.json() as Promise<AgentResponse>)
       .then((res) => {

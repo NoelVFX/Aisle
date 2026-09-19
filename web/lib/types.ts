@@ -34,6 +34,8 @@ export interface Receipt {
   currency: string;
   status: string;
   merchantId: string;
+  /** Demo builds never charge a card; the receipt says so. */
+  demo?: boolean;
 }
 
 /** A rendered unit inside an assistant turn. */
@@ -53,9 +55,16 @@ export interface Message {
   blocks: Block[];
 }
 
+/** Prior turns as plain text, so the LLM branch has conversation context. */
+export interface ChatTurn {
+  role: "user" | "assistant";
+  content: string;
+}
+
 /** What the composer / cards send to the agent. */
 export interface AgentRequest {
   text?: string;
+  history?: ChatTurn[];
   action?:
     | { kind: "pick"; sku: string }
     | { kind: "approve"; sku: string }
