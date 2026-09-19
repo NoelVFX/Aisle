@@ -222,16 +222,19 @@ a { color: inherit; }
 .grid { display: grid; gap: 12px; }
 @media (min-width: 560px) { .grid-2 { grid-template-columns: 1fr 1fr; } }
 
-.product { display: flex; flex-direction: column; text-align: left; cursor: pointer; padding: 0; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-card); overflow: hidden; transition: transform 180ms var(--ease-out), border-color 180ms var(--ease-out); }
+.product { display: flex; flex-direction: column; text-align: left; padding: 0; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-card); overflow: hidden; transition: border-color 180ms var(--ease-out); }
 .product:hover { border-color: var(--border-strong); }
-.product:active { transform: scale(0.985); }
+.product-hit { display: flex; flex-direction: column; text-align: left; cursor: pointer; padding: 0; background: transparent; border: 0; color: inherit; font: inherit; width: 100%; transition: transform 180ms var(--ease-out); }
+.product-hit:active { transform: scale(0.985); }
 .product-img { aspect-ratio: 16 / 10; width: 100%; object-fit: cover; background: var(--surface-3); display: block; }
-.product-info { padding: 12px 13px 13px; display: flex; flex-direction: column; gap: 7px; }
+.product-info { padding: 12px 13px 8px; display: flex; flex-direction: column; gap: 7px; }
 .product-top { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
 .product-title { font-weight: 580; font-size: 14.5px; letter-spacing: -0.006em; }
 .product-price { font-size: 14px; color: var(--text); white-space: nowrap; }
 .pitch { color: var(--text-2); font-size: 13px; line-height: 1.45; }
-.product-foot { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
+.product-foot { display: flex; align-items: center; gap: 8px; padding: 0 13px 12px; flex-wrap: wrap; }
+.product-link { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; font-size: 12px; font-weight: 550; color: var(--accent); text-decoration: none; white-space: nowrap; }
+.product-link:hover { text-decoration: underline; }
 
 /* Tone tag (the A/B pitch arm) */
 .tone { font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; padding: 3px 7px; border-radius: var(--r-pill); border: 1px solid var(--border); color: var(--text-2); }

@@ -7,6 +7,8 @@ export interface Product {
   currency: string;
   merchantId: string;
   image: string;
+  /** Link to the product on the merchant's Shopify storefront (from Agnic), when available. */
+  url?: string;
   tone: Tone;
   pitch: string;
   why?: string;

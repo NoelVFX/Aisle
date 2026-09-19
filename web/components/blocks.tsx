@@ -16,22 +16,29 @@ function ToneTag({ tone }: { tone: Tone }) {
 
 function ProductCard({ p, send }: { p: Product; send: Sender }) {
   return (
-    <button className="product" onClick={() => send({ action: { kind: "pick", product: p } })}>
-      {p.image
-        ? <img className="product-img" src={p.image} alt={p.title} loading="lazy" />
-        : <div className="product-img" />}
-      <div className="product-info">
-        <div className="product-top">
-          <span className="product-title">{p.title}</span>
-          <span className="product-price mono">{money(p.priceMinor, p.currency)}</span>
+    <div className="product">
+      <button className="product-hit" onClick={() => send({ action: { kind: "pick", product: p } })}>
+        {p.image
+          ? <img className="product-img" src={p.image} alt={p.title} loading="lazy" />
+          : <div className="product-img" />}
+        <div className="product-info">
+          <div className="product-top">
+            <span className="product-title">{p.title}</span>
+            <span className="product-price mono">{money(p.priceMinor, p.currency)}</span>
+          </div>
+          <p className="pitch">{p.pitch}</p>
         </div>
-        <p className="pitch">{p.pitch}</p>
-        <div className="product-foot">
-          <ToneTag tone={p.tone} />
-          {p.why ? <span className="tag" style={{ fontSize: 11 }}>{p.why}</span> : null}
-        </div>
+      </button>
+      <div className="product-foot">
+        <ToneTag tone={p.tone} />
+        {p.why ? <span className="tag" style={{ fontSize: 11 }}>{p.why}</span> : null}
+        {p.url ? (
+          <a className="product-link" href={p.url} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>
+            View on Shopify <ArrowSquareOut size={12} weight="bold" />
+          </a>
+        ) : null}
       </div>
-    </button>
+    </div>
   );
 }
 
@@ -56,9 +63,9 @@ function Approval({ b, send }: { b: Extract<Block, { type: "approval" }>; send: 
           {product.image ? <img className="approve-thumb" src={product.image} alt="" /> : <div className="approve-thumb" />}
           <div style={{ minWidth: 0 }}>
             <div style={{ fontWeight: 580, letterSpacing: "-0.01em" }}>{product.title}</div>
-            <div style={{ color: "var(--muted)", fontSize: 12.5, marginTop: 2 }}>
-              <Storefront size={13} style={{ verticalAlign: -2, marginRight: 5 }} />
-              {product.merchantId.replace("m_", "")}
+            <div style={{ color: "var(--muted)", fontSize: 12.5, marginTop: 2, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <span><Storefront size={13} style={{ verticalAlign: -2, marginRight: 5 }} />{product.merchantId.replace("m_", "") || "merchant"}</span>
+              {product.url ? <a className="product-link" href={product.url} target="_blank" rel="noreferrer">View on Shopify <ArrowSquareOut size={12} weight="bold" /></a> : null}
             </div>
           </div>
         </div>
@@ -173,7 +180,7 @@ function ToolRecCard({ b, send }: { b: Extract<Block, { type: "toolRec" }>; send
   );
 }
 
-const PERSONA = ["student", "budget-conscious", "smart-casual", "tech", "minimalist", "premium-seeker"];
+const PERSONA = ["man", "woman", "student", "budget-conscious", "smart-casual", "tech", "minimalist", "premium-seeker"];
 
 function ProfileForm({ send }: { send: Sender }) {
   const [about, setAbout] = useState("");
@@ -212,12 +219,14 @@ function ProfileForm({ send }: { send: Sender }) {
 function deriveTags(about: string): string[] {
   const t = about.toLowerCase();
   const out: string[] = [];
-  if (/student|uni|college/.test(t)) out.push("student");
-  if (/budget|cheap|afford|frugal/.test(t)) out.push("budget-conscious");
-  if (/smart.?casual|business|office/.test(t)) out.push("smart-casual");
-  if (/tech|keyboard|developer|gadget/.test(t)) out.push("tech");
+  if (/\b(man|male|men|guy|boy|dude|he|his|mr)\b/.test(t)) out.push("man");
+  else if (/\b(woman|female|women|girl|lady|she|her|ms|mrs)\b/.test(t)) out.push("woman");
+  if (/student|uni|college|school/.test(t)) out.push("student");
+  if (/budget|cheap|afford|frugal|broke/.test(t)) out.push("budget-conscious");
+  if (/smart.?casual|business|office|formal/.test(t)) out.push("smart-casual");
+  if (/tech|keyboard|developer|gadget|coding|engineer/.test(t)) out.push("tech");
   if (/minimal|simple|clean/.test(t)) out.push("minimalist");
-  if (/premium|luxury|high.?end/.test(t)) out.push("premium-seeker");
+  if (/premium|luxury|high.?end|splurge/.test(t)) out.push("premium-seeker");
   return out.length ? out : ["smart-casual"];
 }
 

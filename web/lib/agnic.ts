@@ -36,6 +36,17 @@ function merchantId(p: Raw): string {
   return (m && typeof m === "object" ? str((m as Raw)["merchant_id"]) ?? str((m as Raw)["id"]) : undefined) ?? str(p["merchant_id"]) ?? str(p["merchantId"]) ?? "";
 }
 
+/** The product's Shopify storefront URL, from a direct field or constructed from a handle. */
+function productUrl(p: Raw): string | undefined {
+  const direct = str(p["url"]) ?? str(p["product_url"]) ?? str(p["productUrl"]) ?? str(p["link"]) ?? str(p["online_store_url"]) ?? str(p["onlineStoreUrl"]) ?? str(p["permalink"]);
+  if (direct && /^https?:\/\//.test(direct)) return direct;
+  const handle = str(p["handle"]) ?? str(p["product_handle"]);
+  const m = p["merchant"];
+  const domain = str(p["domain"]) ?? (m && typeof m === "object" ? str((m as Raw)["domain"]) : undefined);
+  if (handle && domain) return `https://${domain.replace(/^https?:\/\//, "").replace(/\/$/, "")}/products/${handle}`;
+  return undefined;
+}
+
 /** Coarse attributes for ranking (derived, not claimed as product facts). */
 function deriveAttrs(title: string, cents: number): string[] {
   const a: string[] = [];
@@ -63,6 +74,7 @@ function mapProduct(raw: unknown): Product | null {
     currency: str(p["currency"]) ?? "USD",
     merchantId: merchantId(p),
     image: pickImage(p),
+    ...(productUrl(p) ? { url: productUrl(p) } : {}),
     tone: "value" as Tone, // replaced by the pitch layer
     pitch: "",
     attrs: deriveAttrs(title, cents),

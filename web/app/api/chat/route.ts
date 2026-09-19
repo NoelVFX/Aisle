@@ -5,7 +5,7 @@ import { pitchProducts } from "@/lib/pitch";
 import { recommendTool } from "@/lib/recommend";
 import {
   approveResp, cleanQuery, fallbackAnswer, findToolResp, forYouWanted, isBrowse,
-  isGreeting, isSaasIntent, isToolIntent, profileFormResp, profileWanted, saasTopic, saveProfileResp,
+  isGreeting, isSaasIntent, isToolIntent, personaQuery, profileFormResp, profileWanted, saasTopic, saveProfileResp,
 } from "@/lib/agent";
 
 export const runtime = "nodejs";
@@ -53,7 +53,9 @@ async function llmAnswer(history: ChatTurn[], text: string): Promise<string | nu
 
 async function browse(query: string, country: string, tags: string[]): Promise<AgentResponse> {
   if (!agnicConfigured()) return noAgnic;
-  const products = await searchAgnic(query, country, 5);
+  const q = personaQuery(query, tags); // bias by saved persona (e.g. men's) before searching
+  let products = await searchAgnic(q, country, 5);
+  if (!products.length && q !== query) products = await searchAgnic(query, country, 5); // retry unbiased
   if (!products.length) return { blocks: [{ type: "text", text: `I could not find "${query}" in the Agnic network right now. Try different wording, or another item.` }] };
   const pitched = await pitchProducts(products, tags);
   return {

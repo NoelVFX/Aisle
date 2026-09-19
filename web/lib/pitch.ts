@@ -26,7 +26,16 @@ const FALLBACK: Record<Tone, string> = {
 
 function rankForProfile(products: Product[], tags: string[]): Product[] {
   if (!tags.length) return products;
-  return [...products].sort((a, b) => b.attrs.filter((x) => tags.includes(x)).length - a.attrs.filter((x) => tags.includes(x)).length);
+  const men = tags.some((x) => ["mens", "man", "male", "menswear", "men"].includes(x));
+  const women = tags.some((x) => ["womens", "woman", "female", "womenswear", "women"].includes(x));
+  const score = (p: Product) => {
+    let s = p.attrs.filter((x) => tags.includes(x)).length;
+    const t = p.title.toLowerCase();
+    if (men) { if (/\b(women|woman|ladies|female|her)\b/.test(t)) s -= 4; if (/\b(men|man|male|guys?)\b/.test(t)) s += 2; }
+    if (women) { if (/\b(men|man|male|guys?)\b/.test(t)) s -= 4; if (/\b(women|woman|ladies|female)\b/.test(t)) s += 2; }
+    return s;
+  };
+  return [...products].sort((a, b) => score(b) - score(a));
 }
 
 async function llmPitches(items: Product[]): Promise<Map<number, string>> {

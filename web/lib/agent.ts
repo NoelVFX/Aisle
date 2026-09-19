@@ -64,6 +64,16 @@ export function cleanQuery(t: string): string {
     .trim() || t.trim();
 }
 
+/** Bias the search query with the saved persona (mainly gender) so Agnic returns relevant items. */
+export function personaQuery(query: string, tags: string[]): string {
+  const has = (xs: string[]) => xs.some((x) => tags.includes(x));
+  const men = has(["mens", "man", "male", "menswear", "men"]);
+  const women = has(["womens", "woman", "female", "womenswear", "women"]);
+  const g = men ? "men's" : women ? "women's" : "";
+  if (g && !/\b(men'?s|women'?s|man|woman|unisex|kids?)\b/i.test(query)) return `${g} ${query}`;
+  return query;
+}
+
 export function profileFormResp(): AgentResponse {
   return { blocks: [{ type: "text", text: "Happy to tailor things. Tell me as much or as little as you like. It stays on your device." }, { type: "profileForm" }] };
 }
