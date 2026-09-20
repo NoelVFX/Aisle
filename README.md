@@ -1,29 +1,81 @@
 # Aisle
 
-When an AI agent's tool call hits a paywall ("insufficient credits", HTTP 402), Aisle
-pauses the call, works out the smallest one-time top-up that fixes it, asks you for
-**one approval tap**, buys it (through the vendor's MCP purchase tools or in a
-[Steel](https://steel.dev) cloud browser), checks that the balance actually went up,
-and then replays the exact same call. The agent gets its answer as if nothing happened.
+**Aisle is an agentic-checkout commerce agent.** You tell it what you want in plain language;
+it finds *real* products, ranks and pitches them to your taste, gets **one approval**, and
+completes a real merchant checkout, without ever seeing or typing your card. The same engine
+also rescues an AI agent that hits a paywall mid-task: it buys the smallest top-up that clears
+the wall and replays the call.
 
-![Aisle's /browse page with a live Steel browser](docs/images/browse-live.png)
+The repo is two layers that share one philosophy (find → price → one approval → buy → verify):
 
-<table>
-<tr>
-<td width="33%"><img src="docs/images/steel-pick-pack.png" alt="Steel picks the 500-credit pack"></td>
-<td width="33%"><img src="docs/images/steel-checkout.png" alt="Stripe test checkout, total matched against the mandate"></td>
-<td width="33%"><img src="docs/images/steel-paying.png" alt="Deterministic code clicks Pay"></td>
-</tr>
-<tr>
-<td>1. Steel restores the vendor login and picks the pack</td>
-<td>2. Checkout total is checked against the signed mandate</td>
-<td>3. Code (never a model) clicks Pay; balance 200 → 700</td>
-</tr>
-</table>
+1. **Personalized Explore** — the consumer web app in [`web/`](web/): chat with Aisle to buy real
+   Shopify products and SaaS tools. Live demo: **https://aisle-mauve.vercel.app**
+2. **The purchase engine** — the MCP gateway in [`src/`](src/): signed mandates, balance gates,
+   and a fast/slow purchase ladder that make autonomous buying safe. This is the "signed
+   mandates, balance verification, 300+ tests" machinery behind the one-tap checkout.
 
-<sub>Frames from a real run against the Studio demo vendor on Stripe test mode (card 4242, no real money).</sub>
+---
 
-## How it works
+## Personalized Explore (the web app)
+
+A premium chat interface where you talk to the Aisle agent. It surfaces the full
+agentic-checkout experience: personalized discovery, tone-tested pitches, one-tap approval,
+checkout complements, receipts, order tracking, and SaaS tool discovery. Built with
+Next.js (App Router) + Geist, and it ships with a demo agent so it deploys and demos on its own.
+
+| Try this | You get |
+|---|---|
+| "Show me a blazer" / "Find me a keyboard" | A ranked, pitched shortlist, each card in a different tone |
+| Click a product | The approval card: total, vaulted-card mandate, and "frequently bought together" |
+| "Approve and buy" | A verified receipt (demo: nothing is really charged) |
+| "Set up my profile" | Consent-gated persona capture (gender, budget, life stage, style, delivery address) that re-ranks results |
+| "I need an MCP tool that sends email" | A SaaS recommendation with a buyable plan, plus complementary tools |
+| "My For You" | Empty for a first-time user; fills after a purchase |
+| Click "View order" on a receipt | An order-tracking page with a chat to cancel, reschedule, or change the delivery address |
+
+What makes the shortlist yours:
+
+- **Real products, invented only in tone.** Titles, prices, images and SKUs are pulled live
+  from Shopify through **Agnic**; only the one-line pitch on each card is written by the LLM,
+  and it is told not to claim specs the product name does not state.
+- **Budget/persona-dominant ranking.** Your saved profile drives the order: gender-correct
+  items first, then strictly cheapest-first (budget-conscious) or priciest-first
+  (premium-seeker), with attribute overlap as the tiebreak. Tone and pitch copy follow the
+  same stance, so a premium shopper never gets a "value" pitch and vice versa.
+- **Complements for anything.** SaaS plans suggest paired tools; physical goods suggest real
+  Agnic "frequently bought together" items.
+
+### Run it
+
+```bash
+cd web
+npm install
+npm run dev            # http://localhost:3000
+```
+
+Demo mode needs no keys. To light up the real features, set these (in `web/.env.local`, or in
+your Vercel project) — see [`web/README.md`](web/README.md) and [`web/.env.example`](web/.env.example):
+
+| Variable | Enables |
+|---|---|
+| `AGNIC_TOKEN` | Real Shopify product browse (without it, browse says "connect Agnic") |
+| `OPENROUTER_API_KEY` | Intelligent chat + the tone pitches (default model `deepseek/deepseek-chat-v3.1`, override with `AISLE_CHAT_MODEL`) |
+| `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Sign-in and cross-device profile sync |
+| `NEXT_PUBLIC_SITE_URL` | Email-confirmation links that point at your real domain, not localhost |
+
+Auth uses Supabase (cookie sessions via `@supabase/ssr`, with session-refresh middleware). Run
+the SQL in [`supabase/migrations/`](supabase/migrations/) `001` → `005` in the Supabase SQL
+editor; `005_profile_address.sql` adds the delivery-address column.
+
+---
+
+## The purchase engine (MCP gateway)
+
+When an AI agent's tool call hits a paywall ("insufficient credits", HTTP 402), the gateway
+pauses the call, works out the smallest one-time top-up that fixes it, asks for **one approval
+tap**, buys it (through the vendor's MCP purchase tools or in a [Steel](https://steel.dev) cloud
+browser), checks that the balance actually rose, and replays the exact same call. The agent gets
+its answer as if nothing happened.
 
 ```mermaid
 flowchart LR
@@ -40,7 +92,7 @@ flowchart LR
     V -->|result| A
 ```
 
-The rules that keep this safe:
+The rules that keep it safe:
 
 - **Origins come from config** (`src/gateway/upstreams.json`), never from an error body, a page, or a model.
 - **Ceilings:** $50 per purchase, $100 per task, $250 per day (`.env`). One-time packages only, never subscriptions or auto-renew.
@@ -48,9 +100,8 @@ The rules that keep this safe:
 - **Gate 1** (before paying): the checkout total, currency and billing period must match the signed mandate.
 - **Gate 2** (after paying): the vendor's balance must rise. A receipt is not proof.
 - **Never retry after submit.** An unconfirmed purchase is `PURCHASE_UNKNOWN` and blocks a second one.
-- **Aisle's own OpenRouter key** (`OPENROUTER_INFRA_KEY`) is infrastructure and is never topped up.
 
-## Quick start
+### Run the gateway
 
 ```bash
 npm install
@@ -58,140 +109,32 @@ cp .env.example .env          # fill in STEEL_API_KEY, OPENROUTER_INFRA_KEY, ven
 npm run gateway:http          # MCP at :8788/mcp, /browse + approvals at :8787
 ```
 
-Connect your agent:
-
 ```bash
 claude mcp add --transport http aisle http://127.0.0.1:8788/mcp
 codex mcp add aisle --url http://127.0.0.1:8788/mcp     # also set tool_timeout_sec = 300
 ```
 
-Ports are `AISLE_MCP_PORT` / `AISLE_APPROVAL_PORT`; the agent's URL must match them.
+`http://127.0.0.1:8787/browse` is the watch-and-approve page: a live Steel browser on the left,
+the approval card and event timeline on the right. Everything is logged to `.aisle/events.jsonl`.
 
-Then ask the agent, for example:
+MCP tools: `openrouter__chat`, `openai__chat`, `higgsfield__generate_image`,
+`studio__generate_image`, `aisle__wait_for_recovery`, `aisle__spend_report`.
 
-- *"Use the openrouter chat tool to ask openai/gpt-4o-mini: what is 2+2?"*
-- *"Use the aisle higgsfield__generate_image tool to make a picture of a red fox."*
-
-If the vendor says you're out of credits, the tool returns an approval link within a few
-seconds (`AISLE_INITIAL_BLOCK_MS`). Open `/browse`, pick a plan, tap **Approve**, and ask
-the agent to call `aisle__wait_for_recovery` with the `recovery_id`.
-
-## MCP tools
-
-| Tool | What it does |
-|---|---|
-| `openrouter__chat` | OpenRouter chat completion with `OPENROUTER_DEMO_KEY` (a $0 account) |
-| `openai__chat` | OpenAI chat completion with `OPENAI_API_KEY` |
-| `higgsfield__generate_image` | Higgsfield image generation (only when `HIGGSFIELD_API_KEY_ID` + `_SECRET` are set) |
-| `studio__generate_image` | Studio demo vendor (only while `npm run vendor:studio` is running) |
-| `aisle__wait_for_recovery` | Wait for a recovery to finish; returns immediately while it still needs your tap |
-| `aisle__spend_report` | Spend and recoveries for this session |
-
-How the gateway reacts:
-
-| Upstream answer | Aisle |
-|---|---|
-| 402 / `insufficient_credits` / OpenAI `insufficient_quota` | Recovery → tap → buy → verify → replay |
-| 401 (blank or bad key) | Not a billing wall; passed through |
-| 429 rate limit, `Retry-After < 60` | Retry once, never buy |
-
-## Vendors
+### Vendors and the click ladder
 
 | Vendor | Buys on | Status |
 |---|---|---|
-| **Studio** (demo) | `/billing` → Stripe Checkout, test mode | End to end: JSON-LD offers, recorded adapter, test card, balance verified |
-| **OpenRouter** | `openrouter.ai/settings/credits` | Real purchase verified ($0 → $5). Recorded path: Credits → Add Credits → amount → Purchase, saved card |
-| **OpenAI** | `platform.openai.com` billing | Staged only: stops at Gate 1 (`STAGED_NOT_SUBMITTED`) |
-| **Higgsfield** | `higgsfield.ai` avatar menu → top-up | Navigation built, but Higgsfield only offers top-ups to **paid subscribers**; on a Free Plan the run ends `RESOLUTION_EXHAUSTED`. API credits (cloud.higgsfield.ai) may also be a separate balance |
+| **Studio** (demo) | `/billing` → Stripe Checkout, test mode | End to end with card 4242, balance verified |
+| **OpenRouter** | `openrouter.ai/settings/credits` | Real purchase verified ($0 → $5) |
+| **OpenAI** | `platform.openai.com` billing | Staged only: stops at Gate 1 |
+| **Higgsfield** | `higgsfield.ai` top-up | Navigation built; top-ups need a paid subscription |
 
-### OpenRouter in Steel
+A vendor is paid with real money only if it is in `AISLE_REAL_PURCHASE_PROVIDERS`; everyone else
+stops after Gate 1. Aisle never types real card details — the card must already be saved on the
+vendor account. The slow lane climbs a ladder (page JSON-LD → recorded steps → an accessibility
+picker model → a vision fallback, never for the Pay click); see [`docs/steel.md`](docs/steel.md).
 
-<table>
-<tr>
-<td width="33%"><img src="docs/images/openrouter-credits.png" alt="OpenRouter credits page, $4.99 balance"></td>
-<td width="33%"><img src="docs/images/openrouter-pricing.png" alt="OpenRouter pricing and fees"></td>
-<td width="33%"><img src="docs/images/openrouter-purchase.png" alt="Purchase Credits dialog, $5 amount, $5.80 total"></td>
-</tr>
-<tr>
-<td>1. Steel restores the saved login and opens <code>/settings/credits</code></td>
-<td>2. OpenRouter's pricing: Stripe, 5.5% fee ($0.80 minimum)</td>
-<td>3. Amount typed, total $5.80 read and checked against the $6.25 cap</td>
-</tr>
-</table>
-
-<sub>A staged run (submit withheld, nothing bought). Account email, avatar and card details are blurred.</sub>
-
-```
-0.0s   STEEL_SESSION_CREATED
-4.5s   PROFILE_RESTORED            openrouter, loggedIn
-4.5s   ENTITLEMENT_CHECKED         balance 4.99, required 5
-6.5s   OFFER_SELECTED              openrouter_credits_5 ($5)
-14.1s  ADAPTER_REPLAY              tier 2, 4 recorded steps
-43.0s  AMOUNT_ENTERED              5
-43.6s  CHECKOUT_STAGED             $5.80 USD, one_time, autoRenew false
-43.6s  MANDATE_COMPARISON_PASSED   staged 5.80 ≤ cap 6.25
-43.6s  SUBMIT_WITHHELD             Purchase not clicked
-```
-
-With `openrouter` in `AISLE_REAL_PURCHASE_PROVIDERS`, the next step is the deterministic
-**Purchase** click and a balance check (the real run on 2026-09-12 went $0 → $5).
-
-A vendor may be paid with real money only if it's listed in `AISLE_REAL_PURCHASE_PROVIDERS`
-(e.g. `openrouter`). Everyone else stops after Gate 1. Aisle never types real card
-details: the card must already be saved on the vendor account.
-
-## Watching it: `/browse`
-
-`http://127.0.0.1:8787/browse` is the one page you need:
-
-- **Left:** the live Steel browser. During a recovery it switches to the purchase session so you watch the cursor buy.
-- **Right:** the approval card (amount cap, product, billing, ceilings left, plan chooser, Approve/Reject) and the event timeline.
-- **Takeovers:** if the vendor wants a sign-in or 3-D Secure, the viewer becomes interactive for up to 5 minutes, then Aisle continues.
-- **Web path:** click **Connect** on a vendor chip, **Start browsing**, and use the site yourself. A 402 in the page freezes it, the card appears, and after the tap a separate Steel session buys using your live sign-in, then reloads your page.
-
-Visual agents (Claude, ChatGPT) render the same view in chat as an MCP App widget
-(`ui://aisle/recovery.html`). The widget never approves; the tap stays on Aisle's page.
-Everything is logged to `.aisle/events.jsonl`, and each Steel session has a replay in the Steel dashboard.
-
-## Buying in Steel: the click ladder
-
-After approval, a vendor with a `purchase` block in `upstreams.json` runs the slow lane:
-
-1. **Login.** Restore the vendor's Steel profile (or Steel's credentials vault). A login wall becomes a takeover.
-2. **Balance.** Read it from the vendor API, or from the page. Already covered → nothing is bought.
-3. **Tier 1:** offers from the page's JSON-LD, no clicking, no model.
-4. **Tier 2:** replay recorded steps by accessible role and name.
-5. **Tier 3:** the accessibility tree becomes a numbered list; the **picker** model returns one index; code clicks it. Steps that reach checkout are recorded for next time.
-6. **Vision fallback:** if tier 3 stalls, a screenshot-driven computer-use agent gets a small step budget (never for the Pay click).
-7. **Gate 1 → deterministic submit → Gate 2 → replay.**
-
-| Model role | Default (all via OpenRouter, `OPENROUTER_INFRA_KEY`) | Override |
-|---|---|---|
-| Picker (text) | `qwen/qwen3.7-max` → `qwen/qwen3.7-plus` → `nvidia/nemotron-3-super-120b-a12b:free` | `OPENROUTER_PICKER_MODEL` |
-| Vision fallback | `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` | `OPENROUTER_VISION_MODEL` |
-
-Per-vendor knobs in `upstreams.json` handle awkward sites without code changes:
-`offerEntryPath`, `offerRevealSelectors` (e.g. open an avatar menu), `excludeControlsPattern`
-(hide "Upgrade" / "% OFF" bait), `dismissSelectors` (promo popups), `balanceSelectors`,
-`balanceRevealSelector`, `accountPaths`, `loggedInSelector` / `loggedOutSelector`, `loginWallPattern`,
-`paymentOrigins`, `steelCredentials`.
-
-### Steel setup
-
-```bash
-npm run steel:credentials -- openrouter   # store email/password in Steel's vault (Aisle never sees them)
-npm run steel:login -- higgsfield         # or sign a Steel profile in once by hand
-npm run smoke:steel                       # create → CDP → navigate → release → profile READY
-```
-
-- **Profiles** are bound per `(user, vendor)` and restore cookies, storage and autofill. Profile IDs never appear in logs.
-- **Stealth** (humanized input, real fingerprint) is on by default so vendors don't show "unsupported browser". It must match between login and purchase, so re-run `steel:login` if you toggle `AISLE_STEEL_STEALTH=0`.
-- **Proxies and captcha solving** are off unless `AISLE_STEEL_PROXY_CAPTCHA=1` (needs a paid Steel balance).
-
-## Demo end to end: Studio on Stripe test mode
-
-`studio` (`src/demo-vendor/`) is a small real vendor that sells image credits through Stripe
-Checkout in **test mode**, so the full flow runs with card 4242 4242 4242 4242 and no real money.
+### Demo end to end: Studio on Stripe test mode
 
 ```bash
 # .env: STRIPE_SECRET_KEY=sk_test_…   (live keys are refused)
@@ -199,88 +142,61 @@ npm run vendor:studio     # site + cloudflared tunnel; vaults the demo login in 
 npm run gateway:http      # restart so it picks up .aisle/studio.json
 ```
 
-Ask: *"Generate a hero image with the studio tool."* A real run from the log:
-
 ```
 ENTITLEMENT_CHECKED   balance 200, required 400
 QUOTE_CREATED         500 credits at $5 (smallest pack that clears the shortfall)
 APPROVAL_GRANTED
-ADAPTER_REPLAY        tier 2, "Buy 500 credits"
 CHECKOUT_STAGED       $5 USD, one_time, autoRenew false
 MANDATE_COMPARISON_PASSED  staged 5 ≤ cap 6.25
 TEST_CARD_ENTERED     stripe 4242, testMode
 CONFIRM_CLICKED       "Pay", deterministic
 ENTITLEMENT_VERIFIED  before 200, after 700
-SESSION_STATUS        READY_TO_RESUME
 ```
 
-## Using it as a library
+Using the engine as a library (`classifyFailure`, `signMandate`, `runFastLane`, `runSlowLane`, …)
+and host integration are in [INTEGRATION.md](INTEGRATION.md).
 
-```ts
-import {
-  classifyFailure, freezeCheckpoint, lockOrigin, buildQuote, gate, loadLimits,
-  signMandate, runFastLane, runSlowLane, NoFastLaneError,
-} from "aisle";
-
-const classified = classifyFailure(toolError, { provider: "openrouter" });
-const checkpoint = freezeCheckpoint({
-  taskId, toolCallId, tool, arguments: args,
-  origin: lockOrigin("openrouter", upstreams.openrouter),   // never from the error body
-  blocker: classified.blocker,
-});
-const q = buildQuote({ checkpoint, current, offers, perPurchaseCeiling: loadLimits().perPurchase });
-if (q.kind !== "QUOTE") { /* ALREADY_COVERED → replay; NO_VIABLE_OFFER → refuse */ }
-const verdict = gate(q.quote, checkpoint, spend);
-const mandate = signMandate(q.quote, { taskId, recoveryJobId, userId });
-// …user approves…
-try {
-  return await runFastLane({ checkpoint, quote: q.quote, mandate }, { session, store });
-} catch (err) {
-  if (!(err instanceof NoFastLaneError)) throw err;
-  return await runSlowLane({ checkpoint, quote: q.quote, mandate }, { provider, adapter, store, profiles, agent });
-}
-```
-
-Host integration, vendor MCP purchase tools, idempotency and error handling are in
-[INTEGRATION.md](INTEGRATION.md). The recovery session state machine (`PLAN_RECOMMENDED →
-AWAITING_APPROVAL → APPROVED → PURCHASING → PURCHASED → ENTITLEMENT_UPDATED → READY_TO_RESUME`)
-is exported as `recoveryFlow`.
+---
 
 ## Layout
 
 ```
-src/
-├── classifier.ts, interceptor.ts, wakeup-manager.ts   paywall detection → one recovery per requirement
-├── core/  quote/  policy/  mandate/                   checkpoint, quote, ceilings + origin lock, signed mandate
-├── fast-lane/  webmcp/                                buy through a vendor's MCP purchase tools
-├── slow-lane/                                         Steel provider, click-ladder adapter, picker, computer use, profiles
-├── recovery-flow/                                     plans, customer selection, recovery session state machine
-├── gateway/                                           MCP gateway (stdio + HTTP), coordinator, approval page, Steel purchaser, upstreams.json
-├── web/                                               /browse page, browsing session, CDP 402 detector, enrollments
-└── demo-vendor/                                       Studio: Stripe test-mode vendor
-docs/                                                  specs: aisle-pipeline.md, steel.md, web-path.md, SETUP.md
+web/                                   Personalized Explore: Next.js chat app (the shopping agent)
+├── app/                               routes: /, /profile, /order/[id], api/chat, api/order-chat, api/profile
+├── components/                        Chat, ProfileEditor, AuthPanel, product/receipt blocks
+└── lib/                               agent, pitch (ranking + tone), agnic, recommend, supabase
+supabase/migrations/                   profiles schema + repairs (001 → 005)
+src/                                   the purchase engine (MCP gateway)
+├── classifier.ts, interceptor.ts      paywall detection → one recovery per requirement
+├── core/ quote/ policy/ mandate/      checkpoint, quote, ceilings + origin lock, signed mandate
+├── fast-lane/ slow-lane/              vendor MCP purchase tools; Steel click ladder, picker, profiles
+├── recovery-flow/ gateway/            recovery state machine; MCP gateway, /browse, purchaser, upstreams.json
+└── demo-vendor/                       Studio: Stripe test-mode vendor
+docs/                                  specs: aisle-pipeline.md, steel.md, web-path.md, SETUP.md
 ```
 
 ## Commands
 
 ```bash
-npm test                 # vitest
+# web app
+cd web && npm run dev          # or: npm run build
+
+# purchase engine
+npm test                       # vitest
 npm run typecheck
-npm run gateway:http     # HTTP MCP gateway + /browse
-npm run gateway          # stdio MCP gateway
+npm run gateway:http           # HTTP MCP gateway + /browse
+npm run gateway                # stdio MCP gateway
+npm run vendor:studio          # Stripe test-mode demo vendor
 npm run steel:login -- <vendor>
-npm run steel:credentials -- <vendor>
-npm run vendor:studio
 npm run smoke:steel
 ```
 
-All environment variables are in [`.env.example`](.env.example). The specs in [`docs/`](docs/)
-are the source of truth where they disagree with this README.
+Web env is in [`web/.env.example`](web/.env.example); engine env is in [`.env.example`](.env.example).
+The specs in [`docs/`](docs/) are the source of truth where they disagree with this README.
 
 ## Known gaps
 
-- **Higgsfield** needs a paid subscription to show top-ups, and `HIGGSFIELD_CREDITS_URL` has no documented endpoint. Leave it blank so the balance is read from the site.
-- **OpenAI** stays staged-only (`docs/SETUP.md` §4).
-- **Recovery jobs live in memory.** No control plane, SSE stream or Postgres yet; the approval page polls.
-- **No receipt upload or trace export** from Steel sessions.
-- **Profile READY latency is unmeasured**; `waitForProfileReady` defaults to 60s.
+- **Recovery jobs live in memory** in the gateway; no control plane or SSE stream yet (the approval page polls).
+- **OpenAI** stays staged-only; **Higgsfield** needs a paid subscription to show top-ups.
+- In the web app, **browse and sign-in need `AGNIC_TOKEN` and Supabase keys**; without them the app runs in demo mode.
+- No receipt upload or trace export from Steel sessions.
