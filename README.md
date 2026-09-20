@@ -18,6 +18,8 @@ The repo is two layers that share one philosophy (find → price → one approva
 
 ## Personalized Explore (the web app)
 
+![Aisle's chat landing: "Hi user, what do you want to buy today?"](docs/images/web-landing.png)
+
 A premium chat interface where you talk to the Aisle agent. It surfaces the full
 agentic-checkout experience: personalized discovery, tone-tested pitches, one-tap approval,
 checkout complements, receipts, order tracking, and SaaS tool discovery. Built with
