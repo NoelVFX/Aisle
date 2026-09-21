@@ -134,7 +134,7 @@ a { color: inherit; }
 *::-webkit-scrollbar-thumb { background: var(--surface-3); border-radius: 999px; border: 3px solid transparent; background-clip: content-box; }
 
 /* ---- App shell ---- */
-.shell { display: grid; grid-template-columns: 300px 1fr; height: 100dvh; }
+.shell { display: grid; grid-template-columns: 1fr; height: 100dvh; }
 .rail {
   border-right: 1px solid var(--border);
   background: linear-gradient(180deg, rgba(16, 12, 36, 0.66), rgba(11, 8, 25, 0.5));
