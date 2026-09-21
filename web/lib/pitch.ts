@@ -1,6 +1,7 @@
-import type { Product, Tone } from "./types";
+import type { Product, Tone, Signals } from "./types";
 import { money } from "./demoData";
 import { colorFromTags, colorMatches, COLOR_NAMES } from "./colors";
+import { behaviorScore, bestTone, hasHistory } from "./learning";
 
 /**
  * Adds the multi-versioned tone + pitch to REAL Agnic products. The product data
@@ -48,8 +49,9 @@ function readPrefs(tags: string[]): Prefs {
  *  favorite color and attribute overlap suiting each item. When no budget stance is set, the
  *  favorite color leads; when it is, price still dominates and color breaks ties, so a budget
  *  shopper keeps cheapest-first while the shortlist still leans to their color (also via search). */
-function rankForProfile(products: Product[], tags: string[]): Product[] {
-  if (!tags.length) return products;
+function rankForProfile(products: Product[], tags: string[], signals?: Signals): Product[] {
+  const learned = !!signals && hasHistory(signals);
+  if (!tags.length && !learned) return products;
   const { men, women, budget, premium } = readPrefs(tags);
   const color = colorFromTags(tags);
   const gender = (p: Product) => {
@@ -60,6 +62,7 @@ function rankForProfile(products: Product[], tags: string[]): Product[] {
   };
   const attr = (p: Product) => p.attrs.filter((x) => tags.includes(x)).length;
   const colorFit = (p: Product) => (color && (colorMatches(p.title, color) || p.attrs.some((a) => colorMatches(a, color))) ? 1 : 0);
+  const behavior = (p: Product) => (signals ? behaviorScore(p, signals) : 0);
   return [...products].sort((a, b) => {
     const g = gender(b) - gender(a);
     if (g) return g; // 1. correct-gender items first
@@ -68,9 +71,11 @@ function rankForProfile(products: Product[], tags: string[]): Product[] {
     if ((budget || premium) && a.priceMinor > 0 && b.priceMinor > 0 && a.priceMinor !== b.priceMinor) {
       return budget ? a.priceMinor - b.priceMinor : b.priceMinor - a.priceMinor; // 2. price direction dominates
     }
-    const c = colorFit(b) - colorFit(a); // 3. favorite-color match (tiebreak after price)
+    const c = colorFit(b) - colorFit(a); // 3. favorite-color match
     if (c) return c;
-    return attr(b) - attr(a); // 4. attribute overlap
+    const d = behavior(b) - behavior(a); // 4. learned buying patterns (revealed preference + conversion)
+    if (Math.abs(d) > 1e-9) return d;
+    return attr(b) - attr(a); // 5. attribute overlap
   });
 }
 
@@ -149,10 +154,13 @@ async function llmPitches(items: Product[], persona: string, stance: string, col
 
 /** Rank real products for the profile, assign a distinct tone to each, and pitch them
  *  (pitches are tailored to the persona when a profile is present). */
-export async function pitchProducts(products: Product[], profileTags: string[] = [], profileContext = ""): Promise<Product[]> {
+export async function pitchProducts(products: Product[], profileTags: string[] = [], profileContext = "", signals?: Signals): Promise<Product[]> {
   const prefs = readPrefs(profileTags);
-  const tones = tonesFor(prefs);
-  const ranked = rankForProfile(products, profileTags).map((p, i) => ({ ...p, tone: tones[i % tones.length]! }));
+  let tones = tonesFor(prefs);
+  // Tone bandit: once a tone converts best, lead with it and keep the rest for exploration.
+  const winning = signals ? bestTone(signals) : undefined;
+  if (winning) tones = [winning, ...tones.filter((t) => t !== winning)];
+  const ranked = rankForProfile(products, profileTags, signals).map((p, i) => ({ ...p, tone: tones[i % tones.length]! }));
   const pitches = await llmPitches(ranked, personaDescriptor(profileTags, profileContext), budgetStance(prefs), colorFromTags(profileTags) ?? "");
   return ranked.map((p, i) => ({ ...p, pitch: pitches.get(i) || FALLBACK[p.tone] }));
 }

@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
-import type { AgentRequest, AgentResponse, ChatTurn, Product } from "@/lib/types";
+import type { AgentRequest, AgentResponse, ChatTurn, Product, Signals } from "@/lib/types";
 import { searchAgnic, searchComplements, agnicConfigured } from "@/lib/agnic";
 import { pitchProducts } from "@/lib/pitch";
+import { normalizeSignals, learnedTags } from "@/lib/learning";
 import { recommendTool, complementTools } from "@/lib/recommend";
 import {
   approveResp, cleanQuery, fallbackAnswer, findToolResp, forYouWanted, isBrowse,
@@ -54,13 +55,13 @@ async function llmAnswer(history: ChatTurn[], text: string): Promise<string | nu
   }
 }
 
-async function browse(query: string, country: string, tags: string[], context: string): Promise<AgentResponse> {
+async function browse(query: string, country: string, tags: string[], context: string, signals?: Signals): Promise<AgentResponse> {
   if (!agnicConfigured()) return noAgnic;
   const q = personaQuery(query, tags); // bias by saved persona (e.g. men's) before searching
   let products = await searchAgnic(q, country, 5);
   if (!products.length && q !== query) products = await searchAgnic(query, country, 5); // retry unbiased
   if (!products.length) return { blocks: [{ type: "text", text: `I could not find "${query}" in the Agnic network right now. Try different wording, or another item.` }] };
-  const pitched = await pitchProducts(products, tags, context);
+  const pitched = await pitchProducts(products, tags, context, signals);
   return {
     blocks: [
       { type: "text", text: `Here are ${pitched.length}, pulled from Shopify via Agnic and pitched for you. Pick one and I will price it.` },
@@ -100,16 +101,23 @@ async function forYou(state: AgentRequest["state"], country: string): Promise<Ag
   const titles = state.purchasedTitles ?? [];
   if (!titles.length) return { blocks: [{ type: "forYouEmpty" }] };
   if (!agnicConfigured()) return noAgnic;
+  const signals = normalizeSignals(state.learned);
   const seen = new Set(state.purchasedSkus);
   const products: Product[] = [];
-  for (const t of titles.slice(-2)) {
-    for (const p of await searchAgnic(t, country, 3)) if (!seen.has(p.sku)) { seen.add(p.sku); products.push(p); }
+  // Candidates from recent purchases, plus a query built from the shopper's top-converting
+  // attributes/colors so For You follows revealed preference, not just the last title bought.
+  const queries = [...titles.slice(-2)];
+  const lt = learnedTags(signals, 2);
+  if (lt.length) queries.push(lt.join(" "));
+  for (const query of queries) {
+    for (const p of await searchAgnic(query, country, 3)) if (!seen.has(p.sku)) { seen.add(p.sku); products.push(p); }
   }
   if (!products.length) return { blocks: [{ type: "forYouEmpty" }] };
-  const pitched = await pitchProducts(products.slice(0, 3), state.profileTags, state.profileContext ?? "");
+  // pitchProducts re-ranks by the behavioral model, so the best-fit converters surface first.
+  const pitched = (await pitchProducts(products.slice(0, 6), state.profileTags, state.profileContext ?? "", signals)).slice(0, 4);
   return {
     blocks: [
-      { type: "text", text: "Built from what you have bought, pulled fresh from Agnic." },
+      { type: "text", text: "Built from what you have bought and how you shop, pulled fresh from Agnic." },
       { type: "shortlist", heading: "For You", products: pitched },
     ],
   };
@@ -138,7 +146,7 @@ export async function POST(req: Request) {
   if (isBrowse(text)) {
     const g = messageGender(text); // "I want male clothing" -> bias men's even without a saved profile
     const tags = g && !state.profileTags.includes(g) ? [...state.profileTags, g] : state.profileTags;
-    return NextResponse.json(await browse(cleanQuery(text), country, tags, state.profileContext ?? ""));
+    return NextResponse.json(await browse(cleanQuery(text), country, tags, state.profileContext ?? "", normalizeSignals(state.learned)));
   }
 
   if (isGreeting(text)) { await delay(300); }

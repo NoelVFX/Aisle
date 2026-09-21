@@ -1,5 +1,16 @@
 export type Tone = "value" | "aspirational" | "social_proof" | "expert" | "playful";
 
+/** Behavioral learning: per-value tallies of impressions, picks and purchases. */
+export interface Counts { imp: number; pick: number; buy: number }
+export interface Signals {
+  attrs: Record<string, Counts>;
+  colors: Record<string, Counts>;
+  tones: Record<string, Counts>;
+  bands: Record<string, Counts>;
+  merchants: Record<string, Counts>;
+  totals: Counts;
+}
+
 export interface Product {
   sku: string;
   title: string;
@@ -73,7 +84,7 @@ export interface AgentRequest {
     | { kind: "browse"; query?: string }
     | { kind: "saveProfile"; about: string; tags: string[]; budget?: string }
     | { kind: "forYou"; purchasedTitles?: string[] };
-  state: { purchasedSkus: string[]; purchasedTitles?: string[]; profileTags: string[]; profileContext?: string };
+  state: { purchasedSkus: string[]; purchasedTitles?: string[]; profileTags: string[]; profileContext?: string; learned?: Signals };
 }
 
 export interface AgentResponse {

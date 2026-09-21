@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowUp, Sparkle, User } from "@phosphor-icons/react";
-import type { AgentRequest, AgentResponse, Message } from "@/lib/types";
+import type { AgentRequest, AgentResponse, Message, Product, Signals } from "@/lib/types";
+import { emptySignals, normalizeSignals, recordImpressions, recordPick, recordPurchase } from "@/lib/learning";
 import { BlockView, Shimmer, type Sender } from "./blocks";
 
 const INTRO: Message = {
@@ -15,6 +16,7 @@ const INTRO: Message = {
 
 const SUGGESTIONS = ["Show me a blazer", "Find me a keyboard", "Set up my profile", "I need an MCP tool that sends email", "My For You"];
 const PROFILE_STORAGE_KEY = "aisle-profile-v1";
+const SIGNALS_STORAGE_KEY = "aisle-signals-v1";
 
 function actionPhrase(payload: { text?: string; action?: AgentRequest["action"] }): string {
   if (payload.text) return payload.text;
@@ -33,9 +35,14 @@ export default function Chat({ initialPrompt, profileSeed }: { initialPrompt?: s
   const [busy, setBusy] = useState<null | "chat" | "shortlist">(null);
   const [input, setInput] = useState("");
   const stateRef = useRef({ purchasedSkus: [] as string[], purchasedTitles: [] as string[], profileTags: [] as string[], profileContext: "" });
+  const signalsRef = useRef<Signals>(emptySignals());
   const streamRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
   const sentInitial = useRef(false);
+
+  const persistSignals = useCallback(() => {
+    try { localStorage.setItem(SIGNALS_STORAGE_KEY, JSON.stringify(signalsRef.current)); } catch { /* ignore */ }
+  }, []);
 
   useEffect(() => {
     try {
@@ -45,6 +52,7 @@ export default function Chat({ initialPrompt, profileSeed }: { initialPrompt?: s
         stateRef.current.profileContext = typeof saved.context === "string" ? saved.context : "";
       }
     } catch { /* Ignore malformed local state. */ }
+    try { signalsRef.current = normalizeSignals(JSON.parse(localStorage.getItem(SIGNALS_STORAGE_KEY) || "null")); } catch { /* ignore */ }
   }, []);
 
   useEffect(() => {
@@ -70,13 +78,21 @@ export default function Chat({ initialPrompt, profileSeed }: { initialPrompt?: s
       role: (m.role === "user" ? "user" : "assistant") as "user" | "assistant",
       content: m.blocks.map((b) => (b.type === "text" ? b.text : `[${b.type === "shortlist" ? "showed options" : b.type}]`)).join(" ").slice(0, 600),
     }));
+    // Behavioral signals: a pick when a product is chosen for review, a purchase on approval.
+    const act = payload.action;
+    if (act?.kind === "pick") { recordPick(signalsRef.current, act.product); persistSignals(); }
+    if (act?.kind === "approve") { recordPurchase(signalsRef.current, act.product); persistSignals(); }
+
     setMessages((m) => [...m, userMsg]);
     setBusy(likelyList ? "shortlist" : "chat");
 
-    const req: AgentRequest = { ...payload, history, state: { ...stateRef.current } } as AgentRequest;
+    const req: AgentRequest = { ...payload, history, state: { ...stateRef.current, learned: signalsRef.current } } as AgentRequest;
     fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(req) })
       .then((r) => r.json() as Promise<AgentResponse>)
       .then((res) => {
+        // Impressions: every product Aisle actually showed in a shortlist.
+        const shown = res.blocks.flatMap((b) => (b.type === "shortlist" ? b.products : [])) as Product[];
+        if (shown.length) { recordImpressions(signalsRef.current, shown); persistSignals(); }
         if (res.purchasedSku) stateRef.current.purchasedSkus = [...stateRef.current.purchasedSkus, res.purchasedSku];
         if (res.purchasedTitle) stateRef.current.purchasedTitles = [...stateRef.current.purchasedTitles, res.purchasedTitle];
         if (res.profileTags) stateRef.current.profileTags = res.profileTags;
@@ -89,7 +105,7 @@ export default function Chat({ initialPrompt, profileSeed }: { initialPrompt?: s
       })
       .catch(() => setMessages((m) => [...m, { id: "e" + Date.now(), role: "aisle", blocks: [{ type: "text", text: "Something went wrong reaching the agent. Try again in a moment." }] }]))
       .finally(() => setBusy(null));
-  }, [busy]);
+  }, [busy, persistSignals]);
 
   // Auto-send the prompt the user typed on the landing screen, exactly once.
   useEffect(() => {
