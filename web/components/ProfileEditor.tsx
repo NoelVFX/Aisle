@@ -1,7 +1,8 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { ShieldCheck, Lock, MapPin } from "@phosphor-icons/react";
+import { ShieldCheck, Lock } from "@phosphor-icons/react";
+import { PROFILE_COLORS, COLOR_NAMES } from "@/lib/colors";
 
 const PROFILE_STORAGE_KEY = "aisle-profile-v1";
 
@@ -14,19 +15,16 @@ const STYLE = ["smart-casual", "casual", "formal", "minimalist", "sporty", "tech
 export default function ProfileEditor({
   initialTags = [],
   initialContext = "",
-  initialAddress = "",
   onSaved,
   heading = "Your shopping preferences",
 }: {
   initialTags?: string[];
   initialContext?: string;
-  initialAddress?: string;
-  onSaved?: (tags: string[], context: string, address: string) => void;
+  onSaved?: (tags: string[], context: string) => void;
   heading?: string;
 }) {
   const [tags, setTags] = useState<string[]>(initialTags);
   const [about, setAbout] = useState(initialContext);
-  const [address, setAddress] = useState(initialAddress);
   const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [message, setMessage] = useState("");
 
@@ -38,7 +36,7 @@ export default function ProfileEditor({
   ], []);
 
   const groupOf = (opt: string): string[] | null =>
-    GENDER.includes(opt) ? GENDER : BUDGET.includes(opt) ? BUDGET : OCCUPATION.includes(opt) ? OCCUPATION : null;
+    GENDER.includes(opt) ? GENDER : BUDGET.includes(opt) ? BUDGET : OCCUPATION.includes(opt) ? OCCUPATION : COLOR_NAMES.includes(opt) ? COLOR_NAMES : null;
 
   const toggle = (opt: string) => {
     setTags((cur) => {
@@ -52,10 +50,9 @@ export default function ProfileEditor({
   const save = async () => {
     setStatus("saving"); setMessage("");
     const context = about.trim();
-    const addr = address.trim();
-    try { localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify({ tags, context, address: addr })); } catch { /* ignore */ }
+    try { localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify({ tags, context })); } catch { /* ignore */ }
     try {
-      const res = await fetch("/api/profile", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ profile_context: context, profile_tags: tags, profile_address: addr }) });
+      const res = await fetch("/api/profile", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ profile_context: context, profile_tags: tags }) });
       if (res.status === 401) { setStatus("saved"); setMessage("Saved on this device. Sign in to sync it across devices."); }
       else if (!res.ok) {
         let detail = "";
@@ -67,7 +64,7 @@ export default function ProfileEditor({
     } catch {
       setStatus("saved"); setMessage("Saved on this device.");
     }
-    onSaved?.(tags, context, addr);
+    onSaved?.(tags, context);
   };
 
   return (
@@ -84,9 +81,16 @@ export default function ProfileEditor({
         </div>
       ))}
       <div className="field">
-        <label className="label" htmlFor="address"><MapPin size={13} weight="fill" style={{ verticalAlign: "-2px", marginRight: 4, color: "var(--accent)" }} />Location / delivery address (optional)</label>
-        <input id="address" className="input" placeholder="e.g. 128 Rowan Street, Apt 4B, Toronto, ON M5V 2T6" value={address} onChange={(e) => setAddress(e.target.value)} autoComplete="street-address" />
-        <span style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>Used to prefill delivery at checkout. Never shared with a merchant until you approve a purchase.</span>
+        <span className="label">Your favorite color</span>
+        <div className="chips">
+          {PROFILE_COLORS.map((c) => (
+            <button key={c.name} className="chip" aria-pressed={tags.includes(c.name)} onClick={() => toggle(c.name)} style={{ textTransform: "capitalize" }}>
+              <span aria-hidden style={{ display: "inline-block", width: 12, height: 12, borderRadius: "50%", background: c.hex, border: "1px solid rgba(255,255,255,.25)", marginRight: 7, verticalAlign: "-1px" }} />
+              {c.name}
+            </button>
+          ))}
+        </div>
+        <span style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>Aisle leans your shortlist toward this color when it fits the item.</span>
       </div>
       <div className="field">
         <label className="label" htmlFor="about">Anything else (optional)</label>

@@ -1,5 +1,6 @@
 import type { AgentResponse, Block, Product } from "./types";
 import { TOOL_RECS } from "./demoData";
+import { colorFromTags } from "./colors";
 
 /**
  * Intent detection + the synchronous responses (profile, SaaS recommendation, approval
@@ -82,14 +83,19 @@ export function cleanQuery(t: string): string {
   return cleaned || t.trim();
 }
 
-/** Bias the search query with the saved persona (mainly gender) so Agnic returns relevant items. */
+/** Bias the search query with the saved persona (gender + favorite color) so Agnic returns
+ *  items that already suit the shopper. The browse route retries with the raw query if this
+ *  over-constrained search comes back empty. */
 export function personaQuery(query: string, tags: string[]): string {
   const has = (xs: string[]) => xs.some((x) => tags.includes(x));
   const men = has(["mens", "man", "male", "menswear", "men"]);
   const women = has(["womens", "woman", "female", "womenswear", "women"]);
   const g = men ? "men's" : women ? "women's" : "";
-  if (g && !/\b(men'?s|women'?s|man|woman|unisex|kids?)\b/i.test(query)) return `${g} ${query}`;
-  return query;
+  let q = query;
+  if (g && !/\b(men'?s|women'?s|man|woman|unisex|kids?)\b/i.test(q)) q = `${g} ${q}`;
+  const color = colorFromTags(tags);
+  if (color && !new RegExp(`\\b${color}\\b`, "i").test(q)) q = `${color} ${q}`;
+  return q;
 }
 
 export function profileFormResp(): AgentResponse {

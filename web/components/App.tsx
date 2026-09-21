@@ -47,7 +47,7 @@ export default function App() {
 
   const applyProfile = (next: ProfileRecord | null) => {
     setProfile(next);
-    if (next) localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify({ tags: next.profile_tags ?? [], context: next.profile_context ?? "", address: next.profile_address ?? "" }));
+    if (next) localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify({ tags: next.profile_tags ?? [], context: next.profile_context ?? "" }));
   };
 
   return <>

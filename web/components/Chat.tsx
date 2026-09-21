@@ -82,9 +82,7 @@ export default function Chat({ initialPrompt, profileSeed }: { initialPrompt?: s
         if (res.profileTags) stateRef.current.profileTags = res.profileTags;
         if (typeof res.profileContext === "string") stateRef.current.profileContext = res.profileContext;
         if (res.profileTags || typeof res.profileContext === "string") {
-          let addr = "";
-          try { const prev = JSON.parse(localStorage.getItem(PROFILE_STORAGE_KEY) || "null") as { address?: unknown } | null; addr = typeof prev?.address === "string" ? prev.address : ""; } catch { /* ignore */ }
-          localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify({ tags: stateRef.current.profileTags, context: stateRef.current.profileContext, address: addr }));
+          localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify({ tags: stateRef.current.profileTags, context: stateRef.current.profileContext }));
           void fetch("/api/profile", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ profile_context: stateRef.current.profileContext, profile_tags: stateRef.current.profileTags }) });
         }
         setMessages((m) => [...m, { id: "a" + Date.now(), role: "aisle", blocks: res.blocks }]);
