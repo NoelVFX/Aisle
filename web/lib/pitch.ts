@@ -152,6 +152,30 @@ async function llmPitches(items: Product[], persona: string, stance: string, col
   return out;
 }
 
+/** Rank a wide candidate pool, then draw `n` with rank-weighted randomness so the shortlist
+ *  refreshes on every search instead of returning an identical, canned-looking set. The best
+ *  matches still surface most often (heavier weight), and newly-listed store items entering the
+ *  pool get a real chance to appear. Returns the drawn set in preference order (best first). */
+export function selectShortlist(products: Product[], tags: string[], n: number, signals?: Signals): Product[] {
+  const ranked = rankForProfile(products, tags, signals);
+  if (ranked.length <= n) return ranked;
+  const pool = ranked.slice(0, Math.max(n * 3, 12)); // widen beyond the final count
+  const order = new Map(pool.map((p, i) => [p.sku, i]));
+  const weight = (i: number) => 1 / (i + 1.6); // rank 0 heaviest, gentle decay
+  const avail = pool.map((_, i) => i);
+  const chosen: Product[] = [];
+  while (chosen.length < n && avail.length) {
+    let total = 0;
+    for (const i of avail) total += weight(i);
+    let r = Math.random() * total;
+    let k = 0;
+    while (k < avail.length - 1 && (r -= weight(avail[k])) > 0) k++;
+    chosen.push(pool[avail[k]]);
+    avail.splice(k, 1);
+  }
+  return chosen.sort((a, b) => (order.get(a.sku)! - order.get(b.sku)!));
+}
+
 /** Rank real products for the profile, assign a distinct tone to each, and pitch them
  *  (pitches are tailored to the persona when a profile is present). */
 export async function pitchProducts(products: Product[], profileTags: string[] = [], profileContext = "", signals?: Signals): Promise<Product[]> {

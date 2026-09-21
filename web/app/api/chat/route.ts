@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import type { AgentRequest, AgentResponse, ChatTurn, Product, Signals } from "@/lib/types";
 import { searchAgnic, searchComplements, agnicConfigured } from "@/lib/agnic";
-import { pitchProducts } from "@/lib/pitch";
+import { pitchProducts, selectShortlist } from "@/lib/pitch";
 import { normalizeSignals, learnedTags } from "@/lib/learning";
 import { recommendTool, complementTools } from "@/lib/recommend";
 import {
@@ -58,10 +58,12 @@ async function llmAnswer(history: ChatTurn[], text: string): Promise<string | nu
 async function browse(query: string, country: string, tags: string[], context: string, signals?: Signals): Promise<AgentResponse> {
   if (!agnicConfigured()) return noAgnic;
   const q = personaQuery(query, tags); // bias by saved persona (e.g. men's) before searching
-  let products = await searchAgnic(q, country, 5);
-  if (!products.length && q !== query) products = await searchAgnic(query, country, 5); // retry unbiased
+  // Pull a wide pool so the shortlist can refresh each search instead of a fixed top 5.
+  let products = await searchAgnic(q, country, 18);
+  if (!products.length && q !== query) products = await searchAgnic(query, country, 18); // retry unbiased
   if (!products.length) return { blocks: [{ type: "text", text: `I could not find "${query}" in the Agnic network right now. Try different wording, or another item.` }] };
-  const pitched = await pitchProducts(products, tags, context, signals);
+  const picks = selectShortlist(products, tags, 5, signals); // rank, then draw 5 with variety
+  const pitched = await pitchProducts(picks, tags, context, signals);
   return {
     blocks: [
       { type: "text", text: `Here are ${pitched.length}, pulled from Shopify via Agnic and pitched for you. Pick one and I will price it.` },
@@ -110,11 +112,12 @@ async function forYou(state: AgentRequest["state"], country: string): Promise<Ag
   const lt = learnedTags(signals, 2);
   if (lt.length) queries.push(lt.join(" "));
   for (const query of queries) {
-    for (const p of await searchAgnic(query, country, 3)) if (!seen.has(p.sku)) { seen.add(p.sku); products.push(p); }
+    for (const p of await searchAgnic(query, country, 4)) if (!seen.has(p.sku)) { seen.add(p.sku); products.push(p); }
   }
   if (!products.length) return { blocks: [{ type: "forYouEmpty" }] };
-  // pitchProducts re-ranks by the behavioral model, so the best-fit converters surface first.
-  const pitched = (await pitchProducts(products.slice(0, 6), state.profileTags, state.profileContext ?? "", signals)).slice(0, 4);
+  // Draw 4 with variety, then pitch; the behavioral model still surfaces best-fit converters.
+  const picks = selectShortlist(products, state.profileTags, 4, signals);
+  const pitched = await pitchProducts(picks, state.profileTags, state.profileContext ?? "", signals);
   return {
     blocks: [
       { type: "text", text: "Built from what you have bought and how you shop, pulled fresh from Agnic." },
